@@ -5,8 +5,8 @@ import { log } from '../utils/logger.js';
 
 // Tools to remove from env to avoid nesting conflicts
 const CLAUDE_ENV_VARS = [
-  'CLAUDE_CODE_SESSION', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_PACKAGE_DIR',
-  'CLAUDE_DEV_HOST', 'CLAUDE_DEV_PORT',
+  'CLAUDECODE', 'CLAUDE_CODE_SESSION', 'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_PACKAGE_DIR', 'CLAUDE_DEV_HOST', 'CLAUDE_DEV_PORT',
 ];
 
 function cleanEnv(): Record<string, string> {
@@ -42,6 +42,7 @@ export class ClaudeBridge implements CodingAgent {
           systemPrompt: options?.systemPrompt,
           maxTurns: options?.maxTurns ?? this.config.maxTurns,
           model: this.config.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
+          env: cleanEnv(),
         },
       })) {
         if ('result' in message) {
@@ -84,10 +85,11 @@ export class ClaudeBridge implements CodingAgent {
           cwd,
           // Plan mode: read-only tools only
           allowedTools: ['Read', 'Glob', 'Grep', 'Bash'],
-          permissionMode: 'default',
+          permissionMode: 'bypassPermissions',
           systemPrompt: options?.systemPrompt,
           maxTurns: options?.maxTurns ?? 20,
           model: this.config.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
+          env: cleanEnv(),
         },
       })) {
         if ('result' in message) {
@@ -126,12 +128,13 @@ export class ClaudeBridge implements CodingAgent {
         options: {
           cwd,
           allowedTools: ['Read', 'Glob', 'Grep', 'Bash'],
-          permissionMode: 'default',
+          permissionMode: 'bypassPermissions',
           systemPrompt: `You are a senior code reviewer. Review the code changes carefully.
 Focus on: architecture, design patterns, frontend quality, accessibility, UX.
 Output your review as JSON: { "passed": boolean, "issues": [{ "severity": "critical"|"high"|"medium"|"low", "description": string, "file": string, "line": number, "suggestion": string }], "summary": string }`,
           maxTurns: 15,
           model: this.config.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
+          env: cleanEnv(),
         },
       })) {
         if ('result' in message) {

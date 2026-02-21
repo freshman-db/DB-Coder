@@ -7,7 +7,7 @@
     "db-coder": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && rm -rf dist/web && cp -r src/web dist/web",
     "dev": "tsc --watch",
     "start": "node dist/index.js"
   },
