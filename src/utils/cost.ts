@@ -12,11 +12,24 @@ export class CostTracker {
 
   async addCost(taskId: string, costUsd: number): Promise<void> {
     this.sessionCost += costUsd;
-    await this.store.addDailyCost(costUsd);
-    await this.store.updateTask(taskId, {
-      total_cost_usd: undefined, // will use SQL increment below
+
+    const sql = (this.store as unknown as { sql: any }).sql;
+    await sql.begin(async (tx: any) => {
+      await tx`
+        INSERT INTO daily_costs (date, total_cost_usd, task_count)
+        VALUES (CURRENT_DATE, ${costUsd}, 1)
+        ON CONFLICT (date) DO UPDATE SET
+          total_cost_usd = daily_costs.total_cost_usd + ${costUsd},
+          task_count = daily_costs.task_count + 1
+      `;
+
+      await tx`
+        UPDATE tasks
+        SET total_cost_usd = total_cost_usd + ${costUsd},
+            updated_at = NOW()
+        WHERE id = ${taskId}
+      `;
     });
-    // Direct SQL for atomic increment would be better, but updateTask handles partial updates
   }
 
   async checkBudget(taskId: string): Promise<{ allowed: boolean; reason?: string }> {
