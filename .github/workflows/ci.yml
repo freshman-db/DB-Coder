@@ -30,4 +30,5 @@ jobs:
         run: npm run build
 
       - name: Test
-        run: npm test
+        # Run tests directly — skip pretest to avoid rebuilding
+        run: node --test "dist/**/*.test.js"

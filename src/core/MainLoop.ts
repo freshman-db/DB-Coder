@@ -622,7 +622,7 @@ function dedupeIssues(issues: ReviewIssue[]): ReviewIssue[] {
 }
 
 /** Extract issue categories from review issues for structured tracking */
-function extractIssueCategories(issues: ReviewIssue[]): string[] {
+export function extractIssueCategories(issues: ReviewIssue[]): string[] {
   const CATEGORY_PATTERNS: Record<string, RegExp> = {
     'type-error': /type\s*(error|mismatch|incompatible)/i,
     'null-safety': /null|undefined|optional/i,
@@ -639,13 +639,15 @@ function extractIssueCategories(issues: ReviewIssue[]): string[] {
   const categories = new Set<string>();
   for (const issue of issues) {
     const text = `${issue.description} ${issue.suggestion ?? ''}`;
+    let matched = false;
     for (const [cat, pattern] of Object.entries(CATEGORY_PATTERNS)) {
       if (pattern.test(text)) {
         categories.add(cat);
+        matched = true;
       }
     }
-    // Fallback: use severity as category if no pattern matched
-    if (categories.size === 0) {
+    // Fallback: use severity as category if this specific issue matched no pattern
+    if (!matched) {
       categories.add(`severity-${issue.severity}`);
     }
   }

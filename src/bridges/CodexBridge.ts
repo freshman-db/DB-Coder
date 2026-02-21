@@ -11,11 +11,23 @@ export class CodexBridge implements CodingAgent {
 
   constructor(private config: CodexConfig) {}
 
+  /** Map config sandbox value to the corresponding Codex CLI flag */
+  private sandboxFlag(overrideSandbox?: CodexConfig['sandbox']): string {
+    const level = overrideSandbox ?? this.config.sandbox;
+    switch (level) {
+      case 'workspace-read':  return '--read-only';
+      case 'workspace-write': return '--workspace-write';
+      case 'full-auto':       return '--full-auto';
+      default:                return '--workspace-write'; // safe default
+    }
+  }
+
   async execute(prompt: string, cwd: string, options?: {
     systemPrompt?: string;
     maxTurns?: number;
     maxBudget?: number;
     timeout?: number;
+    sandboxOverride?: CodexConfig['sandbox'];
   }): Promise<AgentResult> {
     const start = Date.now();
     const outFile = join(tmpdir(), `codex-${Date.now()}.json`);
@@ -23,7 +35,7 @@ export class CodexBridge implements CodingAgent {
     try {
       const args = [
         'exec',
-        '--full-auto',
+        this.sandboxFlag(options?.sandboxOverride),
         '--json',
         '-o', outFile,
       ];
@@ -86,13 +98,15 @@ export class CodexBridge implements CodingAgent {
     systemPrompt?: string;
     maxTurns?: number;
   }): Promise<AgentResult> {
-    // Codex doesn't have a separate plan mode, so we use execute with read-only instructions
+    // Codex doesn't have a separate plan mode — enforce read-only sandbox
+    // regardless of config so plan never mutates the workspace.
     return this.execute(
       prompt,
       cwd,
       {
         systemPrompt: (options?.systemPrompt ?? '') + '\nIMPORTANT: This is analysis only. Do NOT modify any files. Only read and analyze.',
         timeout: 300_000,
+        sandboxOverride: 'workspace-read',
       },
     );
   }
@@ -108,7 +122,8 @@ Output your review as JSON: { "passed": boolean, "issues": [{ "severity": "criti
 
 ${prompt}`;
 
-      const args = ['exec', '--full-auto', '--json', '-o', outFile, reviewPrompt];
+      // Reviews are read-only — enforce workspace-read regardless of config
+      const args = ['exec', this.sandboxFlag('workspace-read'), '--json', '-o', outFile, reviewPrompt];
 
       const { events } = await spawnWithJsonl('codex', args, {
         cwd,

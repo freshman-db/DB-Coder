@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -69,10 +69,16 @@ function generateApiToken(): string {
 function persistApiToken(path: string, config: DeepPartial<DbCoderConfig>, apiToken: string): void {
   const dir = dirname(path);
   if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
 
-  writeFileSync(path, `${JSON.stringify({ ...config, apiToken }, null, 2)}\n`, 'utf-8');
+  writeFileSync(path, `${JSON.stringify({ ...config, apiToken }, null, 2)}\n`, {
+    encoding: 'utf-8',
+    mode: 0o600,
+  });
+  // Tighten permissions on pre-existing files that may have been created with a
+  // permissive umask (writeFileSync mode only applies when creating a new file).
+  chmodSync(path, 0o600);
 }
 
 export class Config {
