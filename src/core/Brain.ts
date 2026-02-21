@@ -1,3 +1,4 @@
+import type { Config } from '../config/Config.js';
 import type { ClaudeBridge } from '../bridges/ClaudeBridge.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { ProjectMemory } from '../memory/ProjectMemory.js';
@@ -13,6 +14,7 @@ export class Brain {
     private globalMemory: GlobalMemory,
     private projectMemory: ProjectMemory,
     private taskStore: TaskStore,
+    private config?: Config,
   ) {}
 
   async scanProject(
@@ -42,7 +44,8 @@ export class Brain {
     const projectMems = await this.projectMemory.search('architecture structure', 5);
     const allMemories = memories + '\n' + projectMems.map(m => m.text).join('\n');
 
-    const prompt = scanPrompt(projectPath, depth, recentChanges, allMemories);
+    const goalsSection = this.buildGoalsSection();
+    const prompt = scanPrompt(projectPath, depth, recentChanges, allMemories, goalsSection);
     const result = await this.claude.plan(prompt, projectPath, {
       systemPrompt: BRAIN_SYSTEM_PROMPT,
       maxTurns: depth === 'deep' ? 30 : depth === 'normal' ? 20 : 10,
@@ -72,10 +75,23 @@ export class Brain {
     log.info('Creating task plan...');
 
     const memories = await this.globalMemory.getRelevant('task planning prioritization');
-    const existingTasks = await this.taskStore.listTasks(projectPath, 'queued');
-    const existingDesc = existingTasks.map(t => `- [P${t.priority}] ${t.task_description}`).join('\n');
 
-    const prompt = planPrompt(JSON.stringify(analysis, null, 2), memories, existingDesc);
+    // Include all task statuses so LLM knows what's been done/failed
+    const [queued, done, blocked] = await Promise.all([
+      this.taskStore.listTasks(projectPath, 'queued'),
+      this.taskStore.listTasks(projectPath, 'done'),
+      this.taskStore.listTasks(projectPath, 'blocked'),
+    ]);
+    const allTasks = [
+      ...queued.map(t => `- [P${t.priority}] [queued] ${t.task_description}`),
+      ...done.map(t => `- [P${t.priority}] [done] ${t.task_description}`),
+      ...blocked.map(t => `- [P${t.priority}] [blocked] ${t.task_description}`),
+    ].join('\n');
+
+    // Build goals section
+    const goalsSection = this.buildGoalsSection();
+
+    const prompt = planPrompt(JSON.stringify(analysis, null, 2), memories, allTasks, goalsSection);
     const result = await this.claude.plan(prompt, projectPath, {
       systemPrompt: BRAIN_SYSTEM_PROMPT,
     });
@@ -91,10 +107,11 @@ export class Brain {
     taskDescription: string,
     result: string,
     reviewSummary: string,
+    outcome: 'success' | 'failed' | 'blocked_stuck' | 'blocked_max_retries' = 'success',
   ): Promise<{ reflection: ReflectionResult; cost: number }> {
-    log.info('Reflecting on task results...');
+    log.info(`Reflecting on task (outcome=${outcome})...`);
 
-    const prompt = reflectPrompt(taskDescription, result, reviewSummary);
+    const prompt = reflectPrompt(taskDescription, result, reviewSummary, outcome);
     const r = await this.claude.plan(prompt, projectPath, {
       systemPrompt: BRAIN_SYSTEM_PROMPT,
       maxTurns: 5,
@@ -103,25 +120,58 @@ export class Brain {
     const reflection = parseReflection(r.output);
 
     // Save extracted experiences to global memory
+    const savedTitles: string[] = [];
     for (const exp of reflection.experiences) {
+      const category = exp.category === 'failure' ? 'failure' : exp.category;
       await this.globalMemory.add({
-        category: exp.category,
+        category: category as any,
         title: exp.title,
         content: exp.content,
         tags: exp.tags,
         source_project: projectPath,
         confidence: 0.5,
       });
+      savedTitles.push(exp.title);
       log.info(`Saved experience: ${exp.title}`);
     }
 
+    // Adjust confidence of related memories based on outcome
+    try {
+      const relatedMemories = await this.globalMemory.search(taskDescription, 5);
+      const delta = outcome === 'success' ? 0.1 : -0.05;
+      for (const mem of relatedMemories) {
+        if (savedTitles.includes(mem.title)) continue; // skip just-created
+        await this.globalMemory.updateConfidence(mem.id, delta);
+        log.info(`Memory confidence ${delta > 0 ? 'boosted' : 'reduced'}: "${mem.title}" (${delta > 0 ? '+' : ''}${delta})`);
+      }
+    } catch (err) {
+      log.warn(`Confidence update failed: ${err}`);
+    }
+
     // Save task summary to project memory
+    const prefix = outcome === 'success' ? 'Task completed' : `Task ${outcome}`;
     await this.projectMemory.save(
-      `Task completed: ${taskDescription}\n${reflection.taskSummary}`,
+      `${prefix}: ${taskDescription}\n${reflection.taskSummary}`,
       `Task: ${taskDescription.slice(0, 50)}`,
     );
 
     return { reflection, cost: r.cost_usd };
+  }
+
+  private buildGoalsSection(): string {
+    const goals = this.config?.values.evolution?.goals?.filter(g => g.status !== 'done' && g.status !== 'paused') ?? [];
+    if (goals.length === 0) return '';
+
+    const archNotes = this.config?.values.evolution?.architectureNotes;
+    let section = '\n## Evolution Goals\nThe project has the following active evolution goals:\n';
+    for (const g of goals) {
+      section += `- [P${g.priority}] ${g.description}\n`;
+    }
+    if (archNotes) {
+      section += `\nArchitecture direction: ${archNotes}\n`;
+    }
+    section += '\nConsider creating tasks that advance these goals, not just fixing bugs.\n';
+    return section;
   }
 
   async hasChanges(projectPath: string): Promise<boolean> {

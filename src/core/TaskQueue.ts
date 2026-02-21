@@ -13,6 +13,13 @@ export class TaskQueue {
     const sorted = topologicalSort(plan.tasks);
 
     for (const planTask of sorted) {
+      // Dedup: skip if a similar task already exists
+      const similar = await this.store.findSimilarTask(projectPath, planTask.description);
+      if (similar) {
+        log.info(`Skipping duplicate task: "${planTask.description.slice(0, 60)}" (similar to "${similar.task_description.slice(0, 40)}" [${similar.status}])`);
+        continue;
+      }
+
       const task = await this.store.createTask(
         projectPath,
         planTask.description,

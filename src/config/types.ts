@@ -51,6 +51,17 @@ export interface ServerConfig {
   host: string;
 }
 
+export interface EvolutionGoal {
+  description: string;
+  priority: number; // 0-3
+  status?: 'active' | 'paused' | 'done';
+}
+
+export interface EvolutionConfig {
+  goals: EvolutionGoal[];
+  architectureNotes?: string;
+}
+
 export interface DbCoderConfig {
   brain: BrainConfig;
   claude: ClaudeConfig;
@@ -61,6 +72,7 @@ export interface DbCoderConfig {
   memory: MemoryConfig;
   git: GitConfig;
   server: ServerConfig;
+  evolution: EvolutionConfig;
 }
 
 export type DeepPartial<T> = {

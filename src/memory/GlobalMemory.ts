@@ -7,7 +7,7 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 CREATE TABLE IF NOT EXISTS memories (
   id SERIAL PRIMARY KEY,
-  category TEXT NOT NULL CHECK (category IN ('habit','experience','standard','workflow','framework')),
+  category TEXT NOT NULL CHECK (category IN ('habit','experience','standard','workflow','framework','failure')),
   title TEXT NOT NULL,
   content TEXT NOT NULL,
   tags JSONB DEFAULT '[]',
@@ -36,6 +36,15 @@ export class GlobalMemory {
 
   async init(): Promise<void> {
     await this.sql.unsafe(SCHEMA_SQL);
+    // Update CHECK constraint to include 'failure' category (for existing tables)
+    await this.sql.unsafe(`
+      DO $$ BEGIN
+        ALTER TABLE memories DROP CONSTRAINT IF EXISTS memories_category_check;
+        ALTER TABLE memories ADD CONSTRAINT memories_category_check
+          CHECK (category IN ('habit','experience','standard','workflow','framework','failure'));
+      EXCEPTION WHEN OTHERS THEN NULL;
+      END $$;
+    `);
     log.info('GlobalMemory initialized');
   }
 

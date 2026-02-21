@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS daily_costs (
   total_cost_usd NUMERIC(10,4) DEFAULT 0,
   task_count INTEGER DEFAULT 0
 );
+
+CREATE INDEX IF NOT EXISTS idx_tasks_description_trgm ON tasks USING gin (task_description gin_trgm_ops);
 `;
 
 export class TaskStore {
@@ -128,6 +130,19 @@ export class TaskStore {
       SELECT * FROM tasks
       WHERE project_path = ${projectPath} AND status = 'queued'
       ORDER BY priority ASC, created_at ASC
+      LIMIT 1
+    `;
+    return row ?? null;
+  }
+
+  async findSimilarTask(projectPath: string, description: string): Promise<Task | null> {
+    const [row] = await this.sql<Task[]>`
+      SELECT *, similarity(task_description, ${description}) AS sim
+      FROM tasks
+      WHERE project_path = ${projectPath}
+        AND status IN ('queued', 'active', 'done', 'blocked')
+        AND similarity(task_description, ${description}) > 0.4
+      ORDER BY sim DESC
       LIMIT 1
     `;
     return row ?? null;

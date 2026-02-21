@@ -42,7 +42,7 @@ program
 
     const claudeBridge = new ClaudeBridge(claudeConfig);
     const codexBridge = new CodexBridge(codexConfig);
-    const brain = new Brain(claudeBridge, globalMemory, projectMemory, taskStore);
+    const brain = new Brain(claudeBridge, globalMemory, projectMemory, taskStore, config);
     const taskQueue = new TaskQueue(taskStore);
     const costTracker = new CostTracker(taskStore, budget);
     const mainLoop = new MainLoop(config, brain, taskQueue, claudeBridge, codexBridge, taskStore, globalMemory, costTracker);

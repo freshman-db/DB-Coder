@@ -38,7 +38,7 @@ export interface ReflectionResult {
 }
 
 export interface ExtractedExperience {
-  category: 'habit' | 'experience' | 'standard' | 'workflow' | 'framework';
+  category: 'habit' | 'experience' | 'standard' | 'workflow' | 'framework' | 'failure';
   title: string;
   content: string;
   tags: string[];

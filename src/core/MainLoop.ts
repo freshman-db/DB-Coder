@@ -265,7 +265,8 @@ export class MainLoop {
         await this.taskStore.updateTask(task.id, { phase: 'reflecting' });
 
         const allResults = subtasks.map(st => `${st.description}: ${st.status} ${st.result ?? ''}`).join('\n');
-        await this.brain.reflect(projectPath, task.task_description, allResults, reviewResult.summary);
+        const outcome = reviewResult.passed ? 'success' as const : 'blocked_max_retries' as const;
+        await this.brain.reflect(projectPath, task.task_description, allResults, reviewResult.summary, outcome);
 
         // Mark done
         const finalStatus = reviewResult.passed ? 'done' : (task.iteration >= this.config.values.autonomy.maxRetries ? 'blocked' : 'done');
@@ -279,6 +280,15 @@ export class MainLoop {
     } catch (err) {
       log.error(`Task execution error: ${err}`);
       await this.taskStore.updateTask(task.id, { status: 'failed', phase: 'failed' });
+      // Reflect on failure to extract lessons
+      try {
+        await this.brain.reflect(
+          projectPath, task.task_description,
+          `Execution crashed: ${err}`, 'Task failed with exception', 'failed',
+        );
+      } catch (reflectErr) {
+        log.warn(`Reflect after failure failed: ${reflectErr}`);
+      }
     } finally {
       // Return to original branch
       await switchBranch(originalBranch, projectPath).catch(() => {});
@@ -327,6 +337,7 @@ export class MainLoop {
         task.task_description,
         `Subtask "${subtask.description}" failed: ${error}`,
         'Failed during execution',
+        'blocked_stuck',
       );
       if (reflection.adjustments.length > 0) {
         log.info(`Brain suggests: ${reflection.adjustments.join(', ')}`);
@@ -334,8 +345,17 @@ export class MainLoop {
       return true; // Will retry with new insights
     }
 
-    // 3rd failure: skip
+    // 3rd failure: reflect then skip
     log.warn(`Stuck: skipping subtask "${subtask.description}" after ${iteration} attempts`);
+    try {
+      await this.brain.reflect(
+        this.config.projectPath, task.task_description,
+        `Subtask "${subtask.description}" failed ${iteration} times: ${error}`,
+        'Permanently stuck — giving up', 'blocked_stuck',
+      );
+    } catch (reflectErr) {
+      log.warn(`Reflect on stuck failed: ${reflectErr}`);
+    }
     await this.taskStore.updateTask(task.id, { status: 'blocked', phase: 'blocked' });
     return false;
   }
