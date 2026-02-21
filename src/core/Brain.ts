@@ -136,18 +136,59 @@ export class Brain {
   }
 }
 
+/** Extract a balanced JSON object containing requiredKey from LLM output */
+function extractJson(text: string, requiredKey: string, parserName: string): unknown | null {
+  const keyIdx = text.indexOf(`"${requiredKey}"`);
+  if (keyIdx === -1) return null;
+
+  // Walk backward from the key to find the opening brace
+  let start = -1;
+  for (let i = keyIdx - 1; i >= 0; i--) {
+    if (text[i] === '{') { start = i; break; }
+  }
+  if (start === -1) return null;
+
+  // Walk forward counting braces to find the balanced closing brace
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inString) { escape = true; continue; }
+    if (ch === '"' && !escape) { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(start, i + 1));
+        } catch (error) {
+          const rawJson = text.slice(start, i + 1);
+          const snippet = rawJson.length > 400
+            ? `${rawJson.slice(0, 400)}...(truncated)`
+            : rawJson;
+          const reason = error instanceof Error ? error.message : String(error);
+          log.warn(`${parserName}: JSON.parse failed for "${requiredKey}" (${reason}). Raw snippet: ${snippet}`);
+          return null;
+        }
+      }
+    }
+  }
+  log.warn(`extractJson: unbalanced braces for "${requiredKey}"`);
+  return null;
+}
+
 function parseAnalysis(output: string): ProjectAnalysis {
-  const jsonMatch = output.match(/\{[\s\S]*"projectHealth"[\s\S]*\}/);
-  if (jsonMatch) {
-    try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        issues: Array.isArray(parsed.issues) ? parsed.issues : [],
-        opportunities: Array.isArray(parsed.opportunities) ? parsed.opportunities : [],
-        projectHealth: typeof parsed.projectHealth === 'number' ? parsed.projectHealth : 50,
-        summary: parsed.summary ?? output.slice(0, 200),
-      };
-    } catch { /* fall through */ }
+  const parsed = extractJson(output, 'projectHealth', 'parseAnalysis') as Record<string, unknown> | null;
+  if (parsed) {
+    return {
+      issues: Array.isArray(parsed.issues) ? parsed.issues : [],
+      opportunities: Array.isArray(parsed.opportunities) ? parsed.opportunities : [],
+      projectHealth: typeof parsed.projectHealth === 'number' ? parsed.projectHealth : 50,
+      summary: (parsed.summary as string) ?? output.slice(0, 200),
+    };
   }
   return {
     issues: [],
@@ -158,30 +199,24 @@ function parseAnalysis(output: string): ProjectAnalysis {
 }
 
 function parsePlan(output: string): TaskPlan {
-  const jsonMatch = output.match(/\{[\s\S]*"tasks"[\s\S]*\}/);
-  if (jsonMatch) {
-    try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
-        reasoning: parsed.reasoning ?? '',
-      };
-    } catch { /* fall through */ }
+  const parsed = extractJson(output, 'tasks', 'parsePlan') as Record<string, unknown> | null;
+  if (parsed) {
+    return {
+      tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
+      reasoning: (parsed.reasoning as string) ?? '',
+    };
   }
   return { tasks: [], reasoning: output.slice(0, 500) };
 }
 
 function parseReflection(output: string): ReflectionResult {
-  const jsonMatch = output.match(/\{[\s\S]*"experiences"[\s\S]*\}/);
-  if (jsonMatch) {
-    try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        experiences: Array.isArray(parsed.experiences) ? parsed.experiences : [],
-        taskSummary: parsed.taskSummary ?? '',
-        adjustments: Array.isArray(parsed.adjustments) ? parsed.adjustments : [],
-      };
-    } catch { /* fall through */ }
+  const parsed = extractJson(output, 'experiences', 'parseReflection') as Record<string, unknown> | null;
+  if (parsed) {
+    return {
+      experiences: Array.isArray(parsed.experiences) ? parsed.experiences : [],
+      taskSummary: (parsed.taskSummary as string) ?? '',
+      adjustments: Array.isArray(parsed.adjustments) ? parsed.adjustments : [],
+    };
   }
   return { experiences: [], taskSummary: output.slice(0, 200), adjustments: [] };
 }
