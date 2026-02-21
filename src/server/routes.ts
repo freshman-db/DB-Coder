@@ -32,6 +32,11 @@ const memoryCategories: ReadonlySet<MemoryCategory> = new Set([
   'workflow',
   'framework',
 ]);
+const MAX_TASK_DESCRIPTION_LENGTH = 4_000;
+const MAX_MEMORY_CONTENT_LENGTH = 32_000;
+const MAX_MEMORY_TITLE_LENGTH = 200;
+const MAX_MEMORY_TAG_LENGTH = 64;
+const MAX_MEMORY_TAG_COUNT = 20;
 
 interface CreateTaskRequest {
   description: string;
@@ -240,8 +245,16 @@ function validateCreateTaskBody(body: unknown): ValidationResult<CreateTaskReque
   }
 
   const description = body.description;
-  if (typeof description !== 'string' || description.trim().length === 0) {
+  if (typeof description !== 'string') {
     return { ok: false, error: 'description is required and must be a non-empty string.' };
+  }
+
+  const normalizedDescription = description.trim();
+  if (normalizedDescription.length === 0) {
+    return { ok: false, error: 'description is required and must be a non-empty string.' };
+  }
+  if (normalizedDescription.length > MAX_TASK_DESCRIPTION_LENGTH) {
+    return { ok: false, error: `description must be at most ${MAX_TASK_DESCRIPTION_LENGTH} characters.` };
   }
 
   const priority = body.priority;
@@ -256,7 +269,7 @@ function validateCreateTaskBody(body: unknown): ValidationResult<CreateTaskReque
   return {
     ok: true,
     value: {
-      description: description.trim(),
+      description: normalizedDescription,
       ...(normalizedPriority !== undefined ? { priority: normalizedPriority } : {}),
     },
   };
@@ -278,27 +291,56 @@ function validateCreateMemoryBody(body: unknown): ValidationResult<CreateMemoryR
   }
 
   const content = body.content;
-  if (typeof content !== 'string' || content.trim().length === 0) {
+  if (typeof content !== 'string') {
     return { ok: false, error: 'content is required and must be a non-empty string.' };
   }
 
+  const normalizedContent = content.trim();
+  if (normalizedContent.length === 0) {
+    return { ok: false, error: 'content is required and must be a non-empty string.' };
+  }
+  if (normalizedContent.length > MAX_MEMORY_CONTENT_LENGTH) {
+    return { ok: false, error: `content must be at most ${MAX_MEMORY_CONTENT_LENGTH} characters.` };
+  }
+
   const title = body.title;
-  if (title !== undefined && (typeof title !== 'string' || title.trim().length === 0)) {
-    return { ok: false, error: 'title must be a non-empty string when provided.' };
+  let normalizedTitle: string | undefined;
+  if (title !== undefined) {
+    if (typeof title !== 'string') {
+      return { ok: false, error: 'title must be a non-empty string when provided.' };
+    }
+    normalizedTitle = title.trim();
+    if (normalizedTitle.length === 0) {
+      return { ok: false, error: 'title must be a non-empty string when provided.' };
+    }
+    if (normalizedTitle.length > MAX_MEMORY_TITLE_LENGTH) {
+      return { ok: false, error: `title must be at most ${MAX_MEMORY_TITLE_LENGTH} characters.` };
+    }
   }
 
   const tags = body.tags;
-  if (tags !== undefined && (!Array.isArray(tags) || tags.some(tag => typeof tag !== 'string'))) {
-    return { ok: false, error: 'tags must be an array of strings when provided.' };
+  let normalizedTags: string[] | undefined;
+  if (tags !== undefined) {
+    if (!Array.isArray(tags) || tags.some(tag => typeof tag !== 'string')) {
+      return { ok: false, error: 'tags must be an array of strings when provided.' };
+    }
+    if (tags.length > MAX_MEMORY_TAG_COUNT) {
+      return { ok: false, error: `tags must contain at most ${MAX_MEMORY_TAG_COUNT} items.` };
+    }
+
+    normalizedTags = tags.map(tag => tag.trim()).filter(tag => tag.length > 0);
+    if (normalizedTags.some(tag => tag.length > MAX_MEMORY_TAG_LENGTH)) {
+      return { ok: false, error: `each tag must be at most ${MAX_MEMORY_TAG_LENGTH} characters.` };
+    }
   }
 
   return {
     ok: true,
     value: {
       category: normalizedCategory,
-      content: content.trim(),
-      ...(title !== undefined ? { title: title.trim() } : {}),
-      ...(tags !== undefined ? { tags } : {}),
+      content: normalizedContent,
+      ...(normalizedTitle !== undefined ? { title: normalizedTitle } : {}),
+      ...(normalizedTags !== undefined ? { tags: normalizedTags } : {}),
     },
   };
 }
