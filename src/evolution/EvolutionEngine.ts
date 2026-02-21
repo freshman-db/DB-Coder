@@ -43,9 +43,13 @@ export class EvolutionEngine {
       log.info(`Stored adjustment [${category}]: ${text.slice(0, 80)}`);
     }
 
-    // 2. Update effectiveness of active adjustments based on outcome
-    const delta = outcome === 'success' ? 0.1 : -0.05;
-    await this.taskStore.updateAdjustmentEffectiveness(projectPath, delta);
+    // 2. Update effectiveness: task-level adjustments get larger delta, global gets smaller
+    if (taskId) {
+      const taskDelta = outcome === 'success' ? 0.15 : -0.1;
+      await this.taskStore.updateTaskAdjustmentEffectiveness(taskId, taskDelta);
+    }
+    const globalDelta = outcome === 'success' ? 0.05 : -0.02;
+    await this.taskStore.updateAdjustmentEffectiveness(projectPath, globalDelta);
 
     // 3. Supersede weak adjustments
     const superseded = await this.taskStore.supersedeWeakAdjustments(projectPath);
@@ -68,14 +72,16 @@ export class EvolutionEngine {
       .slice(0, 10)
       .map(m => `[${m.category}] ${m.title}: ${m.content}`);
 
-    // Anti-patterns: failure memories + avoidance adjustments
+    // Anti-patterns: failure memories + avoidance adjustments + recurring review issues
     const failureMemories = await this.globalMemory.getByCategory('failure', 10);
     const avoidanceAdj = (await this.taskStore.getActiveAdjustments(projectPath))
       .filter(a => a.category === 'avoidance');
+    const recurringIssues = await this.analyzeRecurringIssues(projectPath).catch(() => [] as string[]);
     const antiPatterns = [
       ...failureMemories.map(m => m.content),
       ...avoidanceAdj.map(a => a.text),
-    ].slice(0, 10);
+      ...recurringIssues,
+    ].slice(0, 15);
 
     // Trend context
     const trendContext = await this.trendAnalyzer.formatTrendSummary(projectPath, windowSize);
@@ -137,6 +143,17 @@ export class EvolutionEngine {
         goal.progress = progressPct;
       }
     }
+  }
+
+  /**
+   * Analyze review events to identify recurring issue patterns.
+   * Returns human-readable descriptions of patterns that appear ≥3 times.
+   */
+  async analyzeRecurringIssues(projectPath: string): Promise<string[]> {
+    const events = await this.taskStore.getRecurringIssueCategories(projectPath, 10);
+    return events
+      .filter(e => e.count >= 3)
+      .map(e => `Recurring issue: "${e.category}" appeared ${e.count} times. Consider addressing root cause.`);
   }
 
   /**

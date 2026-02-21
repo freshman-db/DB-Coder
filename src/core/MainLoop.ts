@@ -7,11 +7,13 @@ import type { TaskStore } from '../memory/TaskStore.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { CostTracker } from '../utils/cost.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
-import type { Task, SubTaskRecord } from '../memory/types.js';
+import type { PluginMonitor } from '../plugins/PluginMonitor.js';
+import type { Task, SubTaskRecord, ReviewEvent } from '../memory/types.js';
 import type { MergedReviewResult, LoopState, PlanTask } from './types.js';
 import type { ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
 import { executorPrompt } from '../prompts/executor.js';
 import { reviewerPrompt } from '../prompts/reviewer.js';
+import { buildAgentGuidance } from '../prompts/agents.js';
 import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch, isWorkingClean, branchExists, getChangedFilesSince } from '../utils/git.js';
 import { log } from '../utils/logger.js';
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
@@ -27,6 +29,8 @@ export class MainLoop {
   private lockFile: string;
 
   private evolutionEngine?: EvolutionEngine;
+  private pluginMonitor?: PluginMonitor;
+  private lastPluginCheck = 0;
 
   constructor(
     private config: Config,
@@ -49,6 +53,10 @@ export class MainLoop {
 
   setEvolutionEngine(engine: EvolutionEngine): void {
     this.evolutionEngine = engine;
+  }
+
+  setPluginMonitor(monitor: PluginMonitor): void {
+    this.pluginMonitor = monitor;
   }
 
   async start(): Promise<void> {
@@ -105,6 +113,19 @@ export class MainLoop {
   /** Run a single scan→plan→execute→review→reflect cycle */
   async runCycle(): Promise<void> {
     const projectPath = this.config.projectPath;
+
+    // Plugin marketplace check (every 24 hours)
+    if (this.pluginMonitor && Date.now() - this.lastPluginCheck > 86400_000) {
+      try {
+        const result = await this.pluginMonitor.checkForUpdates();
+        if (result.newPlugins.length > 0 || result.updatable.length > 0) {
+          log.info(`Plugin updates: ${result.newPlugins.length} new, ${result.updatable.length} updatable`);
+        }
+        this.lastPluginCheck = Date.now();
+      } catch (err) {
+        log.warn(`Plugin check failed: ${err}`);
+      }
+    }
 
     // SCAN
     this.state = 'scanning';
@@ -199,6 +220,7 @@ export class MainLoop {
       const plan = task.plan as PlanTask | null;
       const subtasks = task.subtasks as SubTaskRecord[];
       const standards = await this.globalMemory.getRelevant('coding standards');
+      const stuckAdjustments: string[] = [];
 
       for (const subtask of subtasks) {
         if (subtask.status === 'done') continue;
@@ -246,7 +268,7 @@ export class MainLoop {
           subtask.result = result.output.slice(0, 200);
           log.warn(`Subtask failed: ${subtask.description}`);
           // Attempt retry with stuckHandling
-          const handled = await this.handleStuck(task, subtask, result.output);
+          const handled = await this.handleStuck(task, subtask, result.output, stuckAdjustments);
           if (!handled) break;
         }
 
@@ -267,6 +289,9 @@ export class MainLoop {
         review_results: [...(task.review_results as unknown[] || []), reviewResult],
       });
 
+      // Record initial review event
+      await this.saveReviewEvent(task.id, 0, reviewResult, null);
+
       // Fix-and-re-review loop (in-place, no task re-queue)
       while (!reviewResult.passed && reviewRetries < this.config.values.autonomy.maxRetries) {
         if (!(await this.enforceBudget(task.id))) return;
@@ -274,18 +299,25 @@ export class MainLoop {
         reviewRetries++;
         log.info(`Review found issues (attempt ${reviewRetries}/${this.config.values.autonomy.maxRetries}). Fixing...`);
 
-        const issuesToFix = dedupeIssues([...reviewResult.mustFix, ...reviewResult.shouldFix]);
-        const issueLines = issuesToFix.length > 0
-          ? issuesToFix.map(i => `- [${i.severity}] ${i.description}${i.file ? ` (${i.file}${i.line ? `:${i.line}` : ''})` : ''}${i.suggestion ? `: ${i.suggestion}` : ''}`).join('\n')
-          : `- No structured issues were returned.\n- Review summary: ${reviewResult.summary}`;
-        const fixPrompt = `Fix these review issues:\n${issueLines}`;
-        await this.codex.execute(fixPrompt, projectPath, {});
-        await commitAll('db-coder: fix review issues', projectPath).catch(() => {});
+        // Build rich fix prompt with full context
+        const fixPrompt = await this.buildFixPrompt(task, reviewResult, reviewRetries, stuckAdjustments);
+
+        // Adaptive agent routing: first try Codex, then escalate to Claude
+        const useClaudeForFix = reviewRetries > 1;
+        const fixAgent = useClaudeForFix ? this.claude : this.codex;
+        const fixAgentName = useClaudeForFix ? 'claude' : 'codex';
+        log.info(`Fix attempt ${reviewRetries} using ${fixAgentName}`);
+
+        await fixAgent.execute(fixPrompt, projectPath, {});
+        await commitAll(`db-coder: fix review issues (attempt ${reviewRetries}, ${fixAgentName})`, projectPath).catch(() => {});
 
         if (!(await this.enforceBudget(task.id))) return;
 
         changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
         reviewResult = await this.dualReview(task, changedFiles);
+
+        // Record review event with fix agent info
+        await this.saveReviewEvent(task.id, reviewRetries, reviewResult, fixAgentName);
 
         await this.taskStore.updateTask(task.id, {
           review_results: [...(task.review_results as unknown[] || []), reviewResult],
@@ -298,7 +330,8 @@ export class MainLoop {
 
       const allResults = subtasks.map(st => `${st.description}: ${st.status} ${st.result ?? ''}`).join('\n');
       const outcome = reviewResult.passed ? 'success' as const : 'blocked_max_retries' as const;
-      const { reflection } = await this.brain.reflect(projectPath, task.task_description, allResults, reviewResult.summary, outcome);
+      const retryContext = reviewRetries > 0 ? `\nReview retries: ${reviewRetries}. Stuck adjustments applied: ${stuckAdjustments.length}` : '';
+      const { reflection } = await this.brain.reflect(projectPath, task.task_description, allResults + retryContext, reviewResult.summary, outcome);
 
       // EVOLVE: process adjustments from reflection
       if (this.evolutionEngine && reflection.adjustments.length > 0) {
@@ -344,7 +377,8 @@ export class MainLoop {
   private async dualReview(task: Task, changedFiles: string[]): Promise<MergedReviewResult> {
     const filesStr = changedFiles.join('\n');
     const reviewMcpNames = this.claude.getMcpServerNames('review');
-    const reviewPromptText = reviewerPrompt(task.task_description, filesStr, reviewMcpNames);
+    const agentGuide = buildAgentGuidance('review', this.claude.getLoadedPluginIds());
+    const reviewPromptText = reviewerPrompt(task.task_description, filesStr, reviewMcpNames, agentGuide);
 
     // Run both reviews in parallel
     const [claudeReview, codexReview] = await Promise.all([
@@ -366,8 +400,8 @@ export class MainLoop {
     return mergeReviews(claudeReview, codexReview);
   }
 
-  /** Graduated stuck handling: retry → reflect → skip */
-  private async handleStuck(task: Task, subtask: SubTaskRecord, error: string): Promise<boolean> {
+  /** Graduated stuck handling: retry → reflect → skip. Populates stuckAdjustments for downstream use. */
+  private async handleStuck(task: Task, subtask: SubTaskRecord, error: string, stuckAdjustments: string[]): Promise<boolean> {
     const iteration = task.iteration + 1;
 
     if (iteration === 1) {
@@ -386,6 +420,8 @@ export class MainLoop {
       );
       if (reflection.adjustments.length > 0) {
         log.info(`Brain suggests: ${reflection.adjustments.join(', ')}`);
+        // Inject adjustments into task-level context for immediate use
+        stuckAdjustments.push(...reflection.adjustments);
         // EVOLVE: store stuck adjustments
         if (this.evolutionEngine) {
           try {
@@ -408,6 +444,9 @@ export class MainLoop {
         `Subtask "${subtask.description}" failed ${iteration} times: ${error}`,
         'Permanently stuck — giving up', 'blocked_stuck',
       );
+      if (reflection.adjustments.length > 0) {
+        stuckAdjustments.push(...reflection.adjustments);
+      }
       if (this.evolutionEngine && reflection.adjustments.length > 0) {
         await this.evolutionEngine.processAdjustments(
           this.config.projectPath, task.id, reflection.adjustments, 'blocked_stuck',
@@ -418,6 +457,86 @@ export class MainLoop {
     }
     await this.taskStore.updateTask(task.id, { status: 'blocked', phase: 'blocked' });
     return false;
+  }
+
+  /** Build a rich fix prompt with task context, previous attempts, and learned patterns */
+  private async buildFixPrompt(
+    task: Task,
+    reviewResult: MergedReviewResult,
+    attempt: number,
+    stuckAdjustments: string[],
+  ): Promise<string> {
+    const issuesToFix = dedupeIssues([...reviewResult.mustFix, ...reviewResult.shouldFix]);
+    const issueLines = issuesToFix.length > 0
+      ? issuesToFix.map(i => `- [${i.severity}] ${i.description}${i.file ? ` (${i.file}${i.line ? `:${i.line}` : ''})` : ''}${i.suggestion ? `: ${i.suggestion}` : ''}`).join('\n')
+      : `- No structured issues were returned.\n- Review summary: ${reviewResult.summary}`;
+
+    // Previous review attempts summary
+    const prevResults = (task.review_results as MergedReviewResult[] || []).slice(-2);
+    const previousAttempts = prevResults
+      .map((r, i) => `Attempt ${i + 1}: ${r.passed ? 'PASSED' : 'FAILED'} — ${r.summary?.slice(0, 200)}`)
+      .join('\n');
+
+    // Coding standards from memory
+    const standards = await this.globalMemory.getRelevant('coding standards').catch(() => null);
+
+    // Active adjustments from evolution engine
+    let activeAdj: string[] = [];
+    if (this.evolutionEngine) {
+      try {
+        const ctx = await this.evolutionEngine.synthesizePromptContext(this.config.projectPath);
+        activeAdj = ctx.activeAdjustments;
+      } catch { /* ignore */ }
+    }
+
+    const stuckContext = stuckAdjustments.length > 0
+      ? `\n## Lessons from Previous Failures\n${stuckAdjustments.map(a => `- ${a}`).join('\n')}`
+      : '';
+
+    return `You are fixing review issues for a coding task.
+
+## Task Description
+${task.task_description}
+
+## Coding Standards
+${standards || 'Follow best practices.'}
+
+## Previous Review Attempts
+${previousAttempts || 'First attempt.'}
+
+## Current Issues to Fix (Attempt ${attempt})
+${issueLines}
+
+${activeAdj.length > 0 ? `## Learned Patterns\n${activeAdj.join('\n')}` : ''}${stuckContext}
+
+Fix these issues while maintaining code quality. Do not introduce new issues.`;
+  }
+
+  /** Record a structured review event */
+  private async saveReviewEvent(
+    taskId: string,
+    attempt: number,
+    result: MergedReviewResult,
+    fixAgent: string | null,
+  ): Promise<void> {
+    try {
+      const allIssues = [...result.mustFix, ...result.shouldFix];
+      const categories = extractIssueCategories(allIssues);
+
+      await this.taskStore.saveReviewEvent({
+        task_id: taskId,
+        attempt,
+        passed: result.passed,
+        must_fix_count: result.mustFix.length,
+        should_fix_count: result.shouldFix.length,
+        issue_categories: categories,
+        fix_agent: fixAgent,
+        duration_ms: null,
+        cost_usd: 0,
+      });
+    } catch (err) {
+      log.warn(`Failed to save review event: ${err}`);
+    }
   }
 
   private acquireLock(): boolean {
@@ -500,6 +619,37 @@ function dedupeIssues(issues: ReviewIssue[]): ReviewIssue[] {
       seen.add(key);
       return true;
     });
+}
+
+/** Extract issue categories from review issues for structured tracking */
+function extractIssueCategories(issues: ReviewIssue[]): string[] {
+  const CATEGORY_PATTERNS: Record<string, RegExp> = {
+    'type-error': /type\s*(error|mismatch|incompatible)/i,
+    'null-safety': /null|undefined|optional/i,
+    'error-handling': /error\s*handl|try.catch|exception/i,
+    'security': /security|injection|xss|csrf|sanitiz/i,
+    'performance': /performance|slow|memory\s*leak|O\(n/i,
+    'code-style': /style|format|naming|convention|lint/i,
+    'logic-error': /logic|incorrect|wrong|bug/i,
+    'missing-test': /test|coverage|assert/i,
+    'import': /import|require|module|dependency/i,
+    'api-design': /api|interface|contract|signature/i,
+  };
+
+  const categories = new Set<string>();
+  for (const issue of issues) {
+    const text = `${issue.description} ${issue.suggestion ?? ''}`;
+    for (const [cat, pattern] of Object.entries(CATEGORY_PATTERNS)) {
+      if (pattern.test(text)) {
+        categories.add(cat);
+      }
+    }
+    // Fallback: use severity as category if no pattern matched
+    if (categories.size === 0) {
+      categories.add(`severity-${issue.severity}`);
+    }
+  }
+  return [...categories];
 }
 
 function sleep(ms: number): Promise<void> {

@@ -6,6 +6,7 @@ import type { MemoryCategory } from '../memory/types.js';
 import type { CostTracker } from '../utils/cost.js';
 import type { Config } from '../config/Config.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
+import type { PluginMonitor } from '../plugins/PluginMonitor.js';
 import { log, type LogEntry } from '../utils/logger.js';
 
 interface RouteContext {
@@ -15,6 +16,7 @@ interface RouteContext {
   costTracker: CostTracker;
   config: Config;
   evolutionEngine?: EvolutionEngine;
+  pluginMonitor?: PluginMonitor;
 }
 
 type RouteHandler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext, params: Record<string, string>) => Promise<void>;
@@ -34,6 +36,7 @@ const memoryCategories: ReadonlySet<MemoryCategory> = new Set([
   'workflow',
   'framework',
   'failure',
+  'simplification',
 ]);
 const MAX_TASK_DESCRIPTION_LENGTH = 4_000;
 const MAX_MEMORY_CONTENT_LENGTH = 32_000;
@@ -240,11 +243,55 @@ route('POST', '/api/evolution/proposals/:id/apply', async (_req, res, ctx, param
   json(res, { ok: true, status: 'applied' });
 });
 
+route('GET', '/api/evolution/review-patterns', async (_req, res, ctx) => {
+  if (!ctx.evolutionEngine) { json(res, { error: 'Evolution engine not available' }, 503); return; }
+  const patterns = await ctx.evolutionEngine.analyzeRecurringIssues(ctx.config.projectPath);
+  const categories = await ctx.taskStore.getRecurringIssueCategories(ctx.config.projectPath, 20);
+  json(res, { patterns, categories });
+});
+
 route('POST', '/api/evolution/proposals/:id/reject', async (_req, res, ctx, params) => {
   const id = parseInt(params.id, 10);
   if (isNaN(id)) { json(res, { error: 'Invalid proposal ID' }, 400); return; }
   await ctx.taskStore.updateProposalStatus(id, 'rejected');
   json(res, { ok: true, status: 'rejected' });
+});
+
+// --- Plugins ---
+route('GET', '/api/plugins', async (_req, res, ctx) => {
+  if (!ctx.pluginMonitor) { json(res, { error: 'Plugin monitor not available' }, 503); return; }
+  const result = await ctx.pluginMonitor.checkForUpdates();
+  json(res, result);
+});
+
+route('GET', '/api/plugins/updates', async (_req, res, ctx) => {
+  if (!ctx.pluginMonitor) { json(res, { error: 'Plugin monitor not available' }, 503); return; }
+  const result = await ctx.pluginMonitor.checkForUpdates();
+  json(res, { newPlugins: result.newPlugins, updatable: result.updatable, checkedAt: result.checkedAt });
+});
+
+route('POST', '/api/plugins/:name/install', async (_req, res, ctx, params) => {
+  if (!ctx.pluginMonitor) { json(res, { error: 'Plugin monitor not available' }, 503); return; }
+  const ok = await ctx.pluginMonitor.installPlugin(params.name);
+  json(res, { ok, plugin: params.name }, ok ? 200 : 500);
+});
+
+route('POST', '/api/plugins/:name/update', async (_req, res, ctx, params) => {
+  if (!ctx.pluginMonitor) { json(res, { error: 'Plugin monitor not available' }, 503); return; }
+  const ok = await ctx.pluginMonitor.updatePlugin(params.name);
+  json(res, { ok, plugin: params.name }, ok ? 200 : 500);
+});
+
+route('POST', '/api/plugins/:name/enable', async (_req, res, ctx, params) => {
+  if (!ctx.pluginMonitor) { json(res, { error: 'Plugin monitor not available' }, 503); return; }
+  const ok = await ctx.pluginMonitor.enablePlugin(params.name);
+  json(res, { ok, plugin: params.name }, ok ? 200 : 500);
+});
+
+route('POST', '/api/plugins/:name/disable', async (_req, res, ctx, params) => {
+  if (!ctx.pluginMonitor) { json(res, { error: 'Plugin monitor not available' }, 503); return; }
+  const ok = await ctx.pluginMonitor.disablePlugin(params.name);
+  json(res, { ok, plugin: params.name }, ok ? 200 : 500);
 });
 
 // --- Route matching ---
@@ -396,7 +443,7 @@ function validateCreateMemoryBody(body: unknown): ValidationResult<CreateMemoryR
 
   const normalizedCategory = category.trim();
   if (!isMemoryCategory(normalizedCategory)) {
-    return { ok: false, error: 'category must be one of: habit, experience, standard, workflow, framework, failure.' };
+    return { ok: false, error: 'category must be one of: habit, experience, standard, workflow, framework, failure, simplification.' };
   }
 
   const content = body.content;

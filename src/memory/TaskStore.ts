@@ -1,5 +1,5 @@
 import postgres from 'postgres';
-import type { Task, TaskLog, TaskStatus, ScanResult } from './types.js';
+import type { Task, TaskLog, TaskStatus, ScanResult, ReviewEvent, RecurringIssueCategory } from './types.js';
 import type { Adjustment, AdjustmentCategory, AdjustmentStatus, GoalProgress, ConfigProposal, ProposalStatus } from '../evolution/types.js';
 import { log } from '../utils/logger.js';
 
@@ -84,6 +84,20 @@ CREATE TABLE IF NOT EXISTS config_proposals (
   reason TEXT NOT NULL DEFAULT '',
   confidence REAL DEFAULT 0.5,
   status TEXT NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS review_events (
+  id SERIAL PRIMARY KEY,
+  task_id UUID REFERENCES tasks(id) ON DELETE CASCADE,
+  attempt INTEGER NOT NULL,
+  passed BOOLEAN NOT NULL,
+  must_fix_count INTEGER DEFAULT 0,
+  should_fix_count INTEGER DEFAULT 0,
+  issue_categories JSONB DEFAULT '[]',
+  fix_agent TEXT,
+  duration_ms INTEGER,
+  cost_usd NUMERIC(10,4) DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `;
@@ -372,6 +386,45 @@ export class TaskStore {
       WHERE project_path = ${projectPath}
       ORDER BY created_at DESC
       LIMIT ${limit}
+    `;
+  }
+
+  // --- Review Events ---
+
+  async saveReviewEvent(event: Omit<ReviewEvent, 'id' | 'created_at'>): Promise<void> {
+    await this.sql`
+      INSERT INTO review_events (task_id, attempt, passed, must_fix_count, should_fix_count, issue_categories, fix_agent, duration_ms, cost_usd)
+      VALUES (${event.task_id}, ${event.attempt}, ${event.passed}, ${event.must_fix_count},
+              ${event.should_fix_count}, ${this.sql.json(event.issue_categories as any)},
+              ${event.fix_agent}, ${event.duration_ms}, ${event.cost_usd})
+    `;
+  }
+
+  async getReviewEvents(taskId: string): Promise<ReviewEvent[]> {
+    return this.sql<ReviewEvent[]>`
+      SELECT * FROM review_events WHERE task_id = ${taskId} ORDER BY attempt ASC
+    `;
+  }
+
+  async getRecurringIssueCategories(projectPath: string, limit = 10): Promise<RecurringIssueCategory[]> {
+    return this.sql<RecurringIssueCategory[]>`
+      SELECT cat AS category, COUNT(*)::int AS count
+      FROM review_events re
+      JOIN tasks t ON t.id = re.task_id,
+      jsonb_array_elements_text(re.issue_categories) AS cat
+      WHERE t.project_path = ${projectPath}
+      GROUP BY cat
+      ORDER BY count DESC
+      LIMIT ${limit}
+    `;
+  }
+
+  async updateTaskAdjustmentEffectiveness(taskId: string, delta: number): Promise<void> {
+    await this.sql`
+      UPDATE adjustments
+      SET effectiveness = LEAST(1.0, GREATEST(-1.0, effectiveness + ${delta})),
+          updated_at = NOW()
+      WHERE task_id = ${taskId} AND status = 'active'
     `;
   }
 

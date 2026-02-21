@@ -1,4 +1,4 @@
-export type MemoryCategory = 'habit' | 'experience' | 'standard' | 'workflow' | 'framework' | 'failure';
+export type MemoryCategory = 'habit' | 'experience' | 'standard' | 'workflow' | 'framework' | 'failure' | 'simplification';
 
 export interface Memory {
   id: number;
@@ -53,6 +53,25 @@ export interface TaskLog {
   created_at: Date;
 }
 
+export interface ReviewEvent {
+  id: number;
+  task_id: string;
+  attempt: number;
+  passed: boolean;
+  must_fix_count: number;
+  should_fix_count: number;
+  issue_categories: string[];
+  fix_agent: string | null;
+  duration_ms: number | null;
+  cost_usd: number;
+  created_at: Date;
+}
+
+export interface RecurringIssueCategory {
+  category: string;
+  count: number;
+}
+
 export interface ScanResult {
   id: number;
   project_path: string;
@@ -64,11 +83,34 @@ export interface ScanResult {
   created_at: Date;
 }
 
+export interface CodeMetrics {
+  typeErrors: number;
+  longFunctions: Array<{ file: string; name: string; lines: number }>;
+  duplicatePatterns: Array<{ files: string[]; description: string }>;
+  deadCode: Array<{ file: string; description: string }>;
+}
+
+export interface SimplificationTarget {
+  file: string;
+  description: string;
+  complexity: string;
+  suggestion: string;
+}
+
+export interface FeatureGap {
+  area: string;
+  description: string;
+  suggestion: string;
+}
+
 export interface ProjectAnalysis {
   issues: AnalysisItem[];
   opportunities: AnalysisItem[];
   projectHealth: number; // 0-100
   summary: string;
+  codeMetrics?: CodeMetrics;
+  simplificationTargets?: SimplificationTarget[];
+  featureGaps?: FeatureGap[];
 }
 
 export interface AnalysisItem {
