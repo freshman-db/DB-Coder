@@ -14,7 +14,17 @@ import type { AgentResult, ReviewResult, ReviewIssue } from '../bridges/CodingAg
 import { executorPrompt } from '../prompts/executor.js';
 import { reviewerPrompt } from '../prompts/reviewer.js';
 import { buildAgentGuidance } from '../prompts/agents.js';
-import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch, isWorkingClean, branchExists, getChangedFilesSince } from '../utils/git.js';
+import {
+  createBranch,
+  switchBranch,
+  commitAll,
+  getHeadCommit,
+  getCurrentBranch,
+  isWorkingClean,
+  branchExists,
+  getChangedFilesSince,
+  getModifiedAndAddedFiles,
+} from '../utils/git.js';
 import { log } from '../utils/logger.js';
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -255,7 +265,8 @@ export class MainLoop {
           if (result.success) {
             subtask.status = 'done';
             subtask.result = result.output.slice(0, 200);
-            await commitAll(`db-coder: ${subtask.description.slice(0, 50)}`, projectPath).catch(() => {});
+            const changedFiles = await getModifiedAndAddedFiles(projectPath).catch(() => []);
+            await commitAll(`db-coder: ${subtask.description.slice(0, 50)}`, projectPath, changedFiles).catch(() => {});
             break;
           }
 
@@ -316,7 +327,12 @@ export class MainLoop {
         log.info(`Fix attempt ${reviewRetries} using ${fixAgentName}`);
 
         await fixAgent.execute(fixPrompt, projectPath, {});
-        await commitAll(`db-coder: fix review issues (attempt ${reviewRetries}, ${fixAgentName})`, projectPath).catch(() => {});
+        const changedFilesForCommit = await getModifiedAndAddedFiles(projectPath).catch(() => []);
+        await commitAll(
+          `db-coder: fix review issues (attempt ${reviewRetries}, ${fixAgentName})`,
+          projectPath,
+          changedFilesForCommit,
+        ).catch(() => {});
 
         if (!(await this.enforceBudget(task.id))) return;
 

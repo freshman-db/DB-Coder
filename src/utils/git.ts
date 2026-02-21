@@ -1,8 +1,52 @@
 import { runProcess, type ProcessResult } from './process.js';
 import { log } from './logger.js';
+import { basename } from 'node:path';
+
+export const SENSITIVE_PATTERNS = ['.env', '*.pem', 'credentials*', '*secret*'] as const;
+
+const MODIFIED_OR_ADDED_STATUSES = new Set(['M', 'A', 'R', 'C', 'T', '?']);
+const SENSITIVE_FILE_REGEXES = SENSITIVE_PATTERNS.map(patternToRegex);
 
 async function git(args: string[], cwd: string): Promise<ProcessResult> {
   return runProcess('git', args, { cwd });
+}
+
+function patternToRegex(pattern: string): RegExp {
+  const escaped = pattern
+    .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`, 'i');
+}
+
+function isSensitiveFile(filePath: string): boolean {
+  const fileName = basename(filePath);
+  return SENSITIVE_FILE_REGEXES.some(regex => regex.test(filePath) || regex.test(fileName));
+}
+
+function parseStatusPath(path: string): string {
+  const renameSeparator = ' -> ';
+  const renameIndex = path.indexOf(renameSeparator);
+  if (renameIndex === -1) return path;
+  return path.slice(renameIndex + renameSeparator.length);
+}
+
+function isModifiedOrAddedStatus(status: string): boolean {
+  return MODIFIED_OR_ADDED_STATUSES.has(status);
+}
+
+export async function getModifiedAndAddedFiles(cwd: string): Promise<string[]> {
+  const r = await git(['status', '--porcelain', '--untracked-files=all'], cwd);
+  const files = new Set<string>();
+  for (const line of r.stdout.split('\n')) {
+    if (line.length < 4) continue;
+    const indexStatus = line[0] ?? ' ';
+    const worktreeStatus = line[1] ?? ' ';
+    if (!isModifiedOrAddedStatus(indexStatus) && !isModifiedOrAddedStatus(worktreeStatus)) continue;
+    const path = parseStatusPath(line.slice(3).trim());
+    if (!path) continue;
+    files.add(path);
+  }
+  return [...files];
 }
 
 export async function getCurrentBranch(cwd: string): Promise<string> {
@@ -29,13 +73,28 @@ export async function switchBranch(name: string, cwd: string): Promise<void> {
   await git(['checkout', name], cwd);
 }
 
-export async function commitAll(message: string, cwd: string): Promise<void> {
-  await git(['add', '-A'], cwd);
-  const status = await git(['status', '--porcelain'], cwd);
-  if (status.stdout.trim() === '') {
+export async function commitAll(message: string, cwd: string, files: string[]): Promise<void> {
+  const eligibleFiles: string[] = [];
+  for (const file of new Set(files.filter(Boolean))) {
+    if (isSensitiveFile(file)) {
+      log.warn(`Skipping sensitive file during staging: ${file}`);
+      continue;
+    }
+    eligibleFiles.push(file);
+  }
+
+  if (eligibleFiles.length === 0) {
     log.info('Nothing to commit');
     return;
   }
+
+  await git(['add', '--', ...eligibleFiles], cwd);
+  const staged = await git(['diff', '--cached', '--name-only', '--', ...eligibleFiles], cwd);
+  if (staged.stdout.trim() === '') {
+    log.info('Nothing to commit');
+    return;
+  }
+
   await git(['commit', '-m', message], cwd);
   log.info(`Committed: ${message}`);
 }
