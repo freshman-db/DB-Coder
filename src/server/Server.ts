@@ -8,6 +8,7 @@ import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { CostTracker } from '../utils/cost.js';
 import type { Config } from '../config/Config.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
+import type { PluginMonitor } from '../plugins/PluginMonitor.js';
 import { handleRequest } from './routes.js';
 import { log } from '../utils/logger.js';
 
@@ -35,6 +36,7 @@ export class Server {
     private globalMemory: GlobalMemory,
     private costTracker: CostTracker,
     private evolutionEngine?: EvolutionEngine,
+    private pluginMonitor?: PluginMonitor,
   ) {
     // Web files directory (relative to compiled output)
     const thisDir = fileURLToPath(new URL('.', import.meta.url));
@@ -45,7 +47,7 @@ export class Server {
       this.webDir = join(thisDir, '..', '..', 'src', 'web');
     }
 
-    const ctx = { loop, taskStore, globalMemory, costTracker, config, evolutionEngine: this.evolutionEngine };
+    const ctx = { loop, taskStore, globalMemory, costTracker, config, evolutionEngine: this.evolutionEngine, pluginMonitor: this.pluginMonitor };
 
     this.server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       try {

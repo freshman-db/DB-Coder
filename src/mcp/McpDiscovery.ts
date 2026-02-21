@@ -135,10 +135,17 @@ export class McpDiscovery {
     return [...this.servers.keys()];
   }
 
-  /** Get plugin configs to load via SDK plugins option (execute/review only) */
-  getPluginsForPhase(phase: Phase): Array<{ type: 'local'; path: string }> {
-    if (phase !== 'execute' && phase !== 'review') return [];
+  /** Get all loaded plugin IDs (for agent guidance generation) */
+  getLoadedPluginIds(): string[] {
+    const disabledPlugins = new Set(this.mcpConfig?.disabledPlugins ?? []);
+    return [...this.pluginPaths.keys()]
+      .filter(id => !isPluginBlacklisted(id) && !disabledPlugins.has(id));
+  }
 
+  /** Get plugin configs to load via SDK plugins option (all phases) */
+  getPluginsForPhase(_phase: Phase): Array<{ type: 'local'; path: string }> {
+    // All phases can load plugins — agents need plugin definitions to spawn subagents.
+    // The PLUGIN_BLACKLIST still prevents dangerous plugins from loading.
     const disabledPlugins = new Set(this.mcpConfig?.disabledPlugins ?? []);
 
     return [...this.pluginPaths.entries()]

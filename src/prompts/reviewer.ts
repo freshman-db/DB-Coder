@@ -2,6 +2,7 @@ export function reviewerPrompt(
   taskDescription: string,
   changedFiles: string,
   mcpServerNames?: string[],
+  agentGuidance: string = '',
 ): string {
   const mcpSection = buildReviewMcpSection(mcpServerNames);
 
@@ -13,13 +14,15 @@ ${taskDescription}
 ## Changed Files
 ${changedFiles}
 ${mcpSection}
-## Review Checklist
+${agentGuidance}
+## Review Strategy
+If specialized review agents are available above, use the Task tool to spawn 2-3 most relevant agents in parallel based on the nature of changes. Synthesize their reports with your own assessment.
+
+## Your Direct Review (always do these yourself)
 1. **Correctness**: Does the code do what the task requires?
-2. **Quality**: Is it clean, readable, and well-structured?
-3. **Security**: Any injection, XSS, path traversal, or auth issues?
-4. **Tests**: Are there adequate tests? Do existing tests still pass?
-5. **Performance**: Any obvious performance issues?
-6. **Breaking changes**: Does it break existing functionality?
+2. **Security**: Any injection, XSS, path traversal, or auth issues?
+3. **Breaking changes**: Does it break existing functionality?
+4. **Convention consistency**: Does it follow project patterns?
 
 Run tests if a test command is available (npm test, pytest, etc.).
 Check for linting issues if a linter is configured.
@@ -27,7 +30,6 @@ Check for linting issues if a linter is configured.
 ## Skills & Memory
 You have access to specialized review skills and persistent memory:
 - Search past review patterns: use \`/mem-search <query>\` to find common issues and review feedback from previous tasks
-- Use pr-review-toolkit agents via the Task tool: silent-failure-hunter (error handling), pr-test-analyzer (test coverage), type-design-analyzer (type design quality)
 - Save discovered patterns and recurring issues to memory for future reference
 
 Output your review as JSON:

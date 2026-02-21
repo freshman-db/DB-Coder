@@ -16,6 +16,7 @@ import { Server } from './server/Server.js';
 import { McpDiscovery } from './mcp/McpDiscovery.js';
 import { TrendAnalyzer } from './evolution/TrendAnalyzer.js';
 import { EvolutionEngine } from './evolution/EvolutionEngine.js';
+import { PluginMonitor } from './plugins/PluginMonitor.js';
 import { log } from './utils/logger.js';
 
 const program = new Command()
@@ -59,9 +60,13 @@ program
     const evolutionEngine = new EvolutionEngine(taskStore, globalMemory, config, trendAnalyzer);
     brain.setEvolutionEngine(evolutionEngine);
 
+    // Plugin monitor
+    const pluginMonitor = new PluginMonitor(config.values.plugins?.relevanceOverrides);
+
     const mainLoop = new MainLoop(config, brain, taskQueue, claudeBridge, codexBridge, taskStore, globalMemory, costTracker);
     mainLoop.setEvolutionEngine(evolutionEngine);
-    const server = new Server(config, mainLoop, taskStore, globalMemory, costTracker, evolutionEngine);
+    mainLoop.setPluginMonitor(pluginMonitor);
+    const server = new Server(config, mainLoop, taskStore, globalMemory, costTracker, evolutionEngine, pluginMonitor);
 
     // Global error handlers
     process.on('unhandledRejection', (err) => { log.error('Unhandled rejection', err); });

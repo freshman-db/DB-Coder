@@ -34,6 +34,11 @@ You have access to specialized skills and persistent memory. Use them proactivel
 3. Ensure code compiles/passes linting
 4. Add tests if appropriate
 5. Commit your changes with a clear message
+6. Prefer simple, clear solutions — avoid over-engineering
+7. Use available skills and agents when they add value:
+   - \`/feature-dev\` for complex multi-file features
+   - code-explorer agent (Task tool) for understanding unfamiliar code
+   - code-architect agent (Task tool) for designing new components
 
 Do NOT modify files outside the scope of this subtask.`;
 }

@@ -7,6 +7,7 @@ import type { ProjectAnalysis, TaskPlan, ReflectionResult } from './types.js';
 import type { QuestionHandler } from '../bridges/MessageHandler.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import { BRAIN_SYSTEM_PROMPT, scanPrompt, planPrompt, reflectPrompt, brainMcpGuidance } from '../prompts/brain.js';
+import { buildAgentGuidance } from '../prompts/agents.js';
 import { getHeadCommit, getRecentLog, getChangedFilesSince } from '../utils/git.js';
 import { log } from '../utils/logger.js';
 
@@ -57,7 +58,9 @@ export class Brain implements QuestionHandler {
     const dynamicContext = this.evolutionEngine
       ? await this.evolutionEngine.synthesizePromptContext(projectPath)
       : undefined;
-    const prompt = scanPrompt(projectPath, depth, recentChanges, allMemories, mcpGuidance, goalsSection, dynamicContext);
+    const pluginIds = this.claude.getLoadedPluginIds();
+    const agentGuide = buildAgentGuidance('scan', pluginIds);
+    const prompt = scanPrompt(projectPath, depth, recentChanges, allMemories, mcpGuidance, goalsSection, dynamicContext, agentGuide);
     const result = await this.claude.plan(prompt, projectPath, {
       systemPrompt: BRAIN_SYSTEM_PROMPT,
       maxTurns: depth === 'deep' ? 30 : depth === 'normal' ? 20 : 10,
@@ -106,7 +109,8 @@ export class Brain implements QuestionHandler {
     const dynamicContext = this.evolutionEngine
       ? await this.evolutionEngine.synthesizePromptContext(projectPath)
       : undefined;
-    const prompt = planPrompt(JSON.stringify(analysis, null, 2), memories, allTasks, goalsSection, dynamicContext);
+    const agentGuide = buildAgentGuidance('plan', this.claude.getLoadedPluginIds());
+    const prompt = planPrompt(JSON.stringify(analysis, null, 2), memories, allTasks, goalsSection, dynamicContext, agentGuide);
     const result = await this.claude.plan(prompt, projectPath, {
       systemPrompt: BRAIN_SYSTEM_PROMPT,
     });
@@ -264,6 +268,9 @@ function parseAnalysis(output: string): ProjectAnalysis {
       opportunities: Array.isArray(parsed.opportunities) ? parsed.opportunities : [],
       projectHealth: typeof parsed.projectHealth === 'number' ? parsed.projectHealth : 50,
       summary: (parsed.summary as string) ?? output.slice(0, 200),
+      codeMetrics: parsed.codeMetrics && typeof parsed.codeMetrics === 'object' ? parsed.codeMetrics as ProjectAnalysis['codeMetrics'] : undefined,
+      simplificationTargets: Array.isArray(parsed.simplificationTargets) ? parsed.simplificationTargets : undefined,
+      featureGaps: Array.isArray(parsed.featureGaps) ? parsed.featureGaps : undefined,
     };
   }
   return {

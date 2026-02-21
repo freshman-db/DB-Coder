@@ -3,6 +3,8 @@ import type { ReviewIssue } from '../bridges/CodingAgent.js';
 
 export type { ProjectAnalysis, AnalysisItem };
 
+export type TaskType = 'bugfix' | 'security' | 'quality' | 'refactor' | 'simplify' | 'feature' | 'test' | 'docs';
+
 export interface PlanTask {
   id: string;
   description: string;
@@ -11,6 +13,7 @@ export interface PlanTask {
   subtasks: PlanSubTask[];
   dependsOn: string[];
   estimatedComplexity: 'low' | 'medium' | 'high';
+  type?: TaskType;
 }
 
 export interface PlanSubTask {
@@ -38,7 +41,7 @@ export interface ReflectionResult {
 }
 
 export interface ExtractedExperience {
-  category: 'habit' | 'experience' | 'standard' | 'workflow' | 'framework' | 'failure';
+  category: 'habit' | 'experience' | 'standard' | 'workflow' | 'framework' | 'failure' | 'simplification';
   title: string;
   content: string;
   tags: string[];

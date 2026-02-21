@@ -31,8 +31,12 @@ Your core principles:
 2. Safety first — never modify protected branches directly
 3. Incremental improvement — small, reviewable changes
 4. Learn from mistakes — extract reusable patterns
+5. Continuous simplification — reduce complexity, remove unnecessary abstractions
+6. Eliminate duplication — consolidate repeated patterns into shared utilities
+7. Proactive improvement — improve architecture, coverage, and code quality, not just fix bugs
 
-You have access to read-only tools. Analyze code but DO NOT modify files.`;
+You have access to read-only tools AND the Task tool for spawning specialized agents.
+Use actual tools (tsc, grep, find) and specialized agents to gather concrete data, not just surface impressions.`;
 
 export function brainMcpGuidance(serverNames: string[]): string {
   if (serverNames.length === 0) return '';
@@ -46,7 +50,7 @@ export function brainMcpGuidance(serverNames: string[]): string {
   return tips.length > 0 ? `\n## Available MCP Tools\n${tips.join('\n')}` : '';
 }
 
-export function scanPrompt(projectPath: string, depth: string, recentChanges: string, memories: string, mcpGuidance: string = '', goalsSection: string = '', dynamicContext?: DynamicPromptContext): string {
+export function scanPrompt(projectPath: string, depth: string, recentChanges: string, memories: string, mcpGuidance: string = '', goalsSection: string = '', dynamicContext?: DynamicPromptContext, agentGuidance: string = ''): string {
   return `Scan the project at ${projectPath}.
 Scan depth: ${depth}
 
@@ -56,27 +60,35 @@ ${recentChanges || 'No recent changes detected.'}
 Relevant memories from past experience:
 ${memories || 'No relevant memories yet.'}
 ${mcpGuidance}
+${agentGuidance}
 ${goalsSection}
 ${formatDynamicContext(dynamicContext)}
 Analyze the project by:
 1. Reading key files (package.json, README, config files, main source files)
 2. Running git log to understand recent activity
-3. Searching for TODO/FIXME/HACK comments
-4. Checking for common code quality issues
-5. Evaluating test coverage structure
-6. Looking for security concerns
-${goalsSection ? '7. Evaluating progress toward evolution goals' : ''}
+3. Running \`tsc --noEmit\` to check for type errors
+4. Searching for TODO/FIXME/HACK comments
+5. Checking for common code quality issues
+6. Evaluating test coverage structure
+7. Looking for security concerns
+${goalsSection ? '8. Evaluating progress toward evolution goals' : ''}
+
+If specialized agents are available (listed above), spawn them via the Task tool for deeper analysis.
+Launch agents in parallel for efficiency. Synthesize their reports into your analysis.
 
 Output your analysis as JSON with this exact structure:
 {
   "issues": [{ "type": string, "severity": "critical"|"high"|"medium"|"low", "description": string, "file": string, "suggestion": string }],
   "opportunities": [{ "type": string, "severity": "medium"|"low", "description": string, "suggestion": string }],
+  "codeMetrics": { "typeErrors": number, "longFunctions": [{ "file": string, "name": string, "lines": number }], "duplicatePatterns": [{ "files": [string], "description": string }], "deadCode": [{ "file": string, "description": string }] },
+  "simplificationTargets": [{ "file": string, "description": string, "complexity": string, "suggestion": string }],
+  "featureGaps": [{ "area": string, "description": string, "suggestion": string }],
   "projectHealth": number (0-100),
   "summary": string
 }`;
 }
 
-export function planPrompt(analysis: string, memories: string, existingTasks: string, goalsSection: string = '', dynamicContext?: DynamicPromptContext): string {
+export function planPrompt(analysis: string, memories: string, existingTasks: string, goalsSection: string = '', dynamicContext?: DynamicPromptContext, agentGuidance: string = ''): string {
   return `Based on this project analysis, create a prioritized task plan.
 
 Analysis:
@@ -88,12 +100,18 @@ ${memories || 'None'}
 Existing tasks (queued, completed, and blocked — DO NOT create duplicates):
 ${existingTasks || 'None'}
 ${goalsSection}
+${agentGuidance}
 ${formatDynamicContext(dynamicContext)}
 Create tasks with priorities:
 - P0: Critical bugs, security issues
 - P1: Important improvements, failing tests
 - P2: Code quality, refactoring
 - P3: Nice-to-have, optimizations
+
+Classify each task with a type:
+- bugfix / security / quality / refactor / simplify / feature / test / docs
+
+Simplification philosophy: Prefer removing complexity over adding it. If a task can be solved by deleting code, simplifying abstractions, or consolidating duplicates, that is always better than adding new code.
 
 IMPORTANT: Do NOT create tasks that duplicate or closely resemble existing tasks listed above (regardless of their status). If a task was already done or blocked, do not retry it unless you have a fundamentally different approach.
 
@@ -107,6 +125,7 @@ Output as JSON:
   "tasks": [{
     "id": string,
     "description": string,
+    "type": "bugfix"|"security"|"quality"|"refactor"|"simplify"|"feature"|"test"|"docs",
     "priority": number (0-3),
     "executor": "claude"|"codex",
     "subtasks": [{ "id": string, "description": string, "executor": "claude"|"codex" }],
@@ -138,10 +157,15 @@ Review: ${reviewSummary}
 
 ${outcomeGuidance}
 
+Also evaluate:
+- Were there opportunities to simplify the approach?
+- Did the task add unnecessary complexity?
+- Could the same result be achieved with less code?
+
 Output as JSON:
 {
   "experiences": [{
-    "category": "habit"|"experience"|"standard"|"workflow"|"framework"|"failure",
+    "category": "habit"|"experience"|"standard"|"workflow"|"framework"|"failure"|"simplification",
     "title": string,
     "content": string,
     "tags": [string]

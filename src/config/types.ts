@@ -75,6 +75,15 @@ export interface EvolutionConfig {
   trendWindowSize?: number; // default 10 — number of recent scans for trend analysis
 }
 
+export type PluginRelevance = 'essential' | 'recommended' | 'optional' | 'irrelevant';
+
+export interface PluginConfig {
+  autoUpdate?: boolean;               // default false — auto-update installed plugins
+  autoInstallRecommended?: boolean;    // default false — auto-install recommended plugins
+  checkInterval?: number;              // default 86400 (24h, seconds)
+  relevanceOverrides?: Record<string, PluginRelevance>; // manual plugin relevance
+}
+
 export interface DbCoderConfig {
   apiToken: string;
   brain: BrainConfig;
@@ -87,6 +96,7 @@ export interface DbCoderConfig {
   git: GitConfig;
   server: ServerConfig;
   mcp: McpConfig;
+  plugins: PluginConfig;
   evolution: EvolutionConfig;
 }
 

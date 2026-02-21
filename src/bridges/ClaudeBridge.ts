@@ -38,6 +38,11 @@ export class ClaudeBridge implements CodingAgent {
     return this.mcpDiscovery?.getServerNames(phase) ?? [];
   }
 
+  /** Get loaded plugin IDs (for agent guidance generation) */
+  getLoadedPluginIds(): string[] {
+    return this.mcpDiscovery?.getLoadedPluginIds() ?? [];
+  }
+
   async execute(prompt: string, cwd: string, options?: {
     systemPrompt?: string;
     maxTurns?: number;
@@ -104,18 +109,20 @@ export class ClaudeBridge implements CodingAgent {
 
     try {
       const mcpServers = this.mcpDiscovery?.getServersForPhase('plan') ?? {};
+      const plugins = this.mcpDiscovery?.getPluginsForPhase('plan') ?? [];
       for await (const message of query({
         prompt,
         options: {
           cwd,
-          // Plan mode: read-only tools + MCP tools for semantic analysis
-          tools: ['Read', 'Glob', 'Grep', 'Bash'],
+          // Plan mode: read-only tools + Task for spawning analysis agents
+          tools: ['Read', 'Glob', 'Grep', 'Bash', 'Task'],
           permissionMode: 'bypassPermissions',
           systemPrompt: options?.systemPrompt,
           maxTurns: options?.maxTurns ?? 20,
           model: this.config.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
           env: cleanEnv(),
           ...(Object.keys(mcpServers).length > 0 && { mcpServers }),
+          ...(plugins.length > 0 && { plugins }),
         },
       })) {
         if (message.type === 'result') {
@@ -159,7 +166,7 @@ export class ClaudeBridge implements CodingAgent {
         prompt,
         options: {
           cwd,
-          tools: ['Read', 'Glob', 'Grep', 'Bash'],
+          tools: ['Read', 'Glob', 'Grep', 'Bash', 'Task'],
           permissionMode: 'bypassPermissions',
           systemPrompt: `You are a senior code reviewer. Review the code changes carefully.
 Focus on: architecture, design patterns, frontend quality, accessibility, UX.

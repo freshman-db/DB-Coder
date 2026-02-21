@@ -23,7 +23,16 @@ const DEFAULTS: DbCoderConfig = {
   git: { branchPrefix: 'db-coder/', protectedBranches: ['main', 'master'] },
   server: { port: 18800, host: '127.0.0.1' },
   mcp: { enabled: true },
-  evolution: { goals: [] },
+  plugins: {},
+  evolution: {
+    goals: [
+      { description: '提升代码质量：修复类型错误，统一编码规范', priority: 1, status: 'active' },
+      { description: '减少代码重复：识别和整合重复模式', priority: 2, status: 'active' },
+      { description: '简化复杂代码：缩短函数长度，降低嵌套深度', priority: 2, status: 'active' },
+      { description: '提高测试覆盖：为关键路径添加测试', priority: 2, status: 'active' },
+      { description: '主动开发功能：识别架构的自然延伸并实现', priority: 3, status: 'active' },
+    ],
+  },
 };
 
 function deepMerge(target: DbCoderConfig, source: DeepPartial<DbCoderConfig>): DbCoderConfig {
