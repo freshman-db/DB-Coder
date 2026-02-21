@@ -66,6 +66,20 @@
     </main>
   </div>
 
+  <!-- 认证屏幕 -->
+  <div class="auth-overlay" id="authOverlay">
+    <div class="auth-card">
+      <div class="auth-logo">🤖 DB-Coder</div>
+      <p class="auth-subtitle">请输入 API 令牌以继续</p>
+      <div class="auth-error" id="authError"></div>
+      <div class="form-group">
+        <input type="password" id="authTokenInput" class="form-input" placeholder="Bearer 令牌..." autocomplete="off">
+      </div>
+      <button class="btn btn-primary auth-submit" id="authSubmit">登 录</button>
+      <p class="auth-hint">令牌在服务启动日志中显示，或查看 <code>~/.db-coder/config.json</code></p>
+    </div>
+  </div>
+
   <!-- 新建任务模态框 -->
   <div class="modal-overlay" id="modalOverlay">
     <div class="modal">

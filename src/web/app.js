@@ -3,10 +3,12 @@
    ======================================== */
 
 // ---- 全局状态 ----
+const AUTH_STORAGE_KEY = 'db-coder-api-token';
+
 const state = {
   paused: false,
   refreshTimer: null,
-  logSource: null,
+  logAbort: null, // AbortController for fetch-based SSE
   logLevel: 'info',
   currentPage: '',
 };
@@ -15,12 +17,57 @@ const state = {
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
+// ---- 令牌管理 ----
+function getToken() {
+  return localStorage.getItem(AUTH_STORAGE_KEY) || '';
+}
+
+function setToken(token) {
+  localStorage.setItem(AUTH_STORAGE_KEY, token.trim());
+}
+
+function clearToken() {
+  localStorage.removeItem(AUTH_STORAGE_KEY);
+}
+
+function showAuthScreen(errorMsg) {
+  const overlay = $('#authOverlay');
+  const errEl = $('#authError');
+  if (!overlay) return;
+
+  overlay.classList.remove('hidden');
+  if (errorMsg) {
+    errEl.textContent = errorMsg;
+    errEl.classList.add('show');
+  } else {
+    errEl.classList.remove('show');
+  }
+  setTimeout(() => $('#authTokenInput')?.focus(), 100);
+}
+
+function hideAuthScreen() {
+  const overlay = $('#authOverlay');
+  if (overlay) overlay.classList.add('hidden');
+}
+
+function authHeaders() {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function api(path, opts = {}) {
   try {
     const res = await fetch(`/api${path}`, {
-      headers: { 'Content-Type': 'application/json', ...opts.headers },
       ...opts,
+      headers: { 'Content-Type': 'application/json', ...authHeaders(), ...opts.headers },
     });
+
+    if (res.status === 401) {
+      clearToken();
+      showAuthScreen('令牌无效或已过期，请重新输入');
+      return null;
+    }
+
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } catch (err) {
@@ -119,9 +166,9 @@ function updateNav(page) {
 function cleanup() {
   clearInterval(state.refreshTimer);
   state.refreshTimer = null;
-  if (state.logSource) {
-    state.logSource.close();
-    state.logSource = null;
+  if (state.logAbort) {
+    state.logAbort.abort();
+    state.logAbort = null;
   }
 }
 
@@ -414,33 +461,63 @@ function renderLogs() {
   connectLogStream();
 }
 
-function connectLogStream() {
-  if (state.logSource) state.logSource.close();
+async function connectLogStream() {
+  if (state.logAbort) state.logAbort.abort();
 
   const output = $('#logOutput');
   if (!output) return;
 
+  const controller = new AbortController();
+  state.logAbort = controller;
+
   try {
-    state.logSource = new EventSource('/api/logs?follow=true');
+    const res = await fetch('/api/logs?follow=true', {
+      headers: { ...authHeaders(), Accept: 'text/event-stream' },
+      signal: controller.signal,
+    });
 
-    state.logSource.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        appendLog(data);
-      } catch {
-        appendLog({ level: 'info', message: event.data, timestamp: new Date().toISOString() });
+    if (res.status === 401) {
+      clearToken();
+      showAuthScreen('令牌无效或已过期，请重新输入');
+      return;
+    }
+
+    if (!res.ok || !res.body) {
+      appendLog({ level: 'error', message: `[日志流连接失败: HTTP ${res.status}]`, timestamp: new Date().toISOString() });
+      return;
+    }
+
+    appendLog({ level: 'info', message: '[日志流已连接]', timestamp: new Date().toISOString() });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const payload = line.slice(6);
+          try {
+            appendLog(JSON.parse(payload));
+          } catch {
+            appendLog({ level: 'info', message: payload, timestamp: new Date().toISOString() });
+          }
+        }
       }
-    };
-
-    state.logSource.onerror = () => {
-      appendLog({ level: 'warn', message: '[连接断开，尝试重连...]', timestamp: new Date().toISOString() });
-    };
-
-    state.logSource.onopen = () => {
-      appendLog({ level: 'info', message: '[日志流已连接]', timestamp: new Date().toISOString() });
-    };
+    }
   } catch (err) {
-    appendLog({ level: 'error', message: `SSE 连接失败: ${err.message}`, timestamp: new Date().toISOString() });
+    if (err.name === 'AbortError') return; // intentional cleanup
+    appendLog({ level: 'warn', message: '[连接断开，5秒后重连...]', timestamp: new Date().toISOString() });
+    setTimeout(() => {
+      if (state.currentPage === 'logs') connectLogStream();
+    }, 5000);
   }
 }
 
@@ -682,8 +759,63 @@ function toggleSidebar() {
   $('#sidebar').classList.toggle('open');
 }
 
+// ---- 认证流程 ----
+async function attemptAuth(token) {
+  setToken(token);
+
+  // Validate token against server
+  try {
+    const res = await fetch('/api/status', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (res.status === 401) {
+      clearToken();
+      showAuthScreen('令牌无效，请检查后重试');
+      return false;
+    }
+
+    if (res.ok) {
+      hideAuthScreen();
+      updateConnection(true);
+      navigate();
+      return true;
+    }
+  } catch {
+    // Network error — token might still be valid, let the user proceed
+  }
+
+  hideAuthScreen();
+  navigate();
+  return true;
+}
+
+function setupAuthListeners() {
+  const input = $('#authTokenInput');
+  const submit = $('#authSubmit');
+
+  submit.addEventListener('click', () => {
+    const token = input.value.trim();
+    if (!token) {
+      showAuthScreen('请输入令牌');
+      return;
+    }
+    attemptAuth(token);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const token = input.value.trim();
+      if (token) attemptAuth(token);
+    }
+  });
+}
+
 // ---- 初始化 ----
 function init() {
+  // 认证界面事件
+  setupAuthListeners();
+
   // 路由监听
   window.addEventListener('hashchange', navigate);
 
@@ -713,11 +845,20 @@ function init() {
     });
   });
 
-  // 初始连接检测
-  api('/status').then((res) => updateConnection(!!res));
-
-  // 初始路由
-  navigate();
+  // 检查已保存的令牌
+  const savedToken = getToken();
+  if (savedToken) {
+    // Validate saved token silently
+    hideAuthScreen();
+    api('/status').then((res) => {
+      updateConnection(!!res);
+      // If api() got 401, it already showed auth screen
+    });
+    navigate();
+  } else {
+    // No token — show auth screen
+    showAuthScreen();
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);
