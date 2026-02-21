@@ -7,8 +7,9 @@
     "db-coder": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
-    "postbuild": "cp -r src/web dist/web",
+    "build": "rm -rf dist && tsc",
+    "postbuild": "rm -rf dist/web && mkdir -p dist/web && cp -r src/web/. dist/web",
+    "test": "npm run build && node --test \"dist/**/*.test.js\"",
     "dev": "tsc --watch",
     "start": "node dist/index.js"
   },

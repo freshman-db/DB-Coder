@@ -26,6 +26,9 @@ export class ConfigValidationError extends Error {
   }
 }
 
+/**
+ * Validates config values without mutating or normalizing the original object.
+ */
 export function validateConfig(config: DbCoderConfig, projectPath: string): void {
   const issues: string[] = [];
   validateProjectPath(projectPath, issues);

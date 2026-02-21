@@ -57,6 +57,18 @@ function assertValidationIssue(fn: () => void, pattern: RegExp): void {
   });
 }
 
+function getValidationError(fn: () => void): ConfigValidationError {
+  try {
+    fn();
+  } catch (err) {
+    if (err instanceof ConfigValidationError) {
+      return err;
+    }
+    throw err;
+  }
+  throw new Error('Expected validateConfig to throw ConfigValidationError');
+}
+
 test('validateConfig accepts a valid config', () => {
   withTempProject((projectPath) => {
     assert.doesNotThrow(() => validateConfig(createValidConfig(), projectPath));
@@ -105,4 +117,130 @@ test('validateConfig rejects missing project paths', () => {
     () => validateConfig(createValidConfig(), missingPath),
     /projectPath does not exist/,
   );
+});
+
+test('validateConfig rejects memory URLs with unsupported protocols', () => {
+  withTempProject((projectPath) => {
+    const config = createValidConfig();
+    config.memory.claudeMemUrl = 'ftp://localhost:37777';
+
+    assertValidationIssue(
+      () => validateConfig(config, projectPath),
+      /memory\.claudeMemUrl must use http: or https: protocol/,
+    );
+  });
+});
+
+test('validateConfig rejects empty routing.review arrays', () => {
+  withTempProject((projectPath) => {
+    const config = createValidConfig();
+    config.routing.review = [];
+
+    assertValidationIssue(
+      () => validateConfig(config, projectPath),
+      /routing\.review must contain at least 1 item\(s\)/,
+    );
+  });
+});
+
+test('validateConfig rejects unsupported routing.review entries', () => {
+  withTempProject((projectPath) => {
+    const config = createValidConfig();
+    config.routing.review = ['claude', 'brain' as 'claude' | 'codex'];
+
+    assertValidationIssue(
+      () => validateConfig(config, projectPath),
+      /routing\.review\[1\] must be one of: claude, codex/,
+    );
+  });
+});
+
+test('validateConfig requires each custom MCP server to define command or url', () => {
+  withTempProject((projectPath) => {
+    const config = createValidConfig();
+    config.mcp.custom = {
+      local: { type: 'stdio' },
+    };
+
+    assertValidationIssue(
+      () => validateConfig(config, projectPath),
+      /mcp\.custom\.local must define either a non-empty command or url/,
+    );
+  });
+});
+
+test('validateConfig rejects custom MCP server URLs with unsupported protocols', () => {
+  withTempProject((projectPath) => {
+    const config = createValidConfig();
+    config.mcp.custom = {
+      remote: { url: 'ws://localhost:9999' },
+    };
+
+    assertValidationIssue(
+      () => validateConfig(config, projectPath),
+      /mcp\.custom\.remote\.url must use http: or https: protocol/,
+    );
+  });
+});
+
+test('validateConfig rejects evolution goals with invalid status values', () => {
+  withTempProject((projectPath) => {
+    const config = createValidConfig();
+    config.evolution.goals = [{
+      description: 'Ship a parser',
+      priority: 1,
+      status: 'blocked' as 'active' | 'paused' | 'done',
+    }];
+
+    assertValidationIssue(
+      () => validateConfig(config, projectPath),
+      /evolution\.goals\[0\]\.status must be one of: active, paused, done/,
+    );
+  });
+});
+
+test('validateConfig rejects evolution goals with invalid completedAt values', () => {
+  withTempProject((projectPath) => {
+    const config = createValidConfig();
+    config.evolution.goals = [{
+      description: 'Finish API hardening',
+      priority: 1,
+      completedAt: 'not-a-date',
+    }];
+
+    assertValidationIssue(
+      () => validateConfig(config, projectPath),
+      /evolution\.goals\[0\]\.completedAt must be an ISO date string/,
+    );
+  });
+});
+
+test('validateConfig reports issues for empty config objects', () => {
+  withTempProject((projectPath) => {
+    const error = getValidationError(() => validateConfig({} as DbCoderConfig, projectPath));
+
+    assert.ok(error.issues.length > 0);
+    assert.ok(error.issues.includes('apiToken must be a non-empty string'));
+    assert.ok(error.issues.includes('brain must be an object'));
+    assert.match(error.message, /Invalid db-coder configuration:/);
+  });
+});
+
+test('ConfigValidationError exposes the provided issues array', () => {
+  const issues = ['alpha', 'beta'];
+  const error = new ConfigValidationError(issues);
+
+  assert.equal(error.name, 'ConfigValidationError');
+  assert.deepEqual(error.issues, issues);
+});
+
+test('validateConfig does not mutate config when trimming string values', () => {
+  withTempProject((projectPath) => {
+    const config = createValidConfig();
+    const originalUrl = '  http://localhost:37777  ';
+    config.memory.claudeMemUrl = originalUrl;
+
+    assert.doesNotThrow(() => validateConfig(config, projectPath));
+    assert.equal(config.memory.claudeMemUrl, originalUrl);
+  });
 });
