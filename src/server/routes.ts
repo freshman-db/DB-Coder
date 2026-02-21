@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { MainLoop } from '../core/MainLoop.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
+import type { MemoryCategory } from '../memory/types.js';
 import type { CostTracker } from '../utils/cost.js';
 import type { Config } from '../config/Config.js';
 import { log, type LogEntry } from '../utils/logger.js';
@@ -24,6 +25,29 @@ interface Route {
 }
 
 const routes: Route[] = [];
+const memoryCategories: ReadonlySet<MemoryCategory> = new Set([
+  'habit',
+  'experience',
+  'standard',
+  'workflow',
+  'framework',
+]);
+
+interface CreateTaskRequest {
+  description: string;
+  priority?: number;
+}
+
+interface CreateMemoryRequest {
+  category: MemoryCategory;
+  content: string;
+  title?: string;
+  tags?: string[];
+}
+
+type ValidationResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: string };
 
 function route(method: string, path: string, handler: RouteHandler): void {
   const paramNames: string[] = [];
@@ -45,9 +69,13 @@ route('GET', '/api/status', async (_req, res, ctx) => {
 
 // --- Tasks ---
 route('POST', '/api/tasks', async (req, res, ctx) => {
-  const body = await readBody(req);
-  const { description, priority } = body as { description?: string; priority?: number };
-  if (!description) { json(res, { error: 'description required' }, 400); return; }
+  const validation = validateCreateTaskBody(await readBody(req));
+  if (!validation.ok) {
+    json(res, { error: validation.error }, 400);
+    return;
+  }
+
+  const { description, priority } = validation.value;
   const task = await ctx.taskStore.createTask(ctx.config.projectPath, description, priority ?? 2);
   log.info(`Task added: ${description}`);
   json(res, task, 201);
@@ -135,13 +163,18 @@ route('GET', '/api/memory', async (req, res, ctx) => {
 });
 
 route('POST', '/api/memory', async (req, res, ctx) => {
-  const body = await readBody(req) as { category?: string; title?: string; content?: string; tags?: string[] };
-  if (!body.title || !body.content) { json(res, { error: 'title and content required' }, 400); return; }
+  const validation = validateCreateMemoryBody(await readBody(req));
+  if (!validation.ok) {
+    json(res, { error: validation.error }, 400);
+    return;
+  }
+
+  const { category, content, title, tags } = validation.value;
   const memory = await ctx.globalMemory.add({
-    category: (body.category as any) ?? 'experience',
-    title: body.title,
-    content: body.content,
-    tags: body.tags ?? [],
+    category,
+    title: title ?? content.slice(0, 50),
+    content,
+    tags: tags ?? [],
     source_project: null,
     confidence: 1.0, // Manual entries get full confidence
   });
@@ -199,4 +232,81 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
       try { resolve(JSON.parse(body)); } catch { resolve({}); }
     });
   });
+}
+
+function validateCreateTaskBody(body: unknown): ValidationResult<CreateTaskRequest> {
+  if (!isRecord(body)) {
+    return { ok: false, error: 'Request body must be a JSON object.' };
+  }
+
+  const description = body.description;
+  if (typeof description !== 'string' || description.trim().length === 0) {
+    return { ok: false, error: 'description is required and must be a non-empty string.' };
+  }
+
+  const priority = body.priority;
+  let normalizedPriority: number | undefined;
+  if (priority !== undefined) {
+    if (typeof priority !== 'number' || !Number.isInteger(priority) || priority < 0 || priority > 3) {
+      return { ok: false, error: 'priority must be an integer between 0 and 3.' };
+    }
+    normalizedPriority = priority;
+  }
+
+  return {
+    ok: true,
+    value: {
+      description: description.trim(),
+      ...(normalizedPriority !== undefined ? { priority: normalizedPriority } : {}),
+    },
+  };
+}
+
+function validateCreateMemoryBody(body: unknown): ValidationResult<CreateMemoryRequest> {
+  if (!isRecord(body)) {
+    return { ok: false, error: 'Request body must be a JSON object.' };
+  }
+
+  const category = body.category;
+  if (typeof category !== 'string' || category.trim().length === 0) {
+    return { ok: false, error: 'category is required and must be a non-empty string.' };
+  }
+
+  const normalizedCategory = category.trim();
+  if (!isMemoryCategory(normalizedCategory)) {
+    return { ok: false, error: 'category must be one of: habit, experience, standard, workflow, framework.' };
+  }
+
+  const content = body.content;
+  if (typeof content !== 'string' || content.trim().length === 0) {
+    return { ok: false, error: 'content is required and must be a non-empty string.' };
+  }
+
+  const title = body.title;
+  if (title !== undefined && (typeof title !== 'string' || title.trim().length === 0)) {
+    return { ok: false, error: 'title must be a non-empty string when provided.' };
+  }
+
+  const tags = body.tags;
+  if (tags !== undefined && (!Array.isArray(tags) || tags.some(tag => typeof tag !== 'string'))) {
+    return { ok: false, error: 'tags must be an array of strings when provided.' };
+  }
+
+  return {
+    ok: true,
+    value: {
+      category: normalizedCategory,
+      content: content.trim(),
+      ...(title !== undefined ? { title: title.trim() } : {}),
+      ...(tags !== undefined ? { tags } : {}),
+    },
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isMemoryCategory(value: string): value is MemoryCategory {
+  return memoryCategories.has(value as MemoryCategory);
 }
