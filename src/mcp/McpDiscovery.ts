@@ -22,9 +22,16 @@ const DEFAULT_PHASE_ROUTING: Record<string, Phase[]> = {
   'mcp-search': [],  // claude-mem: subprocesses use their own memory system
 };
 
+/** Plugins with dangerous side effects — never load into subprocesses */
+const PLUGIN_BLACKLIST = new Set([
+  'commit-commands',    // /commit-push-pr pushes code, creates PRs
+  'code-review',        // /code-review executes gh pr comment
+]);
+
 export class McpDiscovery {
   private servers = new Map<string, McpServerEntry>();
   private phaseRouting = new Map<string, Phase[]>();
+  private pluginPaths = new Map<string, string>();  // pluginId → installPath
 
   constructor(private mcpConfig?: McpConfig) {}
 
@@ -68,6 +75,10 @@ export class McpDiscovery {
       if (!pluginInfo?.[0]?.installPath) continue;
 
       const installPath = pluginInfo[0].installPath;
+
+      // Record plugin path for plugin loading via SDK plugins option
+      this.pluginPaths.set(pluginId, installPath);
+
       const mcpJsonPath = join(installPath, '.mcp.json');
 
       if (!existsSync(mcpJsonPath)) continue;
@@ -122,6 +133,17 @@ export class McpDiscovery {
   /** Get all discovered server names */
   getAllServers(): string[] {
     return [...this.servers.keys()];
+  }
+
+  /** Get plugin configs to load via SDK plugins option (execute/review only) */
+  getPluginsForPhase(phase: Phase): Array<{ type: 'local'; path: string }> {
+    if (phase !== 'execute' && phase !== 'review') return [];
+
+    const disabledPlugins = new Set(this.mcpConfig?.disabledPlugins ?? []);
+
+    return [...this.pluginPaths.entries()]
+      .filter(([id]) => !isPluginBlacklisted(id) && !disabledPlugins.has(id))
+      .map(([, path]) => ({ type: 'local' as const, path }));
   }
 
   /**
@@ -226,4 +248,10 @@ export class McpDiscovery {
       }
     }
   }
+}
+
+function isPluginBlacklisted(pluginId: string): boolean {
+  // Match against short name: @org/plugin-name → plugin-name
+  const shortName = pluginId.split('/').pop() ?? pluginId;
+  return PLUGIN_BLACKLIST.has(shortName);
 }

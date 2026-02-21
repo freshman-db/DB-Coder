@@ -3,11 +3,12 @@ import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { ProjectMemory } from '../memory/ProjectMemory.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { ProjectAnalysis, TaskPlan, ReflectionResult } from './types.js';
+import type { QuestionHandler } from '../bridges/MessageHandler.js';
 import { BRAIN_SYSTEM_PROMPT, scanPrompt, planPrompt, reflectPrompt, brainMcpGuidance } from '../prompts/brain.js';
 import { getHeadCommit, getRecentLog, getChangedFilesSince } from '../utils/git.js';
 import { log } from '../utils/logger.js';
 
-export class Brain {
+export class Brain implements QuestionHandler {
   constructor(
     private claude: ClaudeBridge,
     private globalMemory: GlobalMemory,
@@ -123,6 +124,17 @@ export class Brain {
     );
 
     return { reflection, cost: r.cost_usd };
+  }
+
+  /** Auto-answer AskUserQuestion from subprocesses (skills, plugins) */
+  async answerQuestion(question: string, options: string[], _taskContext: string): Promise<string> {
+    if (options.length > 0) {
+      // First option is typically marked as recommended by skills
+      log.debug?.(`Auto-answering: "${question}" → "${options[0]}"`);
+      return options[0];
+    }
+    // Open-ended question: provide a safe default
+    return 'Proceed with the default approach.';
   }
 
   async hasChanges(projectPath: string): Promise<boolean> {

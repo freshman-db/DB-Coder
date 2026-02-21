@@ -24,6 +24,12 @@ ${mcpSection}
 Run tests if a test command is available (npm test, pytest, etc.).
 Check for linting issues if a linter is configured.
 
+## Skills & Memory
+You have access to specialized review skills and persistent memory:
+- Search past review patterns: use \`/mem-search <query>\` to find common issues and review feedback from previous tasks
+- Use pr-review-toolkit agents via the Task tool: silent-failure-hunter (error handling), pr-test-analyzer (test coverage), type-design-analyzer (type design quality)
+- Save discovered patterns and recurring issues to memory for future reference
+
 Output your review as JSON:
 {
   "passed": boolean,

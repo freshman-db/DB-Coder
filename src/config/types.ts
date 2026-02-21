@@ -49,7 +49,8 @@ export interface GitConfig {
 export interface McpConfig {
   enabled: boolean;
   serverPhases?: Record<string, string[]>;  // override default phase routing
-  disabled?: string[];                       // servers to skip
+  disabled?: string[];                       // MCP servers to skip
+  disabledPlugins?: string[];                // plugins to not load into subprocesses
   custom?: Record<string, { command?: string; args?: string[]; type?: string; url?: string; headers?: Record<string, string> }>;
 }
 

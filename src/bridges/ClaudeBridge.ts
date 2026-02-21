@@ -2,6 +2,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { CodingAgent, AgentResult, ReviewResult, ReviewIssue } from './CodingAgent.js';
 import type { ClaudeConfig } from '../config/types.js';
 import type { McpDiscovery, Phase } from '../mcp/McpDiscovery.js';
+import { buildCanUseTool, type QuestionHandler } from './MessageHandler.js';
 import { log } from '../utils/logger.js';
 
 // Tools to remove from env to avoid nesting conflicts
@@ -20,11 +21,17 @@ function cleanEnv(): Record<string, string> {
 
 export class ClaudeBridge implements CodingAgent {
   readonly name = 'claude';
+  private questionHandler?: QuestionHandler;
 
   constructor(
     private config: ClaudeConfig,
     private mcpDiscovery?: McpDiscovery,
   ) {}
+
+  /** Set the handler for auto-answering AskUserQuestion (called after Brain is constructed) */
+  setQuestionHandler(handler: QuestionHandler): void {
+    this.questionHandler = handler;
+  }
 
   /** Get MCP server names available for a phase (for prompt building) */
   getMcpServerNames(phase: Phase): string[] {
@@ -43,6 +50,11 @@ export class ClaudeBridge implements CodingAgent {
 
     try {
       const mcpServers = this.mcpDiscovery?.getServersForPhase('execute') ?? {};
+      const plugins = this.mcpDiscovery?.getPluginsForPhase('execute') ?? [];
+      const canUseTool = this.questionHandler
+        ? buildCanUseTool(this.questionHandler, prompt)
+        : undefined;
+
       for await (const message of query({
         prompt,
         options: {
@@ -51,15 +63,17 @@ export class ClaudeBridge implements CodingAgent {
           systemPrompt: options?.systemPrompt,
           maxTurns: options?.maxTurns ?? this.config.maxTurns,
           model: this.config.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
-          env: cleanEnv(),
+          env: { ...cleanEnv(), CLAUDE_MEM_MODEL: 'claude-opus-4-6' },
           ...(Object.keys(mcpServers).length > 0 && { mcpServers }),
+          ...(plugins.length > 0 && { plugins }),
+          ...(canUseTool && { canUseTool }),
         },
       })) {
-        if ('result' in message) {
-          result = message.result as string;
-        }
-        if ('costUSD' in message) {
-          cost = (message as { costUSD: number }).costUSD;
+        if (message.type === 'result') {
+          cost = (message as any).total_cost_usd ?? 0;
+          if ('result' in message) {
+            result = (message as any).result;
+          }
         }
       }
 
@@ -104,11 +118,11 @@ export class ClaudeBridge implements CodingAgent {
           ...(Object.keys(mcpServers).length > 0 && { mcpServers }),
         },
       })) {
-        if ('result' in message) {
-          result = message.result as string;
-        }
-        if ('costUSD' in message) {
-          cost = (message as { costUSD: number }).costUSD;
+        if (message.type === 'result') {
+          cost = (message as any).total_cost_usd ?? 0;
+          if ('result' in message) {
+            result = (message as any).result;
+          }
         }
       }
 
@@ -136,6 +150,11 @@ export class ClaudeBridge implements CodingAgent {
 
     try {
       const mcpServers = this.mcpDiscovery?.getServersForPhase('review') ?? {};
+      const plugins = this.mcpDiscovery?.getPluginsForPhase('review') ?? [];
+      const canUseTool = this.questionHandler
+        ? buildCanUseTool(this.questionHandler, prompt)
+        : undefined;
+
       for await (const message of query({
         prompt,
         options: {
@@ -147,15 +166,17 @@ Focus on: architecture, design patterns, frontend quality, accessibility, UX.
 Output your review as JSON: { "passed": boolean, "issues": [{ "severity": "critical"|"high"|"medium"|"low", "description": string, "file": string, "line": number, "suggestion": string }], "summary": string }`,
           maxTurns: 15,
           model: this.config.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
-          env: cleanEnv(),
+          env: { ...cleanEnv(), CLAUDE_MEM_MODEL: 'claude-opus-4-6' },
           ...(Object.keys(mcpServers).length > 0 && { mcpServers }),
+          ...(plugins.length > 0 && { plugins }),
+          ...(canUseTool && { canUseTool }),
         },
       })) {
-        if ('result' in message) {
-          result = message.result as string;
-        }
-        if ('costUSD' in message) {
-          cost = (message as { costUSD: number }).costUSD;
+        if (message.type === 'result') {
+          cost = (message as any).total_cost_usd ?? 0;
+          if ('result' in message) {
+            result = (message as any).result;
+          }
         }
       }
 

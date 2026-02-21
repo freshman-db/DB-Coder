@@ -21,6 +21,13 @@ ${standards || 'No specific standards yet. Follow best practices.'}
 ## Context
 ${context || 'No additional context.'}
 ${mcpSection}
+## Skills & Memory
+You have access to specialized skills and persistent memory. Use them proactively:
+- Before starting complex work, search for past solutions: use \`/mem-search <query>\` to find relevant experiences from previous tasks
+- For complex multi-file features, use \`/feature-dev\` for guided architecture-aware development
+- PR review agents are available via the Task tool for specialized reviews (silent-failure-hunter, code-reviewer, pr-test-analyzer)
+- Save important discoveries and patterns to memory using the save_memory tool
+
 ## Instructions
 1. Read relevant files before making changes
 2. Make focused, minimal changes for this subtask
