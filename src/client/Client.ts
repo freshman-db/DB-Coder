@@ -2,9 +2,11 @@ import { log } from '../utils/logger.js';
 
 export class Client {
   private baseUrl: string;
+  private apiToken?: string;
 
-  constructor(port = 18800, host = '127.0.0.1') {
+  constructor(port = 18800, host = '127.0.0.1', apiToken?: string) {
     this.baseUrl = `http://${host}:${port}`;
+    this.apiToken = apiToken;
   }
 
   async status(): Promise<unknown> {
@@ -52,7 +54,10 @@ export class Client {
   }
 
   async followLogs(onEntry: (entry: unknown) => void): Promise<void> {
-    const res = await fetch(`${this.baseUrl}/api/logs?follow=true`);
+    const res = await fetch(`${this.baseUrl}/api/logs?follow=true`, {
+      headers: this.getAuthHeaders(),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     const reader = res.body?.getReader();
     if (!reader) throw new Error('No response body');
 
@@ -81,7 +86,10 @@ export class Client {
   }
 
   private async get(path: string): Promise<unknown> {
-    const res = await fetch(`${this.baseUrl}${path}`, { signal: AbortSignal.timeout(10000) });
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      headers: this.getAuthHeaders(),
+      signal: AbortSignal.timeout(10000),
+    });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     return res.json();
   }
@@ -89,7 +97,7 @@ export class Client {
   private async post(path: string, body?: unknown): Promise<unknown> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...this.getAuthHeaders(), 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(10000),
     });
@@ -100,9 +108,15 @@ export class Client {
   private async del(path: string): Promise<unknown> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'DELETE',
+      headers: this.getAuthHeaders(),
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     return res.json();
+  }
+
+  private getAuthHeaders(): Record<string, string> {
+    if (!this.apiToken) return {};
+    return { Authorization: `Bearer ${this.apiToken}` };
   }
 }
