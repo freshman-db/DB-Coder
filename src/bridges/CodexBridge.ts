@@ -49,7 +49,12 @@ export class CodexBridge implements CodingAgent {
       try {
         output = readFileSync(outFile, 'utf-8');
         unlinkSync(outFile);
-      } catch { /* output file may not exist */ }
+      } catch (err) {
+        log.debug('CodexBridge execute output file read failed', {
+          error: err,
+          inputPreview: prompt.slice(0, 200),
+        });
+      }
 
       // Parse result - codex exit code is always 0, check events
       const success = !events.some(e =>
@@ -114,7 +119,12 @@ ${prompt}`;
       try {
         output = readFileSync(outFile, 'utf-8');
         unlinkSync(outFile);
-      } catch { /* ignore */ }
+      } catch (err) {
+        log.debug('CodexBridge review output file read failed', {
+          error: err,
+          inputPreview: reviewPrompt.slice(0, 200),
+        });
+      }
 
       const cost = extractCost(events);
       const parsed = tryParseReview(output || events.map(e => String(e.content ?? '')).join('\n'));
@@ -171,7 +181,12 @@ function tryParseReview(output: string): Omit<ReviewResult, 'cost_usd'> {
         issues: Array.isArray(parsed.issues) ? parsed.issues : [],
         summary: parsed.summary ?? '',
       };
-    } catch { /* fall through */ }
+    } catch (err) {
+      log.debug('CodexBridge tryParseReview JSON parse failed', {
+        error: err,
+        inputPreview: output.slice(0, 200),
+      });
+    }
   }
   const hasIssues = /critical|error|bug|vulnerability|security/i.test(output);
   return {
