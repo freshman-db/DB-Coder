@@ -11,7 +11,8 @@
     "dev": "tsc --watch",
     "pretest": "npm run build",
     "start": "node dist/index.js",
-    "test": "sh -c 'if ! find dist -type f -name \"*.test.js\" -print -quit | grep -q .; then echo \"No compiled tests found in dist/.\"; exit 1; fi; node --test \"dist/**/*.test.js\"'"
+    "test": "sh -c 'if ! find dist -type f -name \"*.test.js\" -print -quit | grep -q .; then echo \"No compiled tests found in dist/.\"; exit 1; fi; node --test \"dist/**/*.test.js\"'",
+    "test:ci": "sh -c 'if ! find dist -type f -name \"*.test.js\" -print -quit | grep -q .; then echo \"No compiled tests found in dist/.\"; exit 1; fi; node --test \"dist/**/*.test.js\"'"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.50",

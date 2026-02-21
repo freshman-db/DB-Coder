@@ -11,14 +11,27 @@ export class CodexBridge implements CodingAgent {
 
   constructor(private config: CodexConfig) {}
 
-  /** Map config sandbox value to the corresponding Codex CLI flag */
-  private sandboxFlag(overrideSandbox?: CodexConfig['sandbox']): string {
+  /**
+   * Map config sandbox value to the corresponding Codex CLI flags.
+   *
+   * `codex exec` expects `--sandbox <level>` (two args) or `--full-auto` (single flag).
+   * Note: `sandboxOverride` is intentionally a CodexBridge-specific option
+   * and not part of the CodingAgent interface — sandbox control is an
+   * implementation detail that callers via the interface shouldn't need.
+   */
+  private sandboxArgs(overrideSandbox?: CodexConfig['sandbox']): string[] {
     const level = overrideSandbox ?? this.config.sandbox;
     switch (level) {
-      case 'workspace-read':  return '--read-only';
-      case 'workspace-write': return '--workspace-write';
-      case 'full-auto':       return '--full-auto';
-      default:                return '--workspace-write'; // safe default
+      case 'workspace-read':  return ['--sandbox', 'read-only'];
+      case 'workspace-write': return ['--sandbox', 'workspace-write'];
+      case 'full-auto':       return ['--full-auto'];
+      default: {
+        // Exhaustive check — TypeScript should catch this at compile time,
+        // but log a warning for runtime safety (e.g. bad config values).
+        const _exhaustive: never = level;
+        log.warn('Unknown sandbox level, defaulting to workspace-write', { level });
+        return ['--sandbox', 'workspace-write'];
+      }
     }
   }
 
@@ -35,7 +48,7 @@ export class CodexBridge implements CodingAgent {
     try {
       const args = [
         'exec',
-        this.sandboxFlag(options?.sandboxOverride),
+        ...this.sandboxArgs(options?.sandboxOverride),
         '--json',
         '-o', outFile,
       ];
@@ -68,8 +81,19 @@ export class CodexBridge implements CodingAgent {
         });
       }
 
-      // Parse result - codex exit code is always 0, check events
-      const success = !events.some(e =>
+      // Non-zero exit code means Codex CLI itself failed (bad flags, crash, etc.)
+      if (exitCode !== 0) {
+        log.warn('CodexBridge execute: non-zero exit code', { exitCode, stderr: stderr?.slice(0, 500) });
+        return {
+          success: false,
+          output: stderr || `codex exec failed with exit code ${exitCode}`,
+          cost_usd: extractCost(events),
+          duration_ms: Date.now() - start,
+        };
+      }
+
+      // Exit code 0 — check events for logical errors
+      const hasEventError = events.some(e =>
         e.type === 'error' ||
         (e.type === 'function_call_output' && String(e.output ?? '').includes('Error')),
       );
@@ -77,7 +101,7 @@ export class CodexBridge implements CodingAgent {
       const cost = extractCost(events);
 
       return {
-        success,
+        success: !hasEventError,
         output: output || events.map(e => String(e.content ?? e.output ?? '')).join('\n'),
         cost_usd: cost,
         duration_ms: Date.now() - start,
@@ -123,12 +147,23 @@ Output your review as JSON: { "passed": boolean, "issues": [{ "severity": "criti
 ${prompt}`;
 
       // Reviews are read-only — enforce workspace-read regardless of config
-      const args = ['exec', this.sandboxFlag('workspace-read'), '--json', '-o', outFile, reviewPrompt];
+      const args = ['exec', ...this.sandboxArgs('workspace-read'), '--json', '-o', outFile, reviewPrompt];
 
-      const { events } = await spawnWithJsonl('codex', args, {
+      const { exitCode, events, stderr } = await spawnWithJsonl('codex', args, {
         cwd,
         timeout: 300_000,
       });
+
+      // Non-zero exit code means the CLI invocation itself failed
+      if (exitCode !== 0) {
+        log.warn('CodexBridge review: non-zero exit code', { exitCode, stderr: stderr?.slice(0, 500) });
+        return {
+          passed: false,
+          issues: [{ severity: 'critical', description: `codex exec failed (exit ${exitCode}): ${stderr?.slice(0, 300) ?? 'unknown error'}`, source: 'codex' }],
+          summary: `Codex review failed with exit code ${exitCode}`,
+          cost_usd: extractCost(events),
+        };
+      }
 
       let output = '';
       try {
