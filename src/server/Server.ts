@@ -1,6 +1,6 @@
 import { createServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
-import { join, extname } from 'node:path';
+import { join, extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { MainLoop } from '../core/MainLoop.js';
 import type { TaskStore } from '../memory/TaskStore.js';
@@ -83,9 +83,23 @@ export class Server {
     }
 
     const filePath = join(this.webDir, pathname);
+    const resolvedRoot = resolve(this.webDir);
+
+    // Path traversal protection: ensure resolved path stays within webDir
+    const resolvedFile = resolve(filePath);
+    if (!resolvedFile.startsWith(resolvedRoot)) {
+      res.writeHead(403).end('Forbidden');
+      return;
+    }
+
     if (!existsSync(filePath)) {
       // Fallback to index.html for SPA routing
       const indexPath = join(this.webDir, 'index.html');
+      const resolvedIndex = resolve(indexPath);
+      if (!resolvedIndex.startsWith(resolvedRoot)) {
+        res.writeHead(403).end('Forbidden');
+        return;
+      }
       if (existsSync(indexPath)) {
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(readFileSync(indexPath));
