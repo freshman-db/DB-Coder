@@ -270,9 +270,9 @@ export class MainLoop {
       this.state = 'reviewing';
       await this.taskStore.updateTask(task.id, { phase: 'reviewing' });
 
-      let changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
-      let reviewResult = await this.dualReview(task, changedFiles);
       let reviewRetries = 0;
+      let changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
+      let { merged: reviewResult, decision: reviewDecision } = await this.dualReview(task, changedFiles, reviewRetries);
 
       await this.taskStore.updateTask(task.id, {
         review_results: [...(task.review_results as unknown[] || []), reviewResult],
@@ -282,7 +282,7 @@ export class MainLoop {
       await this.saveReviewEvent(task.id, 0, reviewResult, null);
 
       // Fix-and-re-review loop (in-place, no task re-queue)
-      while (!reviewResult.passed && reviewRetries < this.config.values.autonomy.maxRetries) {
+      while (reviewDecision === 'retry') {
         if (!(await this.enforceBudget(task.id))) return;
 
         reviewRetries++;
@@ -303,7 +303,7 @@ export class MainLoop {
         if (!(await this.enforceBudget(task.id))) return;
 
         changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
-        reviewResult = await this.dualReview(task, changedFiles);
+        ({ merged: reviewResult, decision: reviewDecision } = await this.dualReview(task, changedFiles, reviewRetries));
 
         // Record review event with fix agent info
         await this.saveReviewEvent(task.id, reviewRetries, reviewResult, fixAgentName);
@@ -392,8 +392,12 @@ export class MainLoop {
     return result;
   }
 
-  /** Dual review: Claude + Codex in parallel, merge results */
-  private async dualReview(task: Task, changedFiles: string[]): Promise<MergedReviewResult> {
+  /** Dual review: Claude + Codex in parallel, then merge and decide next action */
+  private async dualReview(
+    task: Task,
+    changedFiles: string[],
+    reviewRetries: number,
+  ): Promise<{ merged: MergedReviewResult; decision: 'approve' | 'retry' | 'reject' }> {
     const filesStr = changedFiles.join('\n');
     const reviewMcpNames = this.claude.getMcpServerNames('review');
     const agentGuide = buildAgentGuidance('review', this.claude.getLoadedPluginIds());
@@ -415,8 +419,22 @@ export class MainLoop {
       await this.costTracker.addCost(task.id, codexReview.cost_usd);
     }
 
-    // Merge: intersection = must fix, single = should fix
-    return mergeReviews(claudeReview, codexReview);
+    return this.handleReviewResult(claudeReview, codexReview, reviewRetries);
+  }
+
+  private handleReviewResult(
+    claudeReview: ReviewResult,
+    codexReview: ReviewResult,
+    reviewRetries: number,
+  ): { merged: MergedReviewResult; decision: 'approve' | 'retry' | 'reject' } {
+    const merged = mergeReviews(claudeReview, codexReview);
+    if (merged.passed) {
+      return { merged, decision: 'approve' };
+    }
+    if (reviewRetries >= this.config.values.autonomy.maxRetries) {
+      return { merged, decision: 'reject' };
+    }
+    return { merged, decision: 'retry' };
   }
 
   /** Graduated stuck handling: retry → reflect → skip. Populates stuckAdjustments for downstream use. */
