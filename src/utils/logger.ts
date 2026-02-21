@@ -43,8 +43,19 @@ class Logger {
     };
   }
 
+  private shouldLog(level: LogLevel): boolean {
+    return LEVEL_PRIORITY[level] >= LEVEL_PRIORITY[this.minLevel];
+  }
+
+  private writeConsole(entry: LogEntry): void {
+    const color = LEVEL_COLORS[entry.level];
+    const prefix = `${color}[${entry.timestamp}] [${entry.level.toUpperCase()}]${RESET}`;
+    console.log(`${prefix} ${entry.message}`);
+    if (entry.data !== undefined) console.log(entry.data);
+  }
+
   private emit(level: LogLevel, message: string, data?: unknown): void {
-    if (LEVEL_PRIORITY[level] < LEVEL_PRIORITY[this.minLevel]) return;
+    if (!this.shouldLog(level)) return;
 
     const entry: LogEntry = {
       timestamp: new Date().toISOString(),
@@ -54,19 +65,36 @@ class Logger {
     };
 
     // Terminal output
-    const color = LEVEL_COLORS[level];
-    const prefix = `${color}[${entry.timestamp}] [${level.toUpperCase()}]${RESET}`;
-    console.log(`${prefix} ${message}`);
-    if (data !== undefined) console.log(data);
+    this.writeConsole(entry);
 
     // File output
     try {
       appendFileSync(this.logFile, JSON.stringify(entry) + '\n');
-    } catch { /* ignore file write errors */ }
+    } catch (err) {
+      if (this.shouldLog('debug')) {
+        this.writeConsole({
+          timestamp: new Date().toISOString(),
+          level: 'debug',
+          message: 'Failed to write log entry to file',
+          data: err,
+        });
+      }
+    }
 
     // Notify listeners (for SSE streaming)
     for (const listener of this.listeners) {
-      try { listener(entry); } catch { /* ignore listener errors */ }
+      try {
+        listener(entry);
+      } catch (err) {
+        if (this.shouldLog('debug')) {
+          this.writeConsole({
+            timestamp: new Date().toISOString(),
+            level: 'debug',
+            message: 'Log listener callback failed',
+            data: err,
+          });
+        }
+      }
     }
   }
 
