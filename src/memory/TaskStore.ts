@@ -118,6 +118,13 @@ export class TaskStore {
     );
   }
 
+  async incrementTaskCost(taskId: string, amount: number): Promise<void> {
+    await this.sql.unsafe(
+      'UPDATE tasks SET total_cost_usd = COALESCE(total_cost_usd, 0) + $1 WHERE id = $2',
+      [amount, taskId] as postgres.ParameterOrJSON<never>[],
+    );
+  }
+
   async deleteTask(id: string): Promise<void> {
     await this.sql`DELETE FROM task_logs WHERE task_id = ${id}`;
     await this.sql`DELETE FROM tasks WHERE id = ${id}`;

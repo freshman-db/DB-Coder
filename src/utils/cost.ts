@@ -13,10 +13,7 @@ export class CostTracker {
   async addCost(taskId: string, costUsd: number): Promise<void> {
     this.sessionCost += costUsd;
     await this.store.addDailyCost(costUsd);
-    await this.store.updateTask(taskId, {
-      total_cost_usd: undefined, // will use SQL increment below
-    });
-    // Direct SQL for atomic increment would be better, but updateTask handles partial updates
+    await this.store.incrementTaskCost(taskId, costUsd);
   }
 
   async checkBudget(taskId: string): Promise<{ allowed: boolean; reason?: string }> {
