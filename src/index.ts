@@ -13,6 +13,7 @@ import { TaskQueue } from './core/TaskQueue.js';
 import { MainLoop } from './core/MainLoop.js';
 import { CostTracker } from './utils/cost.js';
 import { Server } from './server/Server.js';
+import { McpDiscovery } from './mcp/McpDiscovery.js';
 import { log } from './utils/logger.js';
 
 const program = new Command()
@@ -30,7 +31,7 @@ program
     log.info(`Starting db-coder for project: ${projectPath}`);
 
     const config = new Config(projectPath);
-    const { memory, claude: claudeConfig, codex: codexConfig, budget } = config.values;
+    const { memory, claude: claudeConfig, codex: codexConfig, budget, mcp: mcpConfig } = config.values;
 
     // Initialize components
     const globalMemory = new GlobalMemory(memory.pgConnectionString);
@@ -40,7 +41,11 @@ program
     await globalMemory.init();
     await taskStore.init();
 
-    const claudeBridge = new ClaudeBridge(claudeConfig);
+    // Discover MCP servers from Claude plugins
+    const mcpDiscovery = new McpDiscovery(mcpConfig);
+    await mcpDiscovery.discover();
+
+    const claudeBridge = new ClaudeBridge(claudeConfig, mcpDiscovery);
     const codexBridge = new CodexBridge(codexConfig);
     const brain = new Brain(claudeBridge, globalMemory, projectMemory, taskStore);
     const taskQueue = new TaskQueue(taskStore);

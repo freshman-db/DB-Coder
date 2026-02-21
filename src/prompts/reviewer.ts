@@ -1,7 +1,10 @@
 export function reviewerPrompt(
   taskDescription: string,
   changedFiles: string,
+  mcpServerNames?: string[],
 ): string {
+  const mcpSection = buildReviewMcpSection(mcpServerNames);
+
   return `Review the code changes for this task.
 
 ## Task Description
@@ -9,7 +12,7 @@ ${taskDescription}
 
 ## Changed Files
 ${changedFiles}
-
+${mcpSection}
 ## Review Checklist
 1. **Correctness**: Does the code do what the task requires?
 2. **Quality**: Is it clean, readable, and well-structured?
@@ -33,4 +36,19 @@ Output your review as JSON:
   }],
   "summary": string
 }`;
+}
+
+function buildReviewMcpSection(serverNames?: string[]): string {
+  if (!serverNames?.length) return '';
+  const tips: string[] = [];
+  if (serverNames.includes('serena')) {
+    tips.push(`- **Serena**: Use find_referencing_symbols to verify that changed APIs don't break callers. Use get_symbols_overview to check structural integrity.`);
+  }
+  if (serverNames.includes('playwright')) {
+    tips.push(`- **Playwright**: For frontend changes — navigate to the page and take a snapshot to verify UI renders correctly.`);
+  }
+  if (serverNames.includes('greptile')) {
+    tips.push(`- **Greptile**: Search for related patterns or similar past review feedback.`);
+  }
+  return `\n## Available MCP Tools for Review\n${tips.join('\n')}\n`;
 }

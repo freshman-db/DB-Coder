@@ -9,7 +9,19 @@ Your core principles:
 
 You have access to read-only tools. Analyze code but DO NOT modify files.`;
 
-export function scanPrompt(projectPath: string, depth: string, recentChanges: string, memories: string): string {
+export function brainMcpGuidance(serverNames: string[]): string {
+  if (serverNames.length === 0) return '';
+  const tips: string[] = [];
+  if (serverNames.includes('serena')) {
+    tips.push(`- **Serena** (semantic code analysis): Use find_symbol, get_symbols_overview, find_referencing_symbols for precise code understanding. Prefer Serena over blind Grep for locating classes, methods, and their relationships.`);
+  }
+  if (serverNames.includes('context7')) {
+    tips.push(`- **Context7** (library docs): Use resolve-library-id + query-docs to look up API documentation for unfamiliar libraries.`);
+  }
+  return tips.length > 0 ? `\n## Available MCP Tools\n${tips.join('\n')}` : '';
+}
+
+export function scanPrompt(projectPath: string, depth: string, recentChanges: string, memories: string, mcpGuidance?: string): string {
   return `Scan the project at ${projectPath}.
 Scan depth: ${depth}
 
@@ -18,7 +30,7 @@ ${recentChanges || 'No recent changes detected.'}
 
 Relevant memories from past experience:
 ${memories || 'No relevant memories yet.'}
-
+${mcpGuidance || ''}
 Analyze the project by:
 1. Reading key files (package.json, README, config files, main source files)
 2. Running git log to understand recent activity

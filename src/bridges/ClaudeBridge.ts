@@ -1,6 +1,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { CodingAgent, AgentResult, ReviewResult, ReviewIssue } from './CodingAgent.js';
 import type { ClaudeConfig } from '../config/types.js';
+import type { McpDiscovery, Phase } from '../mcp/McpDiscovery.js';
 import { log } from '../utils/logger.js';
 
 // Tools to remove from env to avoid nesting conflicts
@@ -20,7 +21,15 @@ function cleanEnv(): Record<string, string> {
 export class ClaudeBridge implements CodingAgent {
   readonly name = 'claude';
 
-  constructor(private config: ClaudeConfig) {}
+  constructor(
+    private config: ClaudeConfig,
+    private mcpDiscovery?: McpDiscovery,
+  ) {}
+
+  /** Get MCP server names available for a phase (for prompt building) */
+  getMcpServerNames(phase: Phase): string[] {
+    return this.mcpDiscovery?.getServerNames(phase) ?? [];
+  }
 
   async execute(prompt: string, cwd: string, options?: {
     systemPrompt?: string;
@@ -33,16 +42,17 @@ export class ClaudeBridge implements CodingAgent {
     let cost = 0;
 
     try {
+      const mcpServers = this.mcpDiscovery?.getServersForPhase('execute') ?? {};
       for await (const message of query({
         prompt,
         options: {
           cwd,
-          allowedTools: ['Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'],
           permissionMode: 'bypassPermissions',
           systemPrompt: options?.systemPrompt,
           maxTurns: options?.maxTurns ?? this.config.maxTurns,
           model: this.config.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
           env: cleanEnv(),
+          ...(Object.keys(mcpServers).length > 0 && { mcpServers }),
         },
       })) {
         if ('result' in message) {
@@ -79,17 +89,19 @@ export class ClaudeBridge implements CodingAgent {
     let cost = 0;
 
     try {
+      const mcpServers = this.mcpDiscovery?.getServersForPhase('plan') ?? {};
       for await (const message of query({
         prompt,
         options: {
           cwd,
-          // Plan mode: read-only tools only
-          allowedTools: ['Read', 'Glob', 'Grep', 'Bash'],
+          // Plan mode: read-only tools + MCP tools for semantic analysis
+          tools: ['Read', 'Glob', 'Grep', 'Bash'],
           permissionMode: 'bypassPermissions',
           systemPrompt: options?.systemPrompt,
           maxTurns: options?.maxTurns ?? 20,
           model: this.config.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
           env: cleanEnv(),
+          ...(Object.keys(mcpServers).length > 0 && { mcpServers }),
         },
       })) {
         if ('result' in message) {
@@ -123,11 +135,12 @@ export class ClaudeBridge implements CodingAgent {
     let cost = 0;
 
     try {
+      const mcpServers = this.mcpDiscovery?.getServersForPhase('review') ?? {};
       for await (const message of query({
         prompt,
         options: {
           cwd,
-          allowedTools: ['Read', 'Glob', 'Grep', 'Bash'],
+          tools: ['Read', 'Glob', 'Grep', 'Bash'],
           permissionMode: 'bypassPermissions',
           systemPrompt: `You are a senior code reviewer. Review the code changes carefully.
 Focus on: architecture, design patterns, frontend quality, accessibility, UX.
@@ -135,6 +148,7 @@ Output your review as JSON: { "passed": boolean, "issues": [{ "severity": "criti
           maxTurns: 15,
           model: this.config.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
           env: cleanEnv(),
+          ...(Object.keys(mcpServers).length > 0 && { mcpServers }),
         },
       })) {
         if ('result' in message) {

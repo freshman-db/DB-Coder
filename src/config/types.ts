@@ -46,6 +46,13 @@ export interface GitConfig {
   protectedBranches: string[];
 }
 
+export interface McpConfig {
+  enabled: boolean;
+  serverPhases?: Record<string, string[]>;  // override default phase routing
+  disabled?: string[];                       // servers to skip
+  custom?: Record<string, { command?: string; args?: string[]; type?: string; url?: string; headers?: Record<string, string> }>;
+}
+
 export interface ServerConfig {
   port: number;
   host: string;
@@ -61,6 +68,7 @@ export interface DbCoderConfig {
   memory: MemoryConfig;
   git: GitConfig;
   server: ServerConfig;
+  mcp: McpConfig;
 }
 
 export type DeepPartial<T> = {

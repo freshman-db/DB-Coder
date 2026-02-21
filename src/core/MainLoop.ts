@@ -192,7 +192,8 @@ export class MainLoop {
         await this.taskStore.updateTask(task.id, { subtasks });
 
         const agent = subtask.executor === 'claude' ? this.claude : this.codex;
-        const prompt = executorPrompt(task.task_description, subtask.description, standards, '');
+        const mcpNames = subtask.executor === 'claude' ? this.claude.getMcpServerNames('execute') : [];
+        const prompt = executorPrompt(task.task_description, subtask.description, standards, '', mcpNames);
 
         const result = await agent.execute(prompt, projectPath, {
           timeout: this.config.values.autonomy.subtaskTimeout * 1000,
@@ -280,7 +281,8 @@ export class MainLoop {
   /** Dual review: Claude + Codex in parallel, merge results */
   private async dualReview(task: Task, changedFiles: string[]): Promise<MergedReviewResult> {
     const filesStr = changedFiles.join('\n');
-    const reviewPromptText = reviewerPrompt(task.task_description, filesStr);
+    const reviewMcpNames = this.claude.getMcpServerNames('review');
+    const reviewPromptText = reviewerPrompt(task.task_description, filesStr, reviewMcpNames);
 
     // Run both reviews in parallel
     const [claudeReview, codexReview] = await Promise.all([

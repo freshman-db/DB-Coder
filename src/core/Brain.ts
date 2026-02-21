@@ -3,7 +3,7 @@ import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { ProjectMemory } from '../memory/ProjectMemory.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { ProjectAnalysis, TaskPlan, ReflectionResult } from './types.js';
-import { BRAIN_SYSTEM_PROMPT, scanPrompt, planPrompt, reflectPrompt } from '../prompts/brain.js';
+import { BRAIN_SYSTEM_PROMPT, scanPrompt, planPrompt, reflectPrompt, brainMcpGuidance } from '../prompts/brain.js';
 import { getHeadCommit, getRecentLog, getChangedFilesSince } from '../utils/git.js';
 import { log } from '../utils/logger.js';
 
@@ -42,7 +42,8 @@ export class Brain {
     const projectMems = await this.projectMemory.search('architecture structure', 5);
     const allMemories = memories + '\n' + projectMems.map(m => m.text).join('\n');
 
-    const prompt = scanPrompt(projectPath, depth, recentChanges, allMemories);
+    const mcpGuidance = brainMcpGuidance(this.claude.getMcpServerNames('scan'));
+    const prompt = scanPrompt(projectPath, depth, recentChanges, allMemories, mcpGuidance);
     const result = await this.claude.plan(prompt, projectPath, {
       systemPrompt: BRAIN_SYSTEM_PROMPT,
       maxTurns: depth === 'deep' ? 30 : depth === 'normal' ? 20 : 10,

@@ -20,6 +20,7 @@ const DEFAULTS: DbCoderConfig = {
   },
   git: { branchPrefix: 'db-coder/', protectedBranches: ['main', 'master'] },
   server: { port: 18800, host: '127.0.0.1' },
+  mcp: { enabled: true },
 };
 
 function deepMerge(target: DbCoderConfig, source: DeepPartial<DbCoderConfig>): DbCoderConfig {
