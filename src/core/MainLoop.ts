@@ -129,11 +129,7 @@ export class MainLoop {
     // EXECUTE + REVIEW queued tasks
     let task = await this.taskQueue.getNext(projectPath);
     while (task && this.running && !this.paused) {
-      // Budget check
-      const budget = await this.costTracker.checkBudget(task.id);
-      if (!budget.allowed) {
-        log.warn(`Budget exceeded: ${budget.reason}`);
-        await this.taskStore.updateTask(task.id, { status: 'blocked', phase: 'blocked' });
+      if (!(await this.enforceBudget(task.id))) {
         break;
       }
 
@@ -188,6 +184,8 @@ export class MainLoop {
 
       for (const subtask of subtasks) {
         if (subtask.status === 'done') continue;
+        if (!(await this.enforceBudget(task.id))) return;
+
         subtask.status = 'running';
         await this.taskStore.updateTask(task.id, { subtasks });
 
@@ -213,6 +211,13 @@ export class MainLoop {
           duration_ms: result.duration_ms,
         });
 
+        if (!(await this.enforceBudget(task.id))) {
+          subtask.status = 'failed';
+          subtask.result = 'Blocked: budget exceeded';
+          await this.taskStore.updateTask(task.id, { subtasks });
+          return;
+        }
+
         if (result.success) {
           subtask.status = 'done';
           subtask.result = result.output.slice(0, 200);
@@ -230,6 +235,8 @@ export class MainLoop {
       }
 
       // REVIEW (dual review)
+      if (!(await this.enforceBudget(task.id))) return;
+
       this.state = 'reviewing';
       await this.taskStore.updateTask(task.id, { phase: 'reviewing' });
 
@@ -240,6 +247,8 @@ export class MainLoop {
         review_results: [...(task.review_results as unknown[] || []), reviewResult],
         iteration: task.iteration + 1,
       });
+
+      if (!(await this.enforceBudget(task.id))) return;
 
       if (!reviewResult.passed && task.iteration < this.config.values.autonomy.maxRetries) {
         // Fix review issues and re-review
@@ -345,6 +354,15 @@ export class MainLoop {
 
   private releaseLock(): void {
     try { unlinkSync(this.lockFile); } catch { /* ignore */ }
+  }
+
+  private async enforceBudget(taskId: string): Promise<boolean> {
+    const budget = await this.costTracker.checkBudget(taskId);
+    if (budget.allowed) return true;
+
+    log.warn(`Budget exceeded: ${budget.reason}`);
+    await this.taskStore.updateTask(taskId, { status: 'blocked', phase: 'blocked' });
+    return false;
   }
 }
 
