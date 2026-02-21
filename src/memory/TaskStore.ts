@@ -118,14 +118,22 @@ const TASK_UPDATE_FIELDS: Array<keyof TaskUpdateInput> = [
 const TASK_JSONB_FIELDS = new Set<keyof TaskUpdateInput>(['plan', 'subtasks', 'review_results']);
 
 export class TaskStore {
-  private sql: postgres.Sql;
+  private sql: postgres.Sql | null;
   private isClosed = false;
 
   constructor(connectionString: string) {
     this.sql = getDb(connectionString);
   }
 
+  /** Throws if this instance has already been closed. */
+  private assertOpen(): asserts this is { sql: postgres.Sql } {
+    if (this.isClosed) {
+      throw new Error('TaskStore is closed');
+    }
+  }
+
   async init(): Promise<void> {
+    this.assertOpen();
     await this.sql.unsafe(SCHEMA_SQL);
     log.info('TaskStore initialized');
   }
@@ -133,6 +141,7 @@ export class TaskStore {
   // --- Tasks ---
 
   async createTask(projectPath: string, description: string, priority = 2): Promise<Task> {
+    this.assertOpen();
     const [row] = await this.sql<Task[]>`
       INSERT INTO tasks (project_path, task_description, priority)
       VALUES (${projectPath}, ${description}, ${priority})
@@ -142,11 +151,13 @@ export class TaskStore {
   }
 
   async getTask(id: string): Promise<Task | null> {
+    this.assertOpen();
     const [row] = await this.sql<Task[]>`SELECT * FROM tasks WHERE id = ${id}`;
     return row ?? null;
   }
 
   async listTasks(projectPath: string, status?: TaskStatus): Promise<Task[]> {
+    this.assertOpen();
     if (status) {
       return this.sql<Task[]>`
         SELECT * FROM tasks WHERE project_path = ${projectPath} AND status = ${status}
@@ -160,6 +171,7 @@ export class TaskStore {
   }
 
   async updateTask(id: string, updates: TaskUpdateInput): Promise<void> {
+    this.assertOpen();
     const sets: string[] = [];
     const vals: unknown[] = [];
     for (const field of TASK_UPDATE_FIELDS) {
@@ -181,6 +193,7 @@ export class TaskStore {
   }
 
   async incrementTaskCost(taskId: string, amount: number): Promise<void> {
+    this.assertOpen();
     await this.sql.unsafe(
       'UPDATE tasks SET total_cost_usd = COALESCE(total_cost_usd, 0) + $1 WHERE id = $2',
       [amount, taskId] as postgres.ParameterOrJSON<never>[],
@@ -188,11 +201,13 @@ export class TaskStore {
   }
 
   async deleteTask(id: string): Promise<void> {
+    this.assertOpen();
     await this.sql`DELETE FROM task_logs WHERE task_id = ${id}`;
     await this.sql`DELETE FROM tasks WHERE id = ${id}`;
   }
 
   async recoverActiveTasks(projectPath: string): Promise<number> {
+    this.assertOpen();
     const result = await this.sql`
       UPDATE tasks SET status = 'queued', phase = 'init', updated_at = NOW()
       WHERE project_path = ${projectPath} AND status = 'active'
@@ -201,6 +216,7 @@ export class TaskStore {
   }
 
   async getNextTask(projectPath: string): Promise<Task | null> {
+    this.assertOpen();
     const [row] = await this.sql<Task[]>`
       SELECT * FROM tasks
       WHERE project_path = ${projectPath} AND status = 'queued'
@@ -211,6 +227,7 @@ export class TaskStore {
   }
 
   async findSimilarTask(projectPath: string, description: string): Promise<Task | null> {
+    this.assertOpen();
     const [row] = await this.sql<Task[]>`
       SELECT *, similarity(task_description, ${description}) AS sim
       FROM tasks
@@ -226,6 +243,7 @@ export class TaskStore {
   // --- Logs ---
 
   async addLog(entry: Omit<TaskLog, 'id' | 'created_at'>): Promise<void> {
+    this.assertOpen();
     await this.sql`
       INSERT INTO task_logs (task_id, phase, agent, input_summary, output_summary, cost_usd, duration_ms)
       VALUES (${entry.task_id}, ${entry.phase}, ${entry.agent},
@@ -235,6 +253,7 @@ export class TaskStore {
   }
 
   async getTaskLogs(taskId: string): Promise<TaskLog[]> {
+    this.assertOpen();
     return this.sql<TaskLog[]>`
       SELECT * FROM task_logs WHERE task_id = ${taskId} ORDER BY created_at ASC
     `;
@@ -243,6 +262,7 @@ export class TaskStore {
   // --- Scan Results ---
 
   async saveScanResult(scan: Omit<ScanResult, 'id' | 'created_at'>): Promise<void> {
+    this.assertOpen();
     await this.sql`
       INSERT INTO scan_results (project_path, commit_hash, depth, result, health_score, cost_usd)
       VALUES (${scan.project_path}, ${scan.commit_hash}, ${scan.depth},
@@ -251,6 +271,7 @@ export class TaskStore {
   }
 
   async getLastScan(projectPath: string): Promise<ScanResult | null> {
+    this.assertOpen();
     const [row] = await this.sql<ScanResult[]>`
       SELECT * FROM scan_results
       WHERE project_path = ${projectPath}
@@ -262,6 +283,7 @@ export class TaskStore {
   // --- Costs ---
 
   async addDailyCost(costUsd: number): Promise<void> {
+    this.assertOpen();
     await this.sql`
       INSERT INTO daily_costs (date, total_cost_usd, task_count)
       VALUES (CURRENT_DATE, ${costUsd}, 1)
@@ -272,6 +294,7 @@ export class TaskStore {
   }
 
   async getDailyCost(date?: string): Promise<{ total_cost_usd: number; task_count: number }> {
+    this.assertOpen();
     const d = date ?? new Date().toISOString().slice(0, 10);
     const [row] = await this.sql<Array<{ total_cost_usd: number; task_count: number }>>`
       SELECT total_cost_usd, task_count FROM daily_costs WHERE date = ${d}
@@ -280,6 +303,7 @@ export class TaskStore {
   }
 
   async getRecentCosts(days = 7): Promise<Array<{ date: string; total_cost_usd: number; task_count: number }>> {
+    this.assertOpen();
     return this.sql<Array<{ date: string; total_cost_usd: number; task_count: number }>>`
       SELECT date::text, total_cost_usd, task_count FROM daily_costs
       ORDER BY date DESC LIMIT ${days}

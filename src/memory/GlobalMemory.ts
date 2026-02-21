@@ -25,14 +25,22 @@ CREATE INDEX IF NOT EXISTS idx_memories_fts ON memories USING gin (to_tsvector('
 `;
 
 export class GlobalMemory {
-  private sql: postgres.Sql;
+  private sql: postgres.Sql | null;
   private isClosed = false;
 
   constructor(connectionString: string) {
     this.sql = getDb(connectionString);
   }
 
+  /** Throws if this instance has already been closed. */
+  private assertOpen(): asserts this is { sql: postgres.Sql } {
+    if (this.isClosed) {
+      throw new Error('GlobalMemory is closed');
+    }
+  }
+
   async init(): Promise<void> {
+    this.assertOpen();
     await this.sql.unsafe(SCHEMA_SQL);
     // Update CHECK constraint to include 'failure' category (for existing tables)
     await this.sql.unsafe(`
@@ -47,6 +55,7 @@ export class GlobalMemory {
   }
 
   async search(query: string, limit = 10): Promise<Memory[]> {
+    this.assertOpen();
     const rows = await this.sql<Memory[]>`
       SELECT *, ts_rank(to_tsvector('simple', title || ' ' || content),
         plainto_tsquery('simple', ${query})) * confidence AS relevance
@@ -60,6 +69,7 @@ export class GlobalMemory {
   }
 
   async add(memory: Omit<Memory, 'id' | 'created_at' | 'updated_at'>): Promise<Memory> {
+    this.assertOpen();
     const [row] = await this.sql<Memory[]>`
       INSERT INTO memories (category, title, content, tags, source_project, confidence)
       VALUES (${memory.category}, ${memory.title}, ${memory.content},
@@ -70,6 +80,7 @@ export class GlobalMemory {
   }
 
   async updateConfidence(id: number, delta: number): Promise<void> {
+    this.assertOpen();
     await this.sql`
       UPDATE memories
       SET confidence = LEAST(1.0, GREATEST(0.0, confidence + ${delta})),
@@ -79,6 +90,7 @@ export class GlobalMemory {
   }
 
   async getByCategory(category: MemoryCategory, limit = 20): Promise<Memory[]> {
+    this.assertOpen();
     return this.sql<Memory[]>`
       SELECT * FROM memories
       WHERE category = ${category}
@@ -88,6 +100,7 @@ export class GlobalMemory {
   }
 
   async getRelevant(query: string, maxTokens = 2000): Promise<string> {
+    // No assertOpen() needed — delegates to search() which already guards
     const memories = await this.search(query, 10);
     let result = '';
     let approxTokens = 0;
@@ -106,6 +119,7 @@ export class GlobalMemory {
       return;
     }
     this.isClosed = true;
+    this.sql = null;
     await closeDb();
   }
 }
