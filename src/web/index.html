@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DB-Coder - AI 编程助手控制台</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
+</head>
+<body>
+  <div id="app">
+    <!-- 侧边栏 -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <h1 class="logo">DB-Coder</h1>
+        <span class="version">v1.0</span>
+      </div>
+      <nav class="nav">
+        <a href="#/" class="nav-item" data-page="dashboard">
+          <span class="nav-icon">&#9632;</span>
+          <span class="nav-label">仪表盘</span>
+        </a>
+        <a href="#/tasks" class="nav-item" data-page="tasks">
+          <span class="nav-icon">&#9776;</span>
+          <span class="nav-label">任务列表</span>
+        </a>
+        <a href="#/history" class="nav-item" data-page="history">
+          <span class="nav-icon">&#8635;</span>
+          <span class="nav-label">历史记录</span>
+        </a>
+        <a href="#/logs" class="nav-item" data-page="logs">
+          <span class="nav-icon">&#9881;</span>
+          <span class="nav-label">运行日志</span>
+        </a>
+        <a href="#/memory" class="nav-item" data-page="memory">
+          <span class="nav-icon">&#128269;</span>
+          <span class="nav-label">记忆检索</span>
+        </a>
+        <a href="#/settings" class="nav-item" data-page="settings">
+          <span class="nav-icon">&#9881;</span>
+          <span class="nav-label">系统设置</span>
+        </a>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="status-indicator" id="connectionStatus">
+          <span class="status-dot offline"></span>
+          <span>未连接</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 主内容区 -->
+    <main class="main-content">
+      <header class="topbar">
+        <button class="menu-toggle" id="menuToggle">&#9776;</button>
+        <div class="topbar-title" id="pageTitle">仪表盘</div>
+        <div class="topbar-actions">
+          <button class="btn btn-sm btn-warning" id="btnPause" title="暂停/恢复">&#9208; 暂停</button>
+          <button class="btn btn-sm btn-primary" id="btnScan" title="触发扫描">&#8635; 扫描</button>
+          <button class="btn btn-sm btn-success" id="btnAddTask" title="新建任务">+ 新建任务</button>
+        </div>
+      </header>
+      <div class="content" id="content">
+        <!-- 动态内容 -->
+      </div>
+    </main>
+  </div>
+
+  <!-- 新建任务模态框 -->
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>新建任务</h3>
+        <button class="modal-close" id="modalClose">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="taskTitle">任务标题</label>
+          <input type="text" id="taskTitle" class="form-input" placeholder="输入任务标题...">
+        </div>
+        <div class="form-group">
+          <label for="taskDesc">任务描述</label>
+          <textarea id="taskDesc" class="form-input" rows="4" placeholder="详细描述任务需求..."></textarea>
+        </div>
+        <div class="form-group">
+          <label for="taskPriority">优先级</label>
+          <select id="taskPriority" class="form-input">
+            <option value="low">低</option>
+            <option value="medium" selected>中</option>
+            <option value="high">高</option>
+            <option value="critical">紧急</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="taskRepo">目标仓库</label>
+          <input type="text" id="taskRepo" class="form-input" placeholder="owner/repo">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="modalCancel">取消</button>
+        <button class="btn btn-primary" id="modalSubmit">创建任务</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
