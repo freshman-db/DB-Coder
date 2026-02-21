@@ -10,7 +10,7 @@ import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PluginMonitor } from '../plugins/PluginMonitor.js';
 import type { Task, SubTaskRecord, ReviewEvent } from '../memory/types.js';
 import type { MergedReviewResult, LoopState, PlanTask } from './types.js';
-import type { ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
+import type { AgentResult, ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
 import { executorPrompt } from '../prompts/executor.js';
 import { reviewerPrompt } from '../prompts/reviewer.js';
 import { buildAgentGuidance } from '../prompts/agents.js';
@@ -229,28 +229,7 @@ export class MainLoop {
         subtask.status = 'running';
         await this.taskStore.updateTask(task.id, { subtasks });
 
-        const agent = subtask.executor === 'claude' ? this.claude : this.codex;
-        const mcpNames = subtask.executor === 'claude' ? this.claude.getMcpServerNames('execute') : [];
-        const prompt = executorPrompt(task.task_description, subtask.description, standards, '', mcpNames);
-
-        const result = await agent.execute(prompt, projectPath, {
-          timeout: this.config.values.autonomy.subtaskTimeout * 1000,
-        });
-
-        // Track cost
-        if (result.cost_usd > 0) {
-          await this.costTracker.addCost(task.id, result.cost_usd);
-        }
-
-        await this.taskStore.addLog({
-          task_id: task.id,
-          phase: 'execute',
-          agent: subtask.executor,
-          input_summary: subtask.description.slice(0, 200),
-          output_summary: result.output.slice(0, 500),
-          cost_usd: result.cost_usd,
-          duration_ms: result.duration_ms,
-        });
+        const result = await this.executeSubtask(task, subtask, standards, projectPath);
 
         if (!(await this.enforceBudget(task.id))) {
           subtask.status = 'failed';
@@ -371,6 +350,36 @@ export class MainLoop {
       await switchBranch(originalBranch, projectPath).catch(() => {});
       this.currentTaskId = null;
     }
+  }
+
+  private async executeSubtask(
+    task: Task,
+    subtask: SubTaskRecord,
+    standards: string,
+    projectPath: string,
+  ): Promise<AgentResult> {
+    const agent = subtask.executor === 'claude' ? this.claude : this.codex;
+    const mcpNames = subtask.executor === 'claude' ? this.claude.getMcpServerNames('execute') : [];
+    const prompt = executorPrompt(task.task_description, subtask.description, standards, '', mcpNames);
+    const result = await agent.execute(prompt, projectPath, {
+      timeout: this.config.values.autonomy.subtaskTimeout * 1000,
+    });
+
+    if (result.cost_usd > 0) {
+      await this.costTracker.addCost(task.id, result.cost_usd);
+    }
+
+    await this.taskStore.addLog({
+      task_id: task.id,
+      phase: 'execute',
+      agent: subtask.executor,
+      input_summary: subtask.description.slice(0, 200),
+      output_summary: result.output.slice(0, 500),
+      cost_usd: result.cost_usd,
+      duration_ms: result.duration_ms,
+    });
+
+    return result;
   }
 
   /** Dual review: Claude + Codex in parallel, merge results */
