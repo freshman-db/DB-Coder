@@ -103,7 +103,7 @@ export class TaskStore {
       if (val !== undefined) {
         if (key === 'plan' || key === 'subtasks' || key === 'review_results') {
           sets.push(`${key} = $${vals.length + 1}::jsonb`);
-          vals.push(JSON.stringify(val));
+          vals.push(val);
         } else {
           sets.push(`${key} = $${vals.length + 1}`);
           vals.push(val);
@@ -156,7 +156,7 @@ export class TaskStore {
     await this.sql`
       INSERT INTO scan_results (project_path, commit_hash, depth, result, health_score, cost_usd)
       VALUES (${scan.project_path}, ${scan.commit_hash}, ${scan.depth},
-              ${JSON.stringify(scan.result)}::jsonb, ${scan.health_score}, ${scan.cost_usd})
+              ${this.sql.json(scan.result as any)}, ${scan.health_score}, ${scan.cost_usd})
     `;
   }
 
