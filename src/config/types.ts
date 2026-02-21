@@ -10,14 +10,16 @@ export interface ClaudeConfig {
   maxTurns: number;
 }
 
+export interface TokenPricing {
+  inputPerMillion: number;
+  cachedInputPerMillion: number;
+  outputPerMillion: number;
+}
+
 export interface CodexConfig {
   model: string;
   sandbox: 'workspace-write' | 'workspace-read' | 'full-auto';
-  tokenPricing?: {
-    inputPerMillion: number;
-    cachedInputPerMillion: number;
-    outputPerMillion: number;
-  };
+  tokenPricing?: TokenPricing;
 }
 
 export interface AutonomyConfig {

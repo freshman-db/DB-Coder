@@ -264,13 +264,15 @@ export class MainLoop {
           log.warn(`Subtask failed: ${subtask.description}`);
           const handled = await this.handleRetry(
             task,
-            subtasks,
             subtask,
-            result.output,
-            stuckAdjustments,
-            retryCounts,
-            branchName,
-            projectPath,
+            {
+              subtasks,
+              error: result.output,
+              stuckAdjustments,
+              retryCounts,
+              branchName,
+              projectPath,
+            },
           );
           if (!handled) {
             stopSubtasks = true;
@@ -412,24 +414,27 @@ export class MainLoop {
 
   private async handleRetry(
     task: Task,
-    subtasks: SubTaskRecord[],
     subtask: SubTaskRecord,
-    error: string,
-    stuckAdjustments: string[],
-    retryCounts: Map<string, number>,
-    branchName: string,
-    projectPath: string,
+    context: {
+      subtasks: SubTaskRecord[];
+      error: string;
+      stuckAdjustments: string[];
+      retryCounts: Map<string, number>;
+      branchName: string;
+      projectPath: string;
+    },
   ): Promise<boolean> {
-    const attempt = (retryCounts.get(subtask.id) ?? 0) + 1;
-    retryCounts.set(subtask.id, attempt);
-    const shouldRetry = await this.handleStuck(task, subtask, error, stuckAdjustments, attempt);
+    const attempt = (context.retryCounts.get(subtask.id) ?? 0) + 1;
+    context.retryCounts.set(subtask.id, attempt);
+    const shouldRetry = await this.handleStuck(task, subtask, context.error, context.stuckAdjustments, attempt);
     if (!shouldRetry) return false;
-    const backoffMs = Math.min(8000, 1000 * 2 ** (attempt - 1));
+    const configuredMaxBackoffMs = 1000 * 2 ** Math.max(0, this.config.values.autonomy.maxRetries - 1);
+    const backoffMs = Math.min(Math.min(8000, configuredMaxBackoffMs), 1000 * 2 ** (attempt - 1));
     subtask.status = 'pending';
     subtask.result = `Retrying (attempt ${attempt + 1})`;
-    await this.taskStore.updateTask(task.id, { subtasks });
+    await this.taskStore.updateTask(task.id, { subtasks: context.subtasks });
     await sleep(backoffMs);
-    await switchBranch(branchName, projectPath).catch(() => {});
+    await switchBranch(context.branchName, context.projectPath).catch(() => {});
     return true;
   }
 
@@ -721,13 +726,15 @@ function extractIssueCategories(issues: ReviewIssue[]): string[] {
   const categories = new Set<string>();
   for (const issue of issues) {
     const text = `${issue.description} ${issue.suggestion ?? ''}`;
+    let matched = false;
     for (const [cat, pattern] of Object.entries(CATEGORY_PATTERNS)) {
       if (pattern.test(text)) {
         categories.add(cat);
+        matched = true;
       }
     }
     // Fallback: use severity as category if no pattern matched
-    if (categories.size === 0) {
+    if (!matched) {
       categories.add(`severity-${issue.severity}`);
     }
   }

@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, existsSync } from 'node:fs';
+import { createWriteStream, mkdirSync, existsSync, type WriteStream } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -12,6 +12,11 @@ const RESET = '\x1b[0m';
 
 type LogListener = (entry: LogEntry) => void;
 
+interface LoggerOptions {
+  logDir?: string;
+  registerExitHandlers?: boolean;
+}
+
 export interface LogEntry {
   timestamp: string;
   level: LogLevel;
@@ -19,17 +24,33 @@ export interface LogEntry {
   data?: unknown;
 }
 
-class Logger {
+export class Logger {
   private minLevel: LogLevel = 'info';
-  private logDir: string;
-  private logFile: string;
+  private readonly logDir: string;
+  private readonly logFile: string;
+  private readonly logStream: WriteStream;
   private listeners: LogListener[] = [];
+  private flushPromise: Promise<void> | null = null;
+  private shuttingDown = false;
+  private processHandlers?: {
+    beforeExit: () => void;
+    sigint: () => void;
+    sigterm: () => void;
+  };
 
-  constructor() {
-    this.logDir = join(homedir(), '.db-coder', 'logs');
+  constructor(options: LoggerOptions = {}) {
+    this.logDir = options.logDir ?? join(homedir(), '.db-coder', 'logs');
     if (!existsSync(this.logDir)) mkdirSync(this.logDir, { recursive: true });
     const date = new Date().toISOString().slice(0, 10);
     this.logFile = join(this.logDir, `${date}.log`);
+    this.logStream = createWriteStream(this.logFile, { flags: 'a', encoding: 'utf-8' });
+    this.logStream.on('error', (err) => {
+      this.writeInternalError('Log stream error', err);
+    });
+
+    if (options.registerExitHandlers !== false) {
+      this.registerExitHandlers();
+    }
   }
 
   setLevel(level: LogLevel): void {
@@ -54,6 +75,87 @@ class Logger {
     if (entry.data !== undefined) console.log(entry.data);
   }
 
+  private writeFile(entry: LogEntry): void {
+    if (this.shuttingDown) return;
+    try {
+      this.logStream.write(JSON.stringify(entry) + '\n');
+    } catch (err) {
+      this.writeInternalError('Failed to queue log entry for file write', err);
+    }
+  }
+
+  private writeInternalError(message: string, err: unknown): void {
+    if (!this.shouldLog('debug')) return;
+    this.writeConsole({
+      timestamp: new Date().toISOString(),
+      level: 'debug',
+      message,
+      data: err,
+    });
+  }
+
+  private registerExitHandlers(): void {
+    if (this.processHandlers) return;
+
+    const beforeExit = (): void => {
+      void this.flush();
+    };
+    const sigint = (): void => {
+      void this.flushAndExit(130);
+    };
+    const sigterm = (): void => {
+      void this.flushAndExit(143);
+    };
+
+    this.processHandlers = { beforeExit, sigint, sigterm };
+    process.once('beforeExit', beforeExit);
+    process.once('SIGINT', sigint);
+    process.once('SIGTERM', sigterm);
+  }
+
+  private unregisterExitHandlers(): void {
+    if (!this.processHandlers) return;
+    process.off('beforeExit', this.processHandlers.beforeExit);
+    process.off('SIGINT', this.processHandlers.sigint);
+    process.off('SIGTERM', this.processHandlers.sigterm);
+    this.processHandlers = undefined;
+  }
+
+  async flush(): Promise<void> {
+    if (this.flushPromise) {
+      await this.flushPromise;
+      return;
+    }
+
+    this.shuttingDown = true;
+    this.flushPromise = new Promise((resolve) => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+
+      this.logStream.once('error', finish);
+      this.logStream.end(finish);
+    });
+    await this.flushPromise;
+  }
+
+  async shutdown(): Promise<void> {
+    this.unregisterExitHandlers();
+    await this.flush();
+  }
+
+  private async flushAndExit(code: number): Promise<void> {
+    this.unregisterExitHandlers();
+    try {
+      await this.flush();
+    } finally {
+      process.exit(code);
+    }
+  }
+
   private emit(level: LogLevel, message: string, data?: unknown): void {
     if (!this.shouldLog(level)) return;
 
@@ -68,32 +170,14 @@ class Logger {
     this.writeConsole(entry);
 
     // File output
-    try {
-      appendFileSync(this.logFile, JSON.stringify(entry) + '\n');
-    } catch (err) {
-      if (this.shouldLog('debug')) {
-        this.writeConsole({
-          timestamp: new Date().toISOString(),
-          level: 'debug',
-          message: 'Failed to write log entry to file',
-          data: err,
-        });
-      }
-    }
+    this.writeFile(entry);
 
     // Notify listeners (for SSE streaming)
     for (const listener of this.listeners) {
       try {
         listener(entry);
       } catch (err) {
-        if (this.shouldLog('debug')) {
-          this.writeConsole({
-            timestamp: new Date().toISOString(),
-            level: 'debug',
-            message: 'Log listener callback failed',
-            data: err,
-          });
-        }
+        this.writeInternalError('Log listener callback failed', err);
       }
     }
   }
