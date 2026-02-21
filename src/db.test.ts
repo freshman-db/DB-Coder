@@ -5,6 +5,9 @@ import { closeDb, getDb, resetDbForTesting } from './db.js';
 import { GlobalMemory } from './memory/GlobalMemory.js';
 import { TaskStore } from './memory/TaskStore.js';
 
+// These DSNs are for testing pool management logic only (connection sharing,
+// ref-counting, shutdown). The tests use resetDbForTesting() and never actually
+// connect, so no running database is required.
 const PRIMARY_DSN = 'postgres://db-coder:db-coder@127.0.0.1:5432/db_coder_test';
 const OTHER_DSN = 'postgres://db-coder:db-coder@127.0.0.1:5432/db_coder_other';
 

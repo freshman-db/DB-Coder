@@ -32,18 +32,19 @@ export class GlobalMemory {
     this.sql = getDb(connectionString);
   }
 
-  /** Throws if this instance has already been closed. */
-  private assertOpen(): asserts this is { sql: postgres.Sql } {
-    if (this.isClosed) {
+  /** Returns the live SQL connection, or throws if this instance has been closed. */
+  private getSql(): postgres.Sql {
+    if (this.isClosed || !this.sql) {
       throw new Error('GlobalMemory is closed');
     }
+    return this.sql;
   }
 
   async init(): Promise<void> {
-    this.assertOpen();
-    await this.sql.unsafe(SCHEMA_SQL);
+    const sql = this.getSql();
+    await sql.unsafe(SCHEMA_SQL);
     // Update CHECK constraint to include 'failure' category (for existing tables)
-    await this.sql.unsafe(`
+    await sql.unsafe(`
       DO $$ BEGIN
         ALTER TABLE memories DROP CONSTRAINT IF EXISTS memories_category_check;
         ALTER TABLE memories ADD CONSTRAINT memories_category_check
@@ -55,8 +56,8 @@ export class GlobalMemory {
   }
 
   async search(query: string, limit = 10): Promise<Memory[]> {
-    this.assertOpen();
-    const rows = await this.sql<Memory[]>`
+    const sql = this.getSql();
+    const rows = await sql<Memory[]>`
       SELECT *, ts_rank(to_tsvector('simple', title || ' ' || content),
         plainto_tsquery('simple', ${query})) * confidence AS relevance
       FROM memories
@@ -69,19 +70,19 @@ export class GlobalMemory {
   }
 
   async add(memory: Omit<Memory, 'id' | 'created_at' | 'updated_at'>): Promise<Memory> {
-    this.assertOpen();
-    const [row] = await this.sql<Memory[]>`
+    const sql = this.getSql();
+    const [row] = await sql<Memory[]>`
       INSERT INTO memories (category, title, content, tags, source_project, confidence)
       VALUES (${memory.category}, ${memory.title}, ${memory.content},
-              ${this.sql.json(memory.tags)}, ${memory.source_project}, ${memory.confidence})
+              ${sql.json(memory.tags)}, ${memory.source_project}, ${memory.confidence})
       RETURNING *
     `;
     return row;
   }
 
   async updateConfidence(id: number, delta: number): Promise<void> {
-    this.assertOpen();
-    await this.sql`
+    const sql = this.getSql();
+    await sql`
       UPDATE memories
       SET confidence = LEAST(1.0, GREATEST(0.0, confidence + ${delta})),
           updated_at = NOW()
@@ -90,8 +91,8 @@ export class GlobalMemory {
   }
 
   async getByCategory(category: MemoryCategory, limit = 20): Promise<Memory[]> {
-    this.assertOpen();
-    return this.sql<Memory[]>`
+    const sql = this.getSql();
+    return sql<Memory[]>`
       SELECT * FROM memories
       WHERE category = ${category}
       ORDER BY confidence DESC, updated_at DESC
@@ -119,7 +120,7 @@ export class GlobalMemory {
       return;
     }
     this.isClosed = true;
-    this.sql = null;
     await closeDb();
+    this.sql = null;
   }
 }

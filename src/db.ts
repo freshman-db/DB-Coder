@@ -47,13 +47,14 @@ export async function closeDb(): Promise<void> {
     return;
   }
 
-  closed = true;
   if (!sharedSql) {
+    closed = true;
     return;
   }
 
   if (!closePromise) {
     const sql = sharedSql;
+    closed = true;
     closePromise = (async () => {
       try {
         await sql.end();
