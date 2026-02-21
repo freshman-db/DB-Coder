@@ -6,7 +6,7 @@ import type { DbCoderConfig, DeepPartial } from './types.js';
 const DEFAULTS: DbCoderConfig = {
   brain: { model: 'opus', scanInterval: 3600, maxScanBudget: 1.0 },
   claude: { model: 'opus', maxTaskBudget: 2.0, maxTurns: 30 },
-  codex: { model: 'o3', sandbox: 'workspace-write' },
+  codex: { model: 'gpt-5.3-codex', sandbox: 'workspace-write' },
   autonomy: { level: 'full', maxRetries: 3, subtaskTimeout: 600 },
   routing: {
     scan: 'brain', plan: 'brain',
