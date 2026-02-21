@@ -211,20 +211,20 @@ export class McpDiscovery {
 
   /** Expand ${VAR} placeholders from process.env + special vars */
   private expandEnvVars(value: string, installPath?: string): string | null {
-    return value.replace(/\$\{([^}]+)\}/g, (match, varName: string) => {
+    let missing = false;
+    const expanded = value.replace(/\$\{([^}]+)\}/g, (_, varName: string) => {
       if (varName === 'CLAUDE_PLUGIN_ROOT' && installPath) {
         return installPath;
       }
       const envVal = process.env[varName];
       if (envVal === undefined) {
         log.debug?.(`MCP env var '${varName}' not set — skipping server`);
-        return '\0MISSING\0';
+        missing = true;
+        return '';
       }
       return envVal;
-    }).includes('\0MISSING\0') ? null : value.replace(/\$\{([^}]+)\}/g, (_, varName: string) => {
-      if (varName === 'CLAUDE_PLUGIN_ROOT' && installPath) return installPath;
-      return process.env[varName] ?? '';
     });
+    return missing ? null : expanded;
   }
 
   /** Expand env vars in all header/env values; return null if any required var is missing */
