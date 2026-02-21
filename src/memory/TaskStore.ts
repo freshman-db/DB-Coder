@@ -1,6 +1,7 @@
-import postgres from 'postgres';
+import type postgres from 'postgres';
 import type { Task, TaskLog, TaskStatus, ScanResult, ReviewEvent, RecurringIssueCategory } from './types.js';
 import type { Adjustment, AdjustmentCategory, AdjustmentStatus, GoalProgress, ConfigProposal, ProposalStatus } from '../evolution/types.js';
+import { closeDb, getDb } from '../db.js';
 import { log } from '../utils/logger.js';
 
 const SCHEMA_SQL = `
@@ -120,11 +121,7 @@ export class TaskStore {
   private sql: postgres.Sql;
 
   constructor(connectionString: string) {
-    this.sql = postgres(connectionString, {
-      idle_timeout: 120,
-      max_lifetime: 3600,
-      max: 10,
-    });
+    this.sql = getDb(connectionString);
   }
 
   async init(): Promise<void> {
@@ -437,6 +434,6 @@ export class TaskStore {
   }
 
   async close(): Promise<void> {
-    await this.sql.end();
+    await closeDb();
   }
 }
