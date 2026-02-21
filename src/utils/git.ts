@@ -2,10 +2,14 @@ import { runProcess, type ProcessResult } from './process.js';
 import { log } from './logger.js';
 import { basename } from 'node:path';
 
-export const SENSITIVE_PATTERNS = ['.env', '*.pem', 'credentials*', '*secret*'] as const;
+export const SENSITIVE_PATTERNS = ['.env*', '*.pem', 'credentials*', '*secret*'] as const;
 
-const MODIFIED_OR_ADDED_STATUSES = new Set(['M', 'A', 'R', 'C', 'T', '?']);
+/** Porcelain statuses indicating a file change — includes D for rename/deletion support. */
+const CHANGED_STATUSES = new Set(['M', 'A', 'R', 'C', 'T', '?', 'D']);
 const SENSITIVE_FILE_REGEXES = SENSITIVE_PATTERNS.map(patternToRegex);
+
+/** Max files per git-add invocation to stay within OS ARG_MAX limits. */
+const GIT_ADD_BATCH_SIZE = 100;
 
 async function git(args: string[], cwd: string): Promise<ProcessResult> {
   return runProcess('git', args, { cwd });
@@ -20,7 +24,7 @@ function patternToRegex(pattern: string): RegExp {
 
 function isSensitiveFile(filePath: string): boolean {
   const fileName = basename(filePath);
-  return SENSITIVE_FILE_REGEXES.some(regex => regex.test(filePath) || regex.test(fileName));
+  return SENSITIVE_FILE_REGEXES.some(regex => regex.test(fileName));
 }
 
 function parseStatusPath(path: string): string {
@@ -30,8 +34,8 @@ function parseStatusPath(path: string): string {
   return path.slice(renameIndex + renameSeparator.length);
 }
 
-function isModifiedOrAddedStatus(status: string): boolean {
-  return MODIFIED_OR_ADDED_STATUSES.has(status);
+function isChangedStatus(status: string): boolean {
+  return CHANGED_STATUSES.has(status);
 }
 
 export async function getModifiedAndAddedFiles(cwd: string): Promise<string[]> {
@@ -41,7 +45,7 @@ export async function getModifiedAndAddedFiles(cwd: string): Promise<string[]> {
     if (line.length < 4) continue;
     const indexStatus = line[0] ?? ' ';
     const worktreeStatus = line[1] ?? ' ';
-    if (!isModifiedOrAddedStatus(indexStatus) && !isModifiedOrAddedStatus(worktreeStatus)) continue;
+    if (!isChangedStatus(indexStatus) && !isChangedStatus(worktreeStatus)) continue;
     const path = parseStatusPath(line.slice(3).trim());
     if (!path) continue;
     files.add(path);
@@ -88,9 +92,25 @@ export async function commitAll(message: string, cwd: string, files: string[]): 
     return;
   }
 
-  await git(['add', '--', ...eligibleFiles], cwd);
-  const staged = await git(['diff', '--cached', '--name-only', '--', ...eligibleFiles], cwd);
-  if (staged.stdout.trim() === '') {
+  // Stage eligible files in batches to stay within OS ARG_MAX limits
+  for (let i = 0; i < eligibleFiles.length; i += GIT_ADD_BATCH_SIZE) {
+    const batch = eligibleFiles.slice(i, i + GIT_ADD_BATCH_SIZE);
+    await git(['add', '--', ...batch], cwd);
+  }
+
+  // Defense-in-depth: unstage any sensitive files that may have been
+  // pre-staged by operations outside commitAll()
+  const stagedResult = await git(['diff', '--cached', '--name-only'], cwd);
+  const allStaged = stagedResult.stdout.trim().split('\n').filter(Boolean);
+  const sensitiveStaged = allStaged.filter(f => isSensitiveFile(f));
+  if (sensitiveStaged.length > 0) {
+    await git(['restore', '--staged', '--', ...sensitiveStaged], cwd);
+    log.warn(`Unstaged ${sensitiveStaged.length} pre-staged sensitive file(s)`);
+  }
+
+  // Re-check staging area after filtering
+  const finalStaged = await git(['diff', '--cached', '--name-only'], cwd);
+  if (finalStaged.stdout.trim() === '') {
     log.info('Nothing to commit');
     return;
   }

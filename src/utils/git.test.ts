@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -41,7 +41,7 @@ test('getModifiedAndAddedFiles returns only modified and added paths', async () 
     writeFileSync(join(repo, 'new.txt'), 'new\n', 'utf-8');
 
     const changedFiles = await getModifiedAndAddedFiles(repo);
-    assert.deepEqual(changedFiles.sort(), ['keep.txt', 'new.txt']);
+    assert.deepEqual(changedFiles.sort(), ['keep.txt', 'new.txt', 'remove.txt']);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
@@ -77,14 +77,16 @@ test('commitAll skips sensitive patterns and logs warnings', async () => {
     mkdirSync(join(repo, 'notes'), { recursive: true });
     writeFileSync(join(repo, 'safe.txt'), 'safe-v1\n', 'utf-8');
     writeFileSync(join(repo, '.env'), 'TOKEN=before\n', 'utf-8');
+    writeFileSync(join(repo, '.env.local'), 'LOCAL=before\n', 'utf-8');
     writeFileSync(join(repo, 'keys', 'server.pem'), 'pem-before\n', 'utf-8');
     writeFileSync(join(repo, 'credentials.txt'), 'credentials-before\n', 'utf-8');
     writeFileSync(join(repo, 'notes', 'secret-plan.md'), 'secret-before\n', 'utf-8');
-    await git(repo, ['add', 'safe.txt', '.env', 'keys/server.pem', 'credentials.txt', 'notes/secret-plan.md']);
+    await git(repo, ['add', 'safe.txt', '.env', '.env.local', 'keys/server.pem', 'credentials.txt', 'notes/secret-plan.md']);
     await git(repo, ['commit', '-m', 'initial']);
 
     writeFileSync(join(repo, 'safe.txt'), 'safe-v2\n', 'utf-8');
     writeFileSync(join(repo, '.env'), 'TOKEN=after\n', 'utf-8');
+    writeFileSync(join(repo, '.env.local'), 'LOCAL=after\n', 'utf-8');
     writeFileSync(join(repo, 'keys', 'server.pem'), 'pem-after\n', 'utf-8');
     writeFileSync(join(repo, 'credentials.txt'), 'credentials-after\n', 'utf-8');
     writeFileSync(join(repo, 'notes', 'secret-plan.md'), 'secret-after\n', 'utf-8');
@@ -95,6 +97,7 @@ test('commitAll skips sensitive patterns and logs warnings', async () => {
       await commitAll('commit non-sensitive changes', repo, [
         'safe.txt',
         '.env',
+        '.env.local',
         'keys/server.pem',
         'credentials.txt',
         'notes/secret-plan.md',
@@ -106,8 +109,9 @@ test('commitAll skips sensitive patterns and logs warnings', async () => {
     assert.deepEqual(await getHeadChangedFiles(repo), ['safe.txt']);
 
     const warningMessages = logs.filter(entry => entry.level === 'warn').map(entry => entry.message);
-    assert.equal(warningMessages.length, 4);
+    assert.equal(warningMessages.length, 5);
     assert.ok(warningMessages.some(message => message.includes('.env')));
+    assert.ok(warningMessages.some(message => message.includes('.env.local')));
     assert.ok(warningMessages.some(message => message.includes('keys/server.pem')));
     assert.ok(warningMessages.some(message => message.includes('credentials.txt')));
     assert.ok(warningMessages.some(message => message.includes('notes/secret-plan.md')));
@@ -130,6 +134,84 @@ test('commitAll no-ops when no eligible files remain after filtering', async () 
 
     const afterCommit = await git(repo, ['rev-parse', 'HEAD']);
     assert.equal(afterCommit, beforeCommit);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('getModifiedAndAddedFiles returns new path for git-mv renames', async () => {
+  const repo = await createRepo('db-coder-git-rename-');
+  try {
+    writeFileSync(join(repo, 'old.txt'), 'content\n', 'utf-8');
+    await git(repo, ['add', 'old.txt']);
+    await git(repo, ['commit', '-m', 'initial']);
+
+    await git(repo, ['mv', 'old.txt', 'new.txt']);
+
+    const changedFiles = await getModifiedAndAddedFiles(repo);
+    assert.ok(changedFiles.includes('new.txt'), 'Should include renamed file new.txt');
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('commitAll excludes pre-staged sensitive files from commit', async () => {
+  const repo = await createRepo('db-coder-git-prestaged-');
+  try {
+    writeFileSync(join(repo, 'safe.txt'), 'v1\n', 'utf-8');
+    writeFileSync(join(repo, '.env'), 'SECRET=old\n', 'utf-8');
+    await git(repo, ['add', 'safe.txt', '.env']);
+    await git(repo, ['commit', '-m', 'initial']);
+
+    // Modify both files
+    writeFileSync(join(repo, 'safe.txt'), 'v2\n', 'utf-8');
+    writeFileSync(join(repo, '.env'), 'SECRET=new\n', 'utf-8');
+
+    // Pre-stage .env BEFORE commitAll is called (simulates external operation)
+    await git(repo, ['add', '.env']);
+
+    const logs: LogEntry[] = [];
+    const removeListener = log.addListener((entry) => logs.push(entry));
+    try {
+      await commitAll('should not include .env', repo, ['safe.txt']);
+    } finally {
+      removeListener();
+    }
+
+    // Only safe.txt should be in the commit
+    assert.deepEqual(await getHeadChangedFiles(repo), ['safe.txt']);
+
+    // .env should still be modified (unstaged by defense-in-depth)
+    const status = await git(repo, ['status', '--porcelain']);
+    assert.match(status, /\.env/m, '.env should still show in status');
+
+    // Should have logged the unstaging
+    const warnMessages = logs.filter(e => e.level === 'warn').map(e => e.message);
+    assert.ok(warnMessages.some(m => m.includes('pre-staged')), 'Should warn about unstaging');
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('commitAll handles manual rename leaving no unstaged deletions', async () => {
+  const repo = await createRepo('db-coder-git-rename-commit-');
+  try {
+    writeFileSync(join(repo, 'old.txt'), 'content\n', 'utf-8');
+    await git(repo, ['add', 'old.txt']);
+    await git(repo, ['commit', '-m', 'initial']);
+
+    // Manual rename (not git mv) — git reports as D + ??
+    renameSync(join(repo, 'old.txt'), join(repo, 'new.txt'));
+
+    const files = await getModifiedAndAddedFiles(repo);
+    assert.ok(files.includes('new.txt'), 'Should include new file');
+    assert.ok(files.includes('old.txt'), 'Should include deleted old file');
+
+    await commitAll('rename file', repo, files);
+
+    // Working tree should be clean — no lingering D status
+    const status = await git(repo, ['status', '--porcelain']);
+    assert.equal(status, '', 'Working tree should be clean after rename commit');
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
