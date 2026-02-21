@@ -79,6 +79,7 @@ program
       await server.stop();
       await globalMemory.close();
       await taskStore.close();
+      await log.shutdown();
       process.exit(0);
     };
     process.on('SIGTERM', shutdown);

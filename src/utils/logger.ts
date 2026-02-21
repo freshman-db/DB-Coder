@@ -10,11 +10,16 @@ const LEVEL_COLORS: Record<LogLevel, string> = {
 };
 const RESET = '\x1b[0m';
 
+/** Maximum entries held in the backpressure buffer before dropping */
+const DEFAULT_MAX_BUFFER_SIZE = 1000;
+
 type LogListener = (entry: LogEntry) => void;
 
 interface LoggerOptions {
   logDir?: string;
   registerExitHandlers?: boolean;
+  /** Maximum entries in the backpressure buffer before dropping (default: 1000) */
+  maxBufferSize?: number;
 }
 
 export interface LogEntry {
@@ -38,8 +43,15 @@ export class Logger {
     sigterm: () => void;
   };
 
+  /* Backpressure state */
+  private writeBuffer: string[] = [];
+  private draining = false;
+  private readonly maxBufferSize: number;
+  private droppedCount = 0;
+
   constructor(options: LoggerOptions = {}) {
     this.logDir = options.logDir ?? join(homedir(), '.db-coder', 'logs');
+    this.maxBufferSize = options.maxBufferSize ?? DEFAULT_MAX_BUFFER_SIZE;
     if (!existsSync(this.logDir)) mkdirSync(this.logDir, { recursive: true });
     const date = new Date().toISOString().slice(0, 10);
     this.logFile = join(this.logDir, `${date}.log`);
@@ -77,10 +89,68 @@ export class Logger {
 
   private writeFile(entry: LogEntry): void {
     if (this.shuttingDown) return;
+    const line = JSON.stringify(entry) + '\n';
+
+    if (this.draining) {
+      this.enqueueLine(line);
+      return;
+    }
+
     try {
-      this.logStream.write(JSON.stringify(entry) + '\n');
+      const ok = this.logStream.write(line);
+      if (!ok) {
+        this.draining = true;
+        this.logStream.once('drain', () => this.onDrain());
+      }
     } catch (err) {
       this.writeInternalError('Failed to queue log entry for file write', err);
+    }
+  }
+
+  /** Enqueue a serialized line in the bounded backpressure buffer. */
+  private enqueueLine(line: string): void {
+    if (this.writeBuffer.length >= this.maxBufferSize) {
+      this.droppedCount++;
+      return;
+    }
+    this.writeBuffer.push(line);
+  }
+
+  /** Called when the stream signals it can accept more data. */
+  private onDrain(): void {
+    this.draining = false;
+
+    if (this.droppedCount > 0) {
+      const dropped = this.droppedCount;
+      this.droppedCount = 0;
+      const warnLine = JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: 'warn',
+        message: `Logger dropped ${dropped} entries due to backpressure`,
+      }) + '\n';
+      this.writeBuffer.unshift(warnLine);
+    }
+
+    this.drainBackpressureBuffer();
+  }
+
+  /**
+   * Write buffered entries to the stream without ending it.
+   * Safe to call from signal handlers — does not affect future writes.
+   */
+  private drainBackpressureBuffer(): void {
+    while (this.writeBuffer.length > 0) {
+      const line = this.writeBuffer.shift()!;
+      try {
+        const ok = this.logStream.write(line);
+        if (!ok) {
+          this.draining = true;
+          this.logStream.once('drain', () => this.onDrain());
+          return;
+        }
+      } catch {
+        break;
+      }
     }
   }
 
@@ -100,17 +170,17 @@ export class Logger {
     const beforeExit = (): void => {
       void this.flush();
     };
-    const sigint = (): void => {
-      void this.flushAndExit(130);
-    };
-    const sigterm = (): void => {
-      void this.flushAndExit(143);
+    // Signal handlers only drain the backpressure buffer — they do NOT
+    // end the stream or call process.exit(). The application owns
+    // process lifecycle and should call logger.shutdown() explicitly.
+    const onSignal = (): void => {
+      this.drainBackpressureBuffer();
     };
 
-    this.processHandlers = { beforeExit, sigint, sigterm };
+    this.processHandlers = { beforeExit, sigint: onSignal, sigterm: onSignal };
     process.once('beforeExit', beforeExit);
-    process.once('SIGINT', sigint);
-    process.once('SIGTERM', sigterm);
+    process.once('SIGINT', onSignal);
+    process.once('SIGTERM', onSignal);
   }
 
   private unregisterExitHandlers(): void {
@@ -121,6 +191,10 @@ export class Logger {
     this.processHandlers = undefined;
   }
 
+  /**
+   * Flush all pending writes and close the log stream.
+   * After calling this, no more entries will be written to file.
+   */
   async flush(): Promise<void> {
     if (this.flushPromise) {
       await this.flushPromise;
@@ -128,6 +202,14 @@ export class Logger {
     }
 
     this.shuttingDown = true;
+
+    // Write any buffered entries directly (ignoring backpressure since
+    // we are about to end the stream, which will flush the OS buffer).
+    while (this.writeBuffer.length > 0) {
+      const line = this.writeBuffer.shift()!;
+      try { this.logStream.write(line); } catch { break; }
+    }
+
     this.flushPromise = new Promise((resolve) => {
       let settled = false;
       const finish = (): void => {
@@ -142,18 +224,14 @@ export class Logger {
     await this.flushPromise;
   }
 
+  /**
+   * Unregister process handlers and flush all pending writes.
+   * Call this from the application's shutdown path as the last step
+   * before process.exit().
+   */
   async shutdown(): Promise<void> {
     this.unregisterExitHandlers();
     await this.flush();
-  }
-
-  private async flushAndExit(code: number): Promise<void> {
-    this.unregisterExitHandlers();
-    try {
-      await this.flush();
-    } finally {
-      process.exit(code);
-    }
   }
 
   private emit(level: LogLevel, message: string, data?: unknown): void {
