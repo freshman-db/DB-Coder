@@ -278,7 +278,7 @@ export class MainLoop {
         log.info(`Task ${reviewResult.passed ? 'completed' : 'blocked'}: ${task.task_description.slice(0, 60)}`);
       }
     } catch (err) {
-      log.error(`Task execution error: ${err}`);
+      log.error('Task execution error', err);
       await this.taskStore.updateTask(task.id, { status: 'failed', phase: 'failed' });
       // Reflect on failure to extract lessons
       try {
