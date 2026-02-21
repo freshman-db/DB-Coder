@@ -231,37 +231,55 @@ export class MainLoop {
       const subtasks = task.subtasks as SubTaskRecord[];
       const standards = await this.globalMemory.getRelevant('coding standards');
       const stuckAdjustments: string[] = [];
+      const retryCounts = new Map<string, number>();
+      let stopSubtasks = false;
 
       for (const subtask of subtasks) {
         if (subtask.status === 'done') continue;
-        if (!(await this.enforceBudget(task.id))) return;
 
-        subtask.status = 'running';
-        await this.taskStore.updateTask(task.id, { subtasks });
+        while (true) {
+          if (!(await this.enforceBudget(task.id))) return;
 
-        const result = await this.executeSubtask(task, subtask, standards, projectPath);
-
-        if (!(await this.enforceBudget(task.id))) {
-          subtask.status = 'failed';
-          subtask.result = 'Blocked: budget exceeded';
+          subtask.status = 'running';
           await this.taskStore.updateTask(task.id, { subtasks });
-          return;
-        }
 
-        if (result.success) {
-          subtask.status = 'done';
-          subtask.result = result.output.slice(0, 200);
-          await commitAll(`db-coder: ${subtask.description.slice(0, 50)}`, projectPath).catch(() => {});
-        } else {
+          const result = await this.executeSubtask(task, subtask, standards, projectPath);
+
+          if (!(await this.enforceBudget(task.id))) {
+            subtask.status = 'failed';
+            subtask.result = 'Blocked: budget exceeded';
+            await this.taskStore.updateTask(task.id, { subtasks });
+            return;
+          }
+
+          if (result.success) {
+            subtask.status = 'done';
+            subtask.result = result.output.slice(0, 200);
+            await commitAll(`db-coder: ${subtask.description.slice(0, 50)}`, projectPath).catch(() => {});
+            break;
+          }
+
           subtask.status = 'failed';
           subtask.result = result.output.slice(0, 200);
           log.warn(`Subtask failed: ${subtask.description}`);
-          // Attempt retry with stuckHandling
-          const handled = await this.handleStuck(task, subtask, result.output, stuckAdjustments);
-          if (!handled) break;
+          const handled = await this.handleRetry(
+            task,
+            subtasks,
+            subtask,
+            result.output,
+            stuckAdjustments,
+            retryCounts,
+            branchName,
+            projectPath,
+          );
+          if (!handled) {
+            stopSubtasks = true;
+            break;
+          }
         }
 
         await this.taskStore.updateTask(task.id, { subtasks });
+        if (stopSubtasks) break;
       }
 
       // REVIEW (dual review)
@@ -392,6 +410,29 @@ export class MainLoop {
     return result;
   }
 
+  private async handleRetry(
+    task: Task,
+    subtasks: SubTaskRecord[],
+    subtask: SubTaskRecord,
+    error: string,
+    stuckAdjustments: string[],
+    retryCounts: Map<string, number>,
+    branchName: string,
+    projectPath: string,
+  ): Promise<boolean> {
+    const attempt = (retryCounts.get(subtask.id) ?? 0) + 1;
+    retryCounts.set(subtask.id, attempt);
+    const shouldRetry = await this.handleStuck(task, subtask, error, stuckAdjustments, attempt);
+    if (!shouldRetry) return false;
+    const backoffMs = Math.min(8000, 1000 * 2 ** (attempt - 1));
+    subtask.status = 'pending';
+    subtask.result = `Retrying (attempt ${attempt + 1})`;
+    await this.taskStore.updateTask(task.id, { subtasks });
+    await sleep(backoffMs);
+    await switchBranch(branchName, projectPath).catch(() => {});
+    return true;
+  }
+
   /** Dual review: Claude + Codex in parallel, then merge and decide next action */
   private async dualReview(
     task: Task,
@@ -438,9 +479,13 @@ export class MainLoop {
   }
 
   /** Graduated stuck handling: retry → reflect → skip. Populates stuckAdjustments for downstream use. */
-  private async handleStuck(task: Task, subtask: SubTaskRecord, error: string, stuckAdjustments: string[]): Promise<boolean> {
-    const iteration = task.iteration + 1;
-
+  private async handleStuck(
+    task: Task,
+    subtask: SubTaskRecord,
+    error: string,
+    stuckAdjustments: string[],
+    iteration: number,
+  ): Promise<boolean> {
     if (iteration === 1) {
       log.info('Stuck: retrying subtask');
       return true; // Will retry in next iteration
