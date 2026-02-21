@@ -13,7 +13,7 @@ import { executorPrompt } from '../prompts/executor.js';
 import { reviewerPrompt } from '../prompts/reviewer.js';
 import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch, isWorkingClean, branchExists, getChangedFilesSince } from '../utils/git.js';
 import { log } from '../utils/logger.js';
-import { existsSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -245,8 +245,12 @@ export class MainLoop {
       if (!reviewResult.passed && task.iteration < this.config.values.autonomy.maxRetries) {
         // Fix review issues and re-review
         log.info('Review found issues. Attempting fixes...');
-        const fixPrompt = `Fix these review issues:\n${reviewResult.mustFix.map(i => `- [${i.severity}] ${i.description} (${i.file}:${i.line}): ${i.suggestion}`).join('\n')}`;
-        const fixAgent = reviewResult.mustFix[0]?.source === 'codex' ? this.codex : this.claude;
+        const issuesToFix = dedupeIssues([...reviewResult.mustFix, ...reviewResult.shouldFix]);
+        const issueLines = issuesToFix.length > 0
+          ? issuesToFix.map(i => `- [${i.severity}] ${i.description}${i.file ? ` (${i.file}${i.line ? `:${i.line}` : ''})` : ''}${i.suggestion ? `: ${i.suggestion}` : ''}`).join('\n')
+          : `- No structured issues were returned.\n- Review summary: ${reviewResult.summary}`;
+        const fixPrompt = `Fix these review issues:\n${issueLines}`;
+        const fixAgent = this.codex;
         await fixAgent.execute(fixPrompt, projectPath, {});
         await commitAll('db-coder: fix review issues', projectPath).catch(() => {});
         // Re-execute task for next iteration
@@ -263,7 +267,7 @@ export class MainLoop {
         const finalStatus = reviewResult.passed ? 'done' : (task.iteration >= this.config.values.autonomy.maxRetries ? 'blocked' : 'done');
         await this.taskStore.updateTask(task.id, {
           status: finalStatus as Task['status'],
-          phase: 'done',
+          phase: finalStatus === 'blocked' ? 'blocked' : 'done',
         });
 
         log.info(`Task ${reviewResult.passed ? 'completed' : 'blocked'}: ${task.task_description.slice(0, 60)}`);
@@ -337,7 +341,7 @@ export class MainLoop {
     if (existsSync(this.lockFile)) {
       // Check if PID in lock file is still running
       try {
-        const pid = parseInt(require('fs').readFileSync(this.lockFile, 'utf-8'));
+        const pid = parseInt(readFileSync(this.lockFile, 'utf-8'), 10);
         try { process.kill(pid, 0); return false; } catch { /* PID not running, stale lock */ }
       } catch { /* invalid lock file, overwrite */ }
     }
@@ -390,6 +394,20 @@ function mergeReviews(claude: ReviewResult, codex: ReviewResult): MergedReviewRe
 function higherSeverity(a: ReviewIssue['severity'], b: ReviewIssue['severity']): ReviewIssue['severity'] {
   const order = { critical: 0, high: 1, medium: 2, low: 3 };
   return order[a] <= order[b] ? a : b;
+}
+
+function dedupeIssues(issues: ReviewIssue[]): ReviewIssue[] {
+  const seen = new Set<string>();
+  const order = { critical: 0, high: 1, medium: 2, low: 3 };
+
+  return [...issues]
+    .sort((a, b) => order[a.severity] - order[b.severity])
+    .filter(issue => {
+      const key = `${issue.file ?? ''}:${issue.line ?? 0}:${issue.description.trim().toLowerCase()}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
 function sleep(ms: number): Promise<void> {
