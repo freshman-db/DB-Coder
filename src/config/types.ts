@@ -23,6 +23,7 @@ export interface CodexConfig {
 export interface AutonomyConfig {
   level: 'full' | 'supervised';
   maxRetries: number;
+  retryBaseDelayMs: number;
   subtaskTimeout: number; // seconds
 }
 
