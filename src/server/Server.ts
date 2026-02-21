@@ -20,6 +20,9 @@ const MIME_TYPES: Record<string, string> = {
   '.ico': 'image/x-icon',
 };
 
+const MAX_REQUEST_BODY_BYTES = 64 * 1024;
+const BODY_LIMIT_METHODS = new Set(['POST', 'PUT', 'PATCH']);
+
 export class Server {
   private server: HttpServer;
   private webDir: string;
@@ -44,6 +47,12 @@ export class Server {
 
     this.server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       try {
+        if (this.isRequestBodyTooLarge(req)) {
+          req.resume();
+          res.writeHead(413).end('Payload Too Large');
+          return;
+        }
+
         // Try API routes first
         const handled = await handleRequest(req, res, ctx);
         if (handled) return;
@@ -55,6 +64,22 @@ export class Server {
         res.writeHead(500).end('Internal Server Error');
       }
     });
+  }
+
+  private isRequestBodyTooLarge(req: IncomingMessage): boolean {
+    const method = req.method?.toUpperCase() ?? 'GET';
+    if (!BODY_LIMIT_METHODS.has(method)) return false;
+
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    if (!url.pathname.startsWith('/api/')) return false;
+
+    const rawContentLength = req.headers['content-length'];
+    const contentLength = Array.isArray(rawContentLength) ? rawContentLength[0] : rawContentLength;
+    if (!contentLength) return false;
+
+    const byteLength = Number.parseInt(contentLength, 10);
+    if (!Number.isFinite(byteLength)) return false;
+    return byteLength > MAX_REQUEST_BODY_BYTES;
   }
 
   start(): Promise<void> {
