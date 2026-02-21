@@ -139,19 +139,24 @@ export class Brain implements QuestionHandler {
     const reflection = parseReflection(r.output);
 
     // Save extracted experiences to global memory
+    const validCategories = new Set(['habit', 'experience', 'standard', 'workflow', 'framework', 'failure', 'simplification']);
     const savedTitles: string[] = [];
     for (const exp of reflection.experiences) {
-      const category = exp.category === 'failure' ? 'failure' : exp.category;
-      await this.globalMemory.add({
-        category: category as any,
-        title: exp.title,
-        content: exp.content,
-        tags: exp.tags,
-        source_project: projectPath,
-        confidence: 0.5,
-      });
-      savedTitles.push(exp.title);
-      log.info(`Saved experience: ${exp.title}`);
+      const category = validCategories.has(exp.category) ? exp.category : 'experience';
+      try {
+        await this.globalMemory.add({
+          category: category as any,
+          title: exp.title,
+          content: exp.content,
+          tags: exp.tags ?? [],
+          source_project: projectPath,
+          confidence: 0.5,
+        });
+        savedTitles.push(exp.title);
+        log.info(`Saved experience: ${exp.title}`);
+      } catch (err) {
+        log.warn(`Failed to save experience "${exp.title}": ${err}`);
+      }
     }
 
     // Adjust confidence of related memories based on outcome

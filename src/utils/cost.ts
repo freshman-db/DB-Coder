@@ -5,6 +5,7 @@ import { log } from './logger.js';
 export class CostTracker {
   private sessionCost = 0;
   private warnedTaskThreshold = new Set<string>();
+  private warnedDailyThreshold = false;
 
   constructor(
     private store: TaskStore,
@@ -39,10 +40,11 @@ export class CostTracker {
       return { allowed: false, reason: `Daily budget exceeded: $${daily.total_cost_usd}/$${this.budget.maxPerDay}` };
     }
 
-    // Warning threshold
+    // Warning threshold (only warn once per session)
     const dailyRatio = daily.total_cost_usd / this.budget.maxPerDay;
-    if (dailyRatio >= this.budget.warningThreshold) {
+    if (dailyRatio >= this.budget.warningThreshold && !this.warnedDailyThreshold) {
       log.warn(`Daily cost at ${(dailyRatio * 100).toFixed(0)}% of budget ($${daily.total_cost_usd}/$${this.budget.maxPerDay})`);
+      this.warnedDailyThreshold = true;
     }
 
     return { allowed: true };
