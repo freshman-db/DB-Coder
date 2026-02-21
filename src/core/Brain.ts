@@ -1,3 +1,4 @@
+import type { Config } from '../config/Config.js';
 import type { ClaudeBridge } from '../bridges/ClaudeBridge.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { ProjectMemory } from '../memory/ProjectMemory.js';
@@ -14,6 +15,7 @@ export class Brain implements QuestionHandler {
     private globalMemory: GlobalMemory,
     private projectMemory: ProjectMemory,
     private taskStore: TaskStore,
+    private config?: Config,
   ) {}
 
   async scanProject(
@@ -44,7 +46,8 @@ export class Brain implements QuestionHandler {
     const allMemories = memories + '\n' + projectMems.map(m => m.text).join('\n');
 
     const mcpGuidance = brainMcpGuidance(this.claude.getMcpServerNames('scan'));
-    const prompt = scanPrompt(projectPath, depth, recentChanges, allMemories, mcpGuidance);
+    const goalsSection = this.buildGoalsSection();
+    const prompt = scanPrompt(projectPath, depth, recentChanges, allMemories, mcpGuidance, goalsSection);
     const result = await this.claude.plan(prompt, projectPath, {
       systemPrompt: BRAIN_SYSTEM_PROMPT,
       maxTurns: depth === 'deep' ? 30 : depth === 'normal' ? 20 : 10,
@@ -74,10 +77,23 @@ export class Brain implements QuestionHandler {
     log.info('Creating task plan...');
 
     const memories = await this.globalMemory.getRelevant('task planning prioritization');
-    const existingTasks = await this.taskStore.listTasks(projectPath, 'queued');
-    const existingDesc = existingTasks.map(t => `- [P${t.priority}] ${t.task_description}`).join('\n');
 
-    const prompt = planPrompt(JSON.stringify(analysis, null, 2), memories, existingDesc);
+    // Include all task statuses so LLM knows what's been done/failed
+    const [queued, done, blocked] = await Promise.all([
+      this.taskStore.listTasks(projectPath, 'queued'),
+      this.taskStore.listTasks(projectPath, 'done'),
+      this.taskStore.listTasks(projectPath, 'blocked'),
+    ]);
+    const allTasks = [
+      ...queued.map(t => `- [P${t.priority}] [queued] ${t.task_description}`),
+      ...done.map(t => `- [P${t.priority}] [done] ${t.task_description}`),
+      ...blocked.map(t => `- [P${t.priority}] [blocked] ${t.task_description}`),
+    ].join('\n');
+
+    // Build goals section
+    const goalsSection = this.buildGoalsSection();
+
+    const prompt = planPrompt(JSON.stringify(analysis, null, 2), memories, allTasks, goalsSection);
     const result = await this.claude.plan(prompt, projectPath, {
       systemPrompt: BRAIN_SYSTEM_PROMPT,
     });
@@ -93,10 +109,11 @@ export class Brain implements QuestionHandler {
     taskDescription: string,
     result: string,
     reviewSummary: string,
+    outcome: 'success' | 'failed' | 'blocked_stuck' | 'blocked_max_retries' = 'success',
   ): Promise<{ reflection: ReflectionResult; cost: number }> {
-    log.info('Reflecting on task results...');
+    log.info(`Reflecting on task (outcome=${outcome})...`);
 
-    const prompt = reflectPrompt(taskDescription, result, reviewSummary);
+    const prompt = reflectPrompt(taskDescription, result, reviewSummary, outcome);
     const r = await this.claude.plan(prompt, projectPath, {
       systemPrompt: BRAIN_SYSTEM_PROMPT,
       maxTurns: 5,
@@ -105,21 +122,38 @@ export class Brain implements QuestionHandler {
     const reflection = parseReflection(r.output);
 
     // Save extracted experiences to global memory
+    const savedTitles: string[] = [];
     for (const exp of reflection.experiences) {
+      const category = exp.category === 'failure' ? 'failure' : exp.category;
       await this.globalMemory.add({
-        category: exp.category,
+        category: category as any,
         title: exp.title,
         content: exp.content,
         tags: exp.tags,
         source_project: projectPath,
         confidence: 0.5,
       });
+      savedTitles.push(exp.title);
       log.info(`Saved experience: ${exp.title}`);
     }
 
+    // Adjust confidence of related memories based on outcome
+    try {
+      const relatedMemories = await this.globalMemory.search(taskDescription, 5);
+      const delta = outcome === 'success' ? 0.1 : -0.05;
+      for (const mem of relatedMemories) {
+        if (savedTitles.includes(mem.title)) continue; // skip just-created
+        await this.globalMemory.updateConfidence(mem.id, delta);
+        log.info(`Memory confidence ${delta > 0 ? 'boosted' : 'reduced'}: "${mem.title}" (${delta > 0 ? '+' : ''}${delta})`);
+      }
+    } catch (err) {
+      log.warn(`Confidence update failed: ${err}`);
+    }
+
     // Save task summary to project memory
+    const prefix = outcome === 'success' ? 'Task completed' : `Task ${outcome}`;
     await this.projectMemory.save(
-      `Task completed: ${taskDescription}\n${reflection.taskSummary}`,
+      `${prefix}: ${taskDescription}\n${reflection.taskSummary}`,
       `Task: ${taskDescription.slice(0, 50)}`,
     );
 
@@ -137,6 +171,22 @@ export class Brain implements QuestionHandler {
     return 'Proceed with the default approach.';
   }
 
+  private buildGoalsSection(): string {
+    const goals = this.config?.values.evolution?.goals?.filter(g => g.status !== 'done' && g.status !== 'paused') ?? [];
+    if (goals.length === 0) return '';
+
+    const archNotes = this.config?.values.evolution?.architectureNotes;
+    let section = '\n## Evolution Goals\nThe project has the following active evolution goals:\n';
+    for (const g of goals) {
+      section += `- [P${g.priority}] ${g.description}\n`;
+    }
+    if (archNotes) {
+      section += `\nArchitecture direction: ${archNotes}\n`;
+    }
+    section += '\nConsider creating tasks that advance these goals, not just fixing bugs.\n';
+    return section;
+  }
+
   async hasChanges(projectPath: string): Promise<boolean> {
     const lastScan = await this.taskStore.getLastScan(projectPath);
     if (!lastScan) return true; // First scan always needed
@@ -149,18 +199,59 @@ export class Brain implements QuestionHandler {
   }
 }
 
+/** Extract a balanced JSON object containing requiredKey from LLM output */
+function extractJson(text: string, requiredKey: string, parserName: string): unknown | null {
+  const keyIdx = text.indexOf(`"${requiredKey}"`);
+  if (keyIdx === -1) return null;
+
+  // Walk backward from the key to find the opening brace
+  let start = -1;
+  for (let i = keyIdx - 1; i >= 0; i--) {
+    if (text[i] === '{') { start = i; break; }
+  }
+  if (start === -1) return null;
+
+  // Walk forward counting braces to find the balanced closing brace
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inString) { escape = true; continue; }
+    if (ch === '"' && !escape) { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(start, i + 1));
+        } catch (error) {
+          const rawJson = text.slice(start, i + 1);
+          const snippet = rawJson.length > 400
+            ? `${rawJson.slice(0, 400)}...(truncated)`
+            : rawJson;
+          const reason = error instanceof Error ? error.message : String(error);
+          log.warn(`${parserName}: JSON.parse failed for "${requiredKey}" (${reason}). Raw snippet: ${snippet}`);
+          return null;
+        }
+      }
+    }
+  }
+  log.warn(`extractJson: unbalanced braces for "${requiredKey}"`);
+  return null;
+}
+
 function parseAnalysis(output: string): ProjectAnalysis {
-  const jsonMatch = output.match(/\{[\s\S]*"projectHealth"[\s\S]*\}/);
-  if (jsonMatch) {
-    try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        issues: Array.isArray(parsed.issues) ? parsed.issues : [],
-        opportunities: Array.isArray(parsed.opportunities) ? parsed.opportunities : [],
-        projectHealth: typeof parsed.projectHealth === 'number' ? parsed.projectHealth : 50,
-        summary: parsed.summary ?? output.slice(0, 200),
-      };
-    } catch { /* fall through */ }
+  const parsed = extractJson(output, 'projectHealth', 'parseAnalysis') as Record<string, unknown> | null;
+  if (parsed) {
+    return {
+      issues: Array.isArray(parsed.issues) ? parsed.issues : [],
+      opportunities: Array.isArray(parsed.opportunities) ? parsed.opportunities : [],
+      projectHealth: typeof parsed.projectHealth === 'number' ? parsed.projectHealth : 50,
+      summary: (parsed.summary as string) ?? output.slice(0, 200),
+    };
   }
   return {
     issues: [],
@@ -171,30 +262,24 @@ function parseAnalysis(output: string): ProjectAnalysis {
 }
 
 function parsePlan(output: string): TaskPlan {
-  const jsonMatch = output.match(/\{[\s\S]*"tasks"[\s\S]*\}/);
-  if (jsonMatch) {
-    try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
-        reasoning: parsed.reasoning ?? '',
-      };
-    } catch { /* fall through */ }
+  const parsed = extractJson(output, 'tasks', 'parsePlan') as Record<string, unknown> | null;
+  if (parsed) {
+    return {
+      tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
+      reasoning: (parsed.reasoning as string) ?? '',
+    };
   }
   return { tasks: [], reasoning: output.slice(0, 500) };
 }
 
 function parseReflection(output: string): ReflectionResult {
-  const jsonMatch = output.match(/\{[\s\S]*"experiences"[\s\S]*\}/);
-  if (jsonMatch) {
-    try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        experiences: Array.isArray(parsed.experiences) ? parsed.experiences : [],
-        taskSummary: parsed.taskSummary ?? '',
-        adjustments: Array.isArray(parsed.adjustments) ? parsed.adjustments : [],
-      };
-    } catch { /* fall through */ }
+  const parsed = extractJson(output, 'experiences', 'parseReflection') as Record<string, unknown> | null;
+  if (parsed) {
+    return {
+      experiences: Array.isArray(parsed.experiences) ? parsed.experiences : [],
+      taskSummary: (parsed.taskSummary as string) ?? '',
+      adjustments: Array.isArray(parsed.adjustments) ? parsed.adjustments : [],
+    };
   }
   return { experiences: [], taskSummary: output.slice(0, 200), adjustments: [] };
 }

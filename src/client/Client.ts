@@ -1,3 +1,5 @@
+import { log } from '../utils/logger.js';
+
 export class Client {
   private baseUrl: string;
 
@@ -70,7 +72,9 @@ export class Client {
           try {
             const entry = JSON.parse(line.slice(6));
             onEntry(entry);
-          } catch { /* ignore */ }
+          } catch (err) {
+            log.debug('Failed to parse SSE log entry', { error: err, line });
+          }
         }
       }
     }

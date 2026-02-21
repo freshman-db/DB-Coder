@@ -221,7 +221,12 @@ function tryParseReview(output: string): Omit<ReviewResult, 'cost_usd'> {
         issues: Array.isArray(parsed.issues) ? parsed.issues : [],
         summary: parsed.summary ?? '',
       };
-    } catch { /* fall through */ }
+    } catch (err) {
+      log.debug('ClaudeBridge tryParseReview JSON parse failed', {
+        error: err,
+        inputPreview: output.slice(0, 200),
+      });
+    }
   }
   // Fallback: treat as text review
   const hasIssues = /critical|error|bug|vulnerability|security/i.test(output);

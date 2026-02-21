@@ -68,8 +68,8 @@ export function parseJsonlEvents(output: string): JsonlEvent[] {
     if (!trimmed) continue;
     try {
       events.push(JSON.parse(trimmed));
-    } catch {
-      // Not a JSON line, skip
+    } catch (err) {
+      log.debug('Skipping non-JSON line in process output', { error: err, line: trimmed });
     }
   }
   return events;
@@ -108,8 +108,8 @@ export function spawnWithJsonl(
           const event = JSON.parse(trimmed) as JsonlEvent;
           events.push(event);
           options.onEvent?.(event);
-        } catch {
-          // Not JSON, ignore
+        } catch (err) {
+          log.debug('Skipping non-JSON line in JSONL stream', { error: err, line: trimmed });
         }
       }
     });

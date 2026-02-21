@@ -4,6 +4,7 @@ import { log } from './logger.js';
 
 export class CostTracker {
   private sessionCost = 0;
+  private warnedTaskThreshold = new Set<string>();
 
   constructor(
     private store: TaskStore,
@@ -18,8 +19,19 @@ export class CostTracker {
 
   async checkBudget(taskId: string): Promise<{ allowed: boolean; reason?: string }> {
     const task = await this.store.getTask(taskId);
-    if (task && task.total_cost_usd >= this.budget.maxPerTask) {
-      return { allowed: false, reason: `Task budget exceeded: $${task.total_cost_usd}/$${this.budget.maxPerTask}` };
+    if (task) {
+      const taskCost = Number(task.total_cost_usd);
+      const taskRatio = this.budget.maxPerTask > 0 ? taskCost / this.budget.maxPerTask : 0;
+
+      if (taskRatio >= this.budget.warningThreshold && taskRatio < 1 && !this.warnedTaskThreshold.has(taskId)) {
+        log.warn(`Task cost at ${(taskRatio * 100).toFixed(0)}% of budget ($${taskCost}/$${this.budget.maxPerTask})`);
+        this.warnedTaskThreshold.add(taskId);
+      }
+
+      if (taskCost >= this.budget.maxPerTask) {
+        this.warnedTaskThreshold.delete(taskId);
+        return { allowed: false, reason: `Task budget exceeded: $${taskCost}/$${this.budget.maxPerTask}` };
+      }
     }
 
     const daily = await this.store.getDailyCost();

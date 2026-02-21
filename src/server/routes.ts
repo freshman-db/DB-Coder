@@ -196,7 +196,12 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
     let body = '';
     req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
     req.on('end', () => {
-      try { resolve(JSON.parse(body)); } catch { resolve({}); }
+      try {
+        resolve(JSON.parse(body));
+      } catch (err) {
+        log.warn('Invalid JSON request body; defaulting to empty object', err);
+        resolve({});
+      }
     });
   });
 }

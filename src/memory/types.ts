@@ -1,4 +1,4 @@
-export type MemoryCategory = 'habit' | 'experience' | 'standard' | 'workflow' | 'framework';
+export type MemoryCategory = 'habit' | 'experience' | 'standard' | 'workflow' | 'framework' | 'failure';
 
 export interface Memory {
   id: number;

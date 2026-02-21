@@ -47,7 +47,7 @@ program
 
     const claudeBridge = new ClaudeBridge(claudeConfig, mcpDiscovery);
     const codexBridge = new CodexBridge(codexConfig);
-    const brain = new Brain(claudeBridge, globalMemory, projectMemory, taskStore);
+    const brain = new Brain(claudeBridge, globalMemory, projectMemory, taskStore, config);
     claudeBridge.setQuestionHandler(brain);
     const taskQueue = new TaskQueue(taskStore);
     const costTracker = new CostTracker(taskStore, budget);
