@@ -26,6 +26,7 @@ CREATE INDEX IF NOT EXISTS idx_memories_fts ON memories USING gin (to_tsvector('
 
 export class GlobalMemory {
   private sql: postgres.Sql;
+  private isClosed = false;
 
   constructor(connectionString: string) {
     this.sql = getDb(connectionString);
@@ -62,7 +63,7 @@ export class GlobalMemory {
     const [row] = await this.sql<Memory[]>`
       INSERT INTO memories (category, title, content, tags, source_project, confidence)
       VALUES (${memory.category}, ${memory.title}, ${memory.content},
-              ${JSON.stringify(memory.tags)}::jsonb, ${memory.source_project}, ${memory.confidence})
+              ${this.sql.json(memory.tags)}, ${memory.source_project}, ${memory.confidence})
       RETURNING *
     `;
     return row;
@@ -101,6 +102,10 @@ export class GlobalMemory {
   }
 
   async close(): Promise<void> {
+    if (this.isClosed) {
+      return;
+    }
+    this.isClosed = true;
     await closeDb();
   }
 }

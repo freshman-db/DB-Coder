@@ -119,6 +119,7 @@ const TASK_JSONB_FIELDS = new Set<keyof TaskUpdateInput>(['plan', 'subtasks', 'r
 
 export class TaskStore {
   private sql: postgres.Sql;
+  private isClosed = false;
 
   constructor(connectionString: string) {
     this.sql = getDb(connectionString);
@@ -434,6 +435,10 @@ export class TaskStore {
   }
 
   async close(): Promise<void> {
+    if (this.isClosed) {
+      return;
+    }
+    this.isClosed = true;
     await closeDb();
   }
 }
