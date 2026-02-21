@@ -6,6 +6,7 @@ import type { CodexBridge } from '../bridges/CodexBridge.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { CostTracker } from '../utils/cost.js';
+import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { Task, SubTaskRecord } from '../memory/types.js';
 import type { MergedReviewResult, LoopState, PlanTask } from './types.js';
 import type { ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
@@ -25,6 +26,8 @@ export class MainLoop {
   private currentTaskId: string | null = null;
   private lockFile: string;
 
+  private evolutionEngine?: EvolutionEngine;
+
   constructor(
     private config: Config,
     private brain: Brain,
@@ -43,6 +46,10 @@ export class MainLoop {
   getState(): LoopState { return this.state; }
   getCurrentTaskId(): string | null { return this.currentTaskId; }
   isPaused(): boolean { return this.paused; }
+
+  setEvolutionEngine(engine: EvolutionEngine): void {
+    this.evolutionEngine = engine;
+  }
 
   async start(): Promise<void> {
     if (this.running) return;
@@ -113,6 +120,17 @@ export class MainLoop {
       log.info(`No new changes but ${queued.length} queued tasks.`);
     } else {
       const { analysis, cost } = await this.brain.scanProject(projectPath, 'normal');
+
+      // EVOLVE: assess goal progress after scan
+      if (this.evolutionEngine) {
+        try {
+          const lastScan = await this.taskStore.getLastScan(projectPath);
+          await this.evolutionEngine.assessGoalProgress(projectPath, analysis, lastScan?.id ?? null);
+          await this.evolutionEngine.applyPendingProposals(projectPath);
+        } catch (err) {
+          log.warn(`Evolution goal assessment failed: ${err}`);
+        }
+      }
 
       // PLAN
       if (analysis.issues.length > 0 || analysis.opportunities.length > 0) {
@@ -271,7 +289,16 @@ export class MainLoop {
 
         const allResults = subtasks.map(st => `${st.description}: ${st.status} ${st.result ?? ''}`).join('\n');
         const outcome = reviewResult.passed ? 'success' as const : 'blocked_max_retries' as const;
-        await this.brain.reflect(projectPath, task.task_description, allResults, reviewResult.summary, outcome);
+        const { reflection } = await this.brain.reflect(projectPath, task.task_description, allResults, reviewResult.summary, outcome);
+
+        // EVOLVE: process adjustments from reflection
+        if (this.evolutionEngine && reflection.adjustments.length > 0) {
+          try {
+            await this.evolutionEngine.processAdjustments(projectPath, task.id, reflection.adjustments, outcome);
+          } catch (err) {
+            log.warn(`Evolution processAdjustments failed: ${err}`);
+          }
+        }
 
         // Mark done
         const finalStatus = reviewResult.passed ? 'done' : (task.iteration >= this.config.values.autonomy.maxRetries ? 'blocked' : 'done');
@@ -287,10 +314,13 @@ export class MainLoop {
       await this.taskStore.updateTask(task.id, { status: 'failed', phase: 'failed' });
       // Reflect on failure to extract lessons
       try {
-        await this.brain.reflect(
+        const { reflection } = await this.brain.reflect(
           projectPath, task.task_description,
           `Execution crashed: ${err}`, 'Task failed with exception', 'failed',
         );
+        if (this.evolutionEngine && reflection.adjustments.length > 0) {
+          await this.evolutionEngine.processAdjustments(projectPath, task.id, reflection.adjustments, 'failed');
+        }
       } catch (reflectErr) {
         log.warn(`Reflect after failure failed: ${reflectErr}`);
       }
@@ -347,6 +377,16 @@ export class MainLoop {
       );
       if (reflection.adjustments.length > 0) {
         log.info(`Brain suggests: ${reflection.adjustments.join(', ')}`);
+        // EVOLVE: store stuck adjustments
+        if (this.evolutionEngine) {
+          try {
+            await this.evolutionEngine.processAdjustments(
+              this.config.projectPath, task.id, reflection.adjustments, 'blocked_stuck',
+            );
+          } catch (err) {
+            log.warn(`Evolution processAdjustments (stuck) failed: ${err}`);
+          }
+        }
       }
       return true; // Will retry with new insights
     }
@@ -354,11 +394,16 @@ export class MainLoop {
     // 3rd failure: reflect then skip
     log.warn(`Stuck: skipping subtask "${subtask.description}" after ${iteration} attempts`);
     try {
-      await this.brain.reflect(
+      const { reflection } = await this.brain.reflect(
         this.config.projectPath, task.task_description,
         `Subtask "${subtask.description}" failed ${iteration} times: ${error}`,
         'Permanently stuck — giving up', 'blocked_stuck',
       );
+      if (this.evolutionEngine && reflection.adjustments.length > 0) {
+        await this.evolutionEngine.processAdjustments(
+          this.config.projectPath, task.id, reflection.adjustments, 'blocked_stuck',
+        );
+      }
     } catch (reflectErr) {
       log.warn(`Reflect on stuck failed: ${reflectErr}`);
     }

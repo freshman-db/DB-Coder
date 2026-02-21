@@ -1,12 +1,13 @@
 import { createServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFileSync, existsSync } from 'node:fs';
-import { join, extname, resolve } from 'node:path';
+import { join, extname, resolve, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { MainLoop } from '../core/MainLoop.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { CostTracker } from '../utils/cost.js';
 import type { Config } from '../config/Config.js';
+import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import { handleRequest } from './routes.js';
 import { log } from '../utils/logger.js';
 
@@ -33,6 +34,7 @@ export class Server {
     private taskStore: TaskStore,
     private globalMemory: GlobalMemory,
     private costTracker: CostTracker,
+    private evolutionEngine?: EvolutionEngine,
   ) {
     // Web files directory (relative to compiled output)
     const thisDir = fileURLToPath(new URL('.', import.meta.url));
@@ -43,7 +45,7 @@ export class Server {
       this.webDir = join(thisDir, '..', '..', 'src', 'web');
     }
 
-    const ctx = { loop, taskStore, globalMemory, costTracker, config };
+    const ctx = { loop, taskStore, globalMemory, costTracker, config, evolutionEngine: this.evolutionEngine };
 
     this.server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       try {
@@ -70,7 +72,12 @@ export class Server {
     const method = req.method?.toUpperCase() ?? 'GET';
     if (!BODY_LIMIT_METHODS.has(method)) return false;
 
-    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    } catch {
+      return false;
+    }
     if (!url.pathname.startsWith('/api/')) return false;
 
     const rawContentLength = req.headers['content-length'];
@@ -99,29 +106,34 @@ export class Server {
   }
 
   private serveStatic(req: IncomingMessage, res: ServerResponse): void {
-    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
     let pathname = url.pathname;
+    try {
+      pathname = decodeURIComponent(pathname);
+    } catch {
+      res.writeHead(400).end('Bad Request');
+      return;
+    }
 
     // SPA: all non-file paths serve index.html
     if (!pathname.includes('.')) {
       pathname = '/index.html';
     }
 
-    const filePath = join(this.webDir, pathname);
+    const filePath = join(this.webDir, pathname.replace(/^\/+/, ''));
     const resolvedRoot = resolve(this.webDir);
 
     // Path traversal protection: ensure resolved path stays within webDir
     const resolvedFile = resolve(filePath);
-    if (!resolvedFile.startsWith(resolvedRoot)) {
+    if (!this.isWithinRoot(resolvedRoot, resolvedFile)) {
       res.writeHead(403).end('Forbidden');
       return;
     }
 
-    if (!existsSync(filePath)) {
+    if (!existsSync(resolvedFile)) {
       // Fallback to index.html for SPA routing
-      const indexPath = join(this.webDir, 'index.html');
-      const resolvedIndex = resolve(indexPath);
-      if (!resolvedIndex.startsWith(resolvedRoot)) {
+      const indexPath = resolve(this.webDir, 'index.html');
+      if (!this.isWithinRoot(resolvedRoot, indexPath)) {
         res.writeHead(403).end('Forbidden');
         return;
       }
@@ -134,9 +146,14 @@ export class Server {
       return;
     }
 
-    const ext = extname(filePath);
+    const ext = extname(resolvedFile);
     const mime = MIME_TYPES[ext] ?? 'application/octet-stream';
     res.writeHead(200, { 'Content-Type': mime });
-    res.end(readFileSync(filePath));
+    res.end(readFileSync(resolvedFile));
+  }
+
+  private isWithinRoot(root: string, path: string): boolean {
+    const rel = relative(root, path);
+    return !rel.startsWith('..') && !isAbsolute(rel);
   }
 }

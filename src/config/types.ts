@@ -63,11 +63,16 @@ export interface EvolutionGoal {
   description: string;
   priority: number; // 0-3
   status?: 'active' | 'paused' | 'done';
+  progress?: number; // 0-100, computed from goal_progress table
+  completedAt?: string; // ISO date when marked done
 }
 
 export interface EvolutionConfig {
   goals: EvolutionGoal[];
   architectureNotes?: string;
+  autoConfigUpdate?: boolean; // default false — auto-apply safe config proposals
+  maxAdjustmentsPerPrompt?: number; // default 5
+  trendWindowSize?: number; // default 10 — number of recent scans for trend analysis
 }
 
 export interface DbCoderConfig {

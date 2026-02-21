@@ -5,11 +5,14 @@ import type { ProjectMemory } from '../memory/ProjectMemory.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { ProjectAnalysis, TaskPlan, ReflectionResult } from './types.js';
 import type { QuestionHandler } from '../bridges/MessageHandler.js';
+import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import { BRAIN_SYSTEM_PROMPT, scanPrompt, planPrompt, reflectPrompt, brainMcpGuidance } from '../prompts/brain.js';
 import { getHeadCommit, getRecentLog, getChangedFilesSince } from '../utils/git.js';
 import { log } from '../utils/logger.js';
 
 export class Brain implements QuestionHandler {
+  private evolutionEngine?: EvolutionEngine;
+
   constructor(
     private claude: ClaudeBridge,
     private globalMemory: GlobalMemory,
@@ -17,6 +20,10 @@ export class Brain implements QuestionHandler {
     private taskStore: TaskStore,
     private config?: Config,
   ) {}
+
+  setEvolutionEngine(engine: EvolutionEngine): void {
+    this.evolutionEngine = engine;
+  }
 
   async scanProject(
     projectPath: string,
@@ -47,7 +54,10 @@ export class Brain implements QuestionHandler {
 
     const mcpGuidance = brainMcpGuidance(this.claude.getMcpServerNames('scan'));
     const goalsSection = this.buildGoalsSection();
-    const prompt = scanPrompt(projectPath, depth, recentChanges, allMemories, mcpGuidance, goalsSection);
+    const dynamicContext = this.evolutionEngine
+      ? await this.evolutionEngine.synthesizePromptContext(projectPath)
+      : undefined;
+    const prompt = scanPrompt(projectPath, depth, recentChanges, allMemories, mcpGuidance, goalsSection, dynamicContext);
     const result = await this.claude.plan(prompt, projectPath, {
       systemPrompt: BRAIN_SYSTEM_PROMPT,
       maxTurns: depth === 'deep' ? 30 : depth === 'normal' ? 20 : 10,
@@ -93,7 +103,10 @@ export class Brain implements QuestionHandler {
     // Build goals section
     const goalsSection = this.buildGoalsSection();
 
-    const prompt = planPrompt(JSON.stringify(analysis, null, 2), memories, allTasks, goalsSection);
+    const dynamicContext = this.evolutionEngine
+      ? await this.evolutionEngine.synthesizePromptContext(projectPath)
+      : undefined;
+    const prompt = planPrompt(JSON.stringify(analysis, null, 2), memories, allTasks, goalsSection, dynamicContext);
     const result = await this.claude.plan(prompt, projectPath, {
       systemPrompt: BRAIN_SYSTEM_PROMPT,
     });

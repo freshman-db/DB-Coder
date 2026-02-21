@@ -1,3 +1,28 @@
+import type { DynamicPromptContext } from '../evolution/types.js';
+
+function formatDynamicContext(ctx?: DynamicPromptContext): string {
+  if (!ctx) return '';
+  const sections: string[] = [];
+
+  if (ctx.learnedPatterns.length > 0) {
+    sections.push(`## Learned Patterns\n${ctx.learnedPatterns.map(p => `- ${p}`).join('\n')}`);
+  }
+  if (ctx.antiPatterns.length > 0) {
+    sections.push(`## Anti-Patterns (avoid these)\n${ctx.antiPatterns.map(p => `- ${p}`).join('\n')}`);
+  }
+  if (ctx.trendContext) {
+    sections.push(`## Project Trends\n${ctx.trendContext}`);
+  }
+  if (ctx.activeAdjustments.length > 0) {
+    sections.push(`## Active Adjustments\n${ctx.activeAdjustments.map(a => `- ${a}`).join('\n')}`);
+  }
+  if (ctx.goalContext) {
+    sections.push(`## ${ctx.goalContext}`);
+  }
+
+  return sections.length > 0 ? '\n' + sections.join('\n\n') + '\n' : '';
+}
+
 export const BRAIN_SYSTEM_PROMPT = `You are the Brain of db-coder, an autonomous AI coding agent.
 You act as a "technical lead" — you analyze codebases, identify improvements, plan tasks, and extract lessons learned.
 
@@ -21,7 +46,7 @@ export function brainMcpGuidance(serverNames: string[]): string {
   return tips.length > 0 ? `\n## Available MCP Tools\n${tips.join('\n')}` : '';
 }
 
-export function scanPrompt(projectPath: string, depth: string, recentChanges: string, memories: string, mcpGuidance: string = '', goalsSection: string = ''): string {
+export function scanPrompt(projectPath: string, depth: string, recentChanges: string, memories: string, mcpGuidance: string = '', goalsSection: string = '', dynamicContext?: DynamicPromptContext): string {
   return `Scan the project at ${projectPath}.
 Scan depth: ${depth}
 
@@ -32,6 +57,7 @@ Relevant memories from past experience:
 ${memories || 'No relevant memories yet.'}
 ${mcpGuidance}
 ${goalsSection}
+${formatDynamicContext(dynamicContext)}
 Analyze the project by:
 1. Reading key files (package.json, README, config files, main source files)
 2. Running git log to understand recent activity
@@ -50,7 +76,7 @@ Output your analysis as JSON with this exact structure:
 }`;
 }
 
-export function planPrompt(analysis: string, memories: string, existingTasks: string, goalsSection: string = ''): string {
+export function planPrompt(analysis: string, memories: string, existingTasks: string, goalsSection: string = '', dynamicContext?: DynamicPromptContext): string {
   return `Based on this project analysis, create a prioritized task plan.
 
 Analysis:
@@ -62,6 +88,7 @@ ${memories || 'None'}
 Existing tasks (queued, completed, and blocked — DO NOT create duplicates):
 ${existingTasks || 'None'}
 ${goalsSection}
+${formatDynamicContext(dynamicContext)}
 Create tasks with priorities:
 - P0: Critical bugs, security issues
 - P1: Important improvements, failing tests

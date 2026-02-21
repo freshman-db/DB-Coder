@@ -14,6 +14,8 @@ import { MainLoop } from './core/MainLoop.js';
 import { CostTracker } from './utils/cost.js';
 import { Server } from './server/Server.js';
 import { McpDiscovery } from './mcp/McpDiscovery.js';
+import { TrendAnalyzer } from './evolution/TrendAnalyzer.js';
+import { EvolutionEngine } from './evolution/EvolutionEngine.js';
 import { log } from './utils/logger.js';
 
 const program = new Command()
@@ -51,8 +53,15 @@ program
     claudeBridge.setQuestionHandler(brain);
     const taskQueue = new TaskQueue(taskStore);
     const costTracker = new CostTracker(taskStore, budget);
+
+    // Evolution system
+    const trendAnalyzer = new TrendAnalyzer(taskStore);
+    const evolutionEngine = new EvolutionEngine(taskStore, globalMemory, config, trendAnalyzer);
+    brain.setEvolutionEngine(evolutionEngine);
+
     const mainLoop = new MainLoop(config, brain, taskQueue, claudeBridge, codexBridge, taskStore, globalMemory, costTracker);
-    const server = new Server(config, mainLoop, taskStore, globalMemory, costTracker);
+    mainLoop.setEvolutionEngine(evolutionEngine);
+    const server = new Server(config, mainLoop, taskStore, globalMemory, costTracker, evolutionEngine);
 
     // Global error handlers
     process.on('unhandledRejection', (err) => { log.error('Unhandled rejection', err); });

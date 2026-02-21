@@ -5,6 +5,7 @@ import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { MemoryCategory } from '../memory/types.js';
 import type { CostTracker } from '../utils/cost.js';
 import type { Config } from '../config/Config.js';
+import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import { log, type LogEntry } from '../utils/logger.js';
 
 interface RouteContext {
@@ -13,6 +14,7 @@ interface RouteContext {
   globalMemory: GlobalMemory;
   costTracker: CostTracker;
   config: Config;
+  evolutionEngine?: EvolutionEngine;
 }
 
 type RouteHandler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext, params: Record<string, string>) => Promise<void>;
@@ -31,12 +33,21 @@ const memoryCategories: ReadonlySet<MemoryCategory> = new Set([
   'standard',
   'workflow',
   'framework',
+  'failure',
 ]);
 const MAX_TASK_DESCRIPTION_LENGTH = 4_000;
 const MAX_MEMORY_CONTENT_LENGTH = 32_000;
 const MAX_MEMORY_TITLE_LENGTH = 200;
 const MAX_MEMORY_TAG_LENGTH = 64;
 const MAX_MEMORY_TAG_COUNT = 20;
+const MAX_REQUEST_BODY_BYTES = 64 * 1024;
+
+class PayloadTooLargeError extends Error {
+  constructor(limitBytes: number) {
+    super(`Request body exceeds ${limitBytes} bytes.`);
+    this.name = 'PayloadTooLargeError';
+  }
+}
 
 interface CreateTaskRequest {
   description: string;
@@ -192,6 +203,50 @@ route('GET', '/api/cost', async (_req, res, ctx) => {
   json(res, { costs, sessionCost: ctx.costTracker.getSessionCost() });
 });
 
+// --- Evolution ---
+route('GET', '/api/evolution/summary', async (_req, res, ctx) => {
+  if (!ctx.evolutionEngine) { json(res, { error: 'Evolution engine not available' }, 503); return; }
+  const summary = await ctx.evolutionEngine.getSummary(ctx.config.projectPath);
+  json(res, summary);
+});
+
+route('GET', '/api/evolution/trends', async (_req, res, ctx) => {
+  if (!ctx.evolutionEngine) { json(res, { error: 'Evolution engine not available' }, 503); return; }
+  const summary = await ctx.evolutionEngine.getSummary(ctx.config.projectPath);
+  json(res, summary.trends);
+});
+
+route('GET', '/api/evolution/goals', async (_req, res, ctx) => {
+  if (!ctx.evolutionEngine) { json(res, { error: 'Evolution engine not available' }, 503); return; }
+  const summary = await ctx.evolutionEngine.getSummary(ctx.config.projectPath);
+  const configGoals = ctx.config.values.evolution?.goals ?? [];
+  json(res, { goals: configGoals, progress: summary.goals });
+});
+
+route('GET', '/api/evolution/adjustments', async (_req, res, ctx) => {
+  const adjustments = await ctx.taskStore.getActiveAdjustments(ctx.config.projectPath);
+  json(res, adjustments);
+});
+
+route('GET', '/api/evolution/proposals', async (_req, res, ctx) => {
+  const proposals = await ctx.taskStore.getPendingProposals(ctx.config.projectPath);
+  json(res, proposals);
+});
+
+route('POST', '/api/evolution/proposals/:id/apply', async (_req, res, ctx, params) => {
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) { json(res, { error: 'Invalid proposal ID' }, 400); return; }
+  await ctx.taskStore.updateProposalStatus(id, 'applied');
+  json(res, { ok: true, status: 'applied' });
+});
+
+route('POST', '/api/evolution/proposals/:id/reject', async (_req, res, ctx, params) => {
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) { json(res, { error: 'Invalid proposal ID' }, 400); return; }
+  await ctx.taskStore.updateProposalStatus(id, 'rejected');
+  json(res, { ok: true, status: 'rejected' });
+});
+
 // --- Route matching ---
 export async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: RouteContext): Promise<boolean> {
   const url = new URL(req.url ?? '', `http://${req.headers.host}`);
@@ -215,6 +270,10 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse, c
     try {
       await route.handler(req, res, ctx, params);
     } catch (err) {
+      if (err instanceof PayloadTooLargeError) {
+        json(res, { error: err.message }, 413);
+        return true;
+      }
       log.error(`Route error: ${method} ${pathname}`, err);
       json(res, { error: 'Internal server error' }, 500);
     }
@@ -230,17 +289,62 @@ function json(res: ServerResponse, data: unknown, status = 200): void {
 }
 
 async function readBody(req: IncomingMessage): Promise<unknown> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
-    req.on('end', () => {
+    let bytes = 0;
+    let settled = false;
+
+    const cleanup = (): void => {
+      req.off('data', onData);
+      req.off('end', onEnd);
+      req.off('error', onError);
+    };
+
+    const settleResolve = (value: unknown): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+
+    const settleReject = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+
+    const onData = (chunk: Buffer): void => {
+      bytes += chunk.length;
+      if (bytes > MAX_REQUEST_BODY_BYTES) {
+        req.resume();
+        settleReject(new PayloadTooLargeError(MAX_REQUEST_BODY_BYTES));
+        return;
+      }
+      body += chunk.toString();
+    };
+
+    const onEnd = (): void => {
+      if (body.length === 0) {
+        settleResolve({});
+        return;
+      }
       try {
-        resolve(JSON.parse(body));
+        settleResolve(JSON.parse(body));
       } catch (err) {
         log.warn('Invalid JSON request body; defaulting to empty object', err);
-        resolve({});
+        settleResolve({});
       }
-    });
+    };
+
+    const onError = (err: Error): void => {
+      log.warn('Error while reading request body; defaulting to empty object', err);
+      settleResolve({});
+    };
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
   });
 }
 
@@ -292,7 +396,7 @@ function validateCreateMemoryBody(body: unknown): ValidationResult<CreateMemoryR
 
   const normalizedCategory = category.trim();
   if (!isMemoryCategory(normalizedCategory)) {
-    return { ok: false, error: 'category must be one of: habit, experience, standard, workflow, framework.' };
+    return { ok: false, error: 'category must be one of: habit, experience, standard, workflow, framework, failure.' };
   }
 
   const content = body.content;
