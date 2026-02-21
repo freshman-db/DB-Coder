@@ -259,56 +259,65 @@ export class MainLoop {
       this.state = 'reviewing';
       await this.taskStore.updateTask(task.id, { phase: 'reviewing' });
 
-      const changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
-      const reviewResult = await this.dualReview(task, changedFiles);
+      let changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
+      let reviewResult = await this.dualReview(task, changedFiles);
+      let reviewRetries = 0;
 
       await this.taskStore.updateTask(task.id, {
         review_results: [...(task.review_results as unknown[] || []), reviewResult],
-        iteration: task.iteration + 1,
       });
 
-      if (!(await this.enforceBudget(task.id))) return;
+      // Fix-and-re-review loop (in-place, no task re-queue)
+      while (!reviewResult.passed && reviewRetries < this.config.values.autonomy.maxRetries) {
+        if (!(await this.enforceBudget(task.id))) return;
 
-      if (!reviewResult.passed && task.iteration < this.config.values.autonomy.maxRetries) {
-        // Fix review issues and re-review
-        log.info('Review found issues. Attempting fixes...');
+        reviewRetries++;
+        log.info(`Review found issues (attempt ${reviewRetries}/${this.config.values.autonomy.maxRetries}). Fixing...`);
+
         const issuesToFix = dedupeIssues([...reviewResult.mustFix, ...reviewResult.shouldFix]);
         const issueLines = issuesToFix.length > 0
           ? issuesToFix.map(i => `- [${i.severity}] ${i.description}${i.file ? ` (${i.file}${i.line ? `:${i.line}` : ''})` : ''}${i.suggestion ? `: ${i.suggestion}` : ''}`).join('\n')
           : `- No structured issues were returned.\n- Review summary: ${reviewResult.summary}`;
         const fixPrompt = `Fix these review issues:\n${issueLines}`;
-        const fixAgent = this.codex;
-        await fixAgent.execute(fixPrompt, projectPath, {});
+        await this.codex.execute(fixPrompt, projectPath, {});
         await commitAll('db-coder: fix review issues', projectPath).catch(() => {});
-        // Re-execute task for next iteration
-        await this.taskStore.updateTask(task.id, { status: 'queued', phase: 'init' });
-      } else {
-        // REFLECT
-        this.state = 'reflecting';
-        await this.taskStore.updateTask(task.id, { phase: 'reflecting' });
 
-        const allResults = subtasks.map(st => `${st.description}: ${st.status} ${st.result ?? ''}`).join('\n');
-        const outcome = reviewResult.passed ? 'success' as const : 'blocked_max_retries' as const;
-        const { reflection } = await this.brain.reflect(projectPath, task.task_description, allResults, reviewResult.summary, outcome);
+        if (!(await this.enforceBudget(task.id))) return;
 
-        // EVOLVE: process adjustments from reflection
-        if (this.evolutionEngine && reflection.adjustments.length > 0) {
-          try {
-            await this.evolutionEngine.processAdjustments(projectPath, task.id, reflection.adjustments, outcome);
-          } catch (err) {
-            log.warn(`Evolution processAdjustments failed: ${err}`);
-          }
-        }
+        changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
+        reviewResult = await this.dualReview(task, changedFiles);
 
-        // Mark done
-        const finalStatus = reviewResult.passed ? 'done' : (task.iteration >= this.config.values.autonomy.maxRetries ? 'blocked' : 'done');
         await this.taskStore.updateTask(task.id, {
-          status: finalStatus as Task['status'],
-          phase: finalStatus === 'blocked' ? 'blocked' : 'done',
+          review_results: [...(task.review_results as unknown[] || []), reviewResult],
         });
-
-        log.info(`Task ${reviewResult.passed ? 'completed' : 'blocked'}: ${task.task_description.slice(0, 60)}`);
       }
+
+      // REFLECT
+      this.state = 'reflecting';
+      await this.taskStore.updateTask(task.id, { phase: 'reflecting' });
+
+      const allResults = subtasks.map(st => `${st.description}: ${st.status} ${st.result ?? ''}`).join('\n');
+      const outcome = reviewResult.passed ? 'success' as const : 'blocked_max_retries' as const;
+      const { reflection } = await this.brain.reflect(projectPath, task.task_description, allResults, reviewResult.summary, outcome);
+
+      // EVOLVE: process adjustments from reflection
+      if (this.evolutionEngine && reflection.adjustments.length > 0) {
+        try {
+          await this.evolutionEngine.processAdjustments(projectPath, task.id, reflection.adjustments, outcome);
+        } catch (err) {
+          log.warn(`Evolution processAdjustments failed: ${err}`);
+        }
+      }
+
+      // Mark done
+      const finalStatus = reviewResult.passed ? 'done' : 'blocked';
+      await this.taskStore.updateTask(task.id, {
+        status: finalStatus as Task['status'],
+        phase: finalStatus === 'blocked' ? 'blocked' : 'done',
+        iteration: task.iteration + reviewRetries,
+      });
+
+      log.info(`Task ${reviewResult.passed ? 'completed' : 'blocked'}: ${task.task_description.slice(0, 60)}`);
     } catch (err) {
       log.error('Task execution error', err);
       await this.taskStore.updateTask(task.id, { status: 'failed', phase: 'failed' });
