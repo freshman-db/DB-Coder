@@ -42,8 +42,6 @@ export class CostTracker {
       if (taskRatio >= this.budget.warningThreshold && taskRatio < 1 && !this.warnedTaskThreshold.has(taskId)) {
         log.warn(`Task cost at ${(taskRatio * 100).toFixed(0)}% of budget ($${taskCost}/$${this.budget.maxPerTask})`);
         this.warnedTaskThreshold.add(taskId);
-      } else if (taskRatio < this.budget.warningThreshold) {
-        this.warnedTaskThreshold.delete(taskId);
       }
 
       if (taskCost >= this.budget.maxPerTask) {
