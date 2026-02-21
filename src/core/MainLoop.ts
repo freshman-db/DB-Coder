@@ -69,6 +69,16 @@ export class MainLoop {
     this.running = true;
     log.info('Main loop started');
 
+    // Recover zombie tasks left in 'active' state from a previous crash
+    try {
+      const recovered = await this.taskStore.recoverActiveTasks(this.config.projectPath);
+      if (recovered > 0) {
+        log.warn(`Recovered ${recovered} active task(s) back to queued`);
+      }
+    } catch (err) {
+      log.warn(`Failed to recover active tasks: ${err}`);
+    }
+
     try {
       while (this.running) {
         if (this.paused) {

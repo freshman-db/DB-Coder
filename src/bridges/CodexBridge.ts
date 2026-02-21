@@ -62,7 +62,7 @@ export class CodexBridge implements CodingAgent {
         (e.type === 'function_call_output' && String(e.output ?? '').includes('Error')),
       );
 
-      const cost = extractCost(events);
+      const cost = extractCost(events, this.config.tokenPricing);
 
       return {
         success,
@@ -126,7 +126,7 @@ ${prompt}`;
         });
       }
 
-      const cost = extractCost(events);
+      const cost = extractCost(events, this.config.tokenPricing);
       const parsed = tryParseReview(output || events.map(e => String(e.content ?? '')).join('\n'));
 
       return {
@@ -155,15 +155,44 @@ ${prompt}`;
   }
 }
 
-function extractCost(events: JsonlEvent[]): number {
-  // Try to find cost info in events
+interface TokenPricing {
+  inputPerMillion: number;
+  cachedInputPerMillion: number;
+  outputPerMillion: number;
+}
+
+function extractCost(events: JsonlEvent[], pricing?: TokenPricing): number {
+  // 1. Search for explicit cost fields in events
   for (const e of events) {
-    if (typeof e.cost === 'number') return e.cost;
+    if (typeof e.cost === 'number' && e.cost > 0) return e.cost;
+    if (typeof e.total_cost === 'number' && e.total_cost > 0) return e.total_cost;
+    if (typeof e.total_cost_usd === 'number' && e.total_cost_usd > 0) return e.total_cost_usd;
     if (typeof e.usage === 'object' && e.usage !== null) {
-      const u = e.usage as { total_cost?: number };
-      if (typeof u.total_cost === 'number') return u.total_cost;
+      const u = e.usage as Record<string, unknown>;
+      if (typeof u.cost === 'number' && u.cost > 0) return u.cost;
+      if (typeof u.total_cost === 'number' && u.total_cost > 0) return u.total_cost;
+      if (typeof u.total_cost_usd === 'number' && u.total_cost_usd > 0) return u.total_cost_usd;
     }
   }
+
+  // 2. Estimate from token usage in turn.completed events
+  if (pricing) {
+    let totalInput = 0, totalCached = 0, totalOutput = 0;
+    for (const e of events) {
+      if (e.type !== 'turn.completed' || typeof e.usage !== 'object' || !e.usage) continue;
+      const u = e.usage as Record<string, unknown>;
+      if (typeof u.input_tokens === 'number') totalInput += u.input_tokens;
+      if (typeof u.cached_input_tokens === 'number') totalCached += u.cached_input_tokens;
+      if (typeof u.output_tokens === 'number') totalOutput += u.output_tokens;
+    }
+    if (totalInput > 0 || totalOutput > 0) {
+      const nonCachedInput = Math.max(0, totalInput - totalCached);
+      return (nonCachedInput * pricing.inputPerMillion
+        + totalCached * pricing.cachedInputPerMillion
+        + totalOutput * pricing.outputPerMillion) / 1_000_000;
+    }
+  }
+
   return 0;
 }
 
