@@ -49,6 +49,19 @@ export class Server {
 
     this.server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       try {
+        if (!this.isAuthorizedApiRequest(req)) {
+          req.resume();
+          res.writeHead(401, {
+            'Content-Type': 'application/json',
+            'WWW-Authenticate': 'Bearer',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+          });
+          res.end(JSON.stringify({ error: 'Unauthorized' }));
+          return;
+        }
+
         if (this.isRequestBodyTooLarge(req)) {
           req.resume();
           res.writeHead(413).end('Payload Too Large');
@@ -66,6 +79,32 @@ export class Server {
         res.writeHead(500).end('Internal Server Error');
       }
     });
+  }
+
+  private isApiRequest(req: IncomingMessage): boolean {
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    } catch {
+      return false;
+    }
+    return url.pathname.startsWith('/api/');
+  }
+
+  private isAuthorizedApiRequest(req: IncomingMessage): boolean {
+    if (!this.isApiRequest(req)) return true;
+
+    const method = req.method?.toUpperCase() ?? 'GET';
+    if (method === 'OPTIONS') return true;
+
+    const rawAuthorization = req.headers.authorization;
+    const authorization = Array.isArray(rawAuthorization) ? rawAuthorization[0] : rawAuthorization;
+    if (!authorization) return false;
+
+    const matches = authorization.match(/^Bearer\s+(.+)$/i);
+    if (!matches) return false;
+
+    return matches[1] === this.config.values.apiToken;
   }
 
   private isRequestBodyTooLarge(req: IncomingMessage): boolean {

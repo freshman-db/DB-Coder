@@ -1,9 +1,11 @@
-import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
+import { randomBytes } from 'node:crypto';
 import type { DbCoderConfig, DeepPartial } from './types.js';
 
 const DEFAULTS: DbCoderConfig = {
+  apiToken: '',
   brain: { model: 'opus', scanInterval: 3600, maxScanBudget: 1.0 },
   claude: { model: 'opus', maxTaskBudget: 2.0, maxTurns: 30 },
   codex: { model: 'gpt-5.3-codex', sandbox: 'workspace-write' },
@@ -45,6 +47,25 @@ function loadJsonFile(path: string): DeepPartial<DbCoderConfig> | null {
   }
 }
 
+function normalizeApiToken(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const token = value.trim();
+  return token.length > 0 ? token : null;
+}
+
+function generateApiToken(): string {
+  return randomBytes(32).toString('hex');
+}
+
+function persistApiToken(path: string, config: DeepPartial<DbCoderConfig>, apiToken: string): void {
+  const dir = dirname(path);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+
+  writeFileSync(path, `${JSON.stringify({ ...config, apiToken }, null, 2)}\n`, 'utf-8');
+}
+
 export class Config {
   readonly values: DbCoderConfig;
   readonly projectPath: string;
@@ -60,6 +81,15 @@ export class Config {
     if (globalOverrides) config = deepMerge(config, globalOverrides);
     const projectOverrides = loadJsonFile(projectConfigPath);
     if (projectOverrides) config = deepMerge(config, projectOverrides);
+
+    const apiToken = normalizeApiToken(config.apiToken);
+    if (apiToken) {
+      config.apiToken = apiToken;
+    } else {
+      const generatedToken = generateApiToken();
+      config.apiToken = generatedToken;
+      persistApiToken(globalPath, globalOverrides ?? {}, generatedToken);
+    }
 
     this.values = config;
   }

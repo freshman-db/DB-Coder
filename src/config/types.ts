@@ -76,6 +76,7 @@ export interface EvolutionConfig {
 }
 
 export interface DbCoderConfig {
+  apiToken: string;
   brain: BrainConfig;
   claude: ClaudeConfig;
   codex: CodexConfig;
