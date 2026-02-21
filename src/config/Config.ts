@@ -15,7 +15,7 @@ const DEFAULTS: DbCoderConfig = {
     execute_frontend: 'claude', execute_backend: 'codex',
     review: ['claude', 'codex'], reflect: 'brain',
   },
-  budget: { maxPerTask: 5.0, maxPerDay: 20.0, warningThreshold: 0.8 },
+  budget: { maxPerTask: 5.0, maxPerDay: 200.0, warningThreshold: 0.8 },
   memory: {
     claudeMemUrl: 'http://localhost:37777',
     pgConnectionString: 'postgresql://db:db@localhost:5432/db_coder',
