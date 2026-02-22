@@ -435,6 +435,170 @@ describe('extractIssueCategories', () => {
 });
 
 describe('MainLoop runCycle integration', () => {
+  test('happy path — full scan→plan→evaluate→execute flow', async () => {
+    let scanProjectCalls = 0;
+    let createPlanCalls = 0;
+    let getNextCalls = 0;
+    let claudePlanCalls = 0;
+    let prepareTaskBranchCalls = 0;
+    let executeSubtasksCalls = 0;
+    let runReviewCycleCalls = 0;
+    let reflectOnTaskCalls = 0;
+
+    const addDailyCostCalls: number[] = [];
+    const enqueueCalls: Array<{ projectPath: string; plan: unknown }> = [];
+
+    const now = new Date();
+    const scanAnalysis = {
+      issues: [{ type: 'bugfix', severity: 'medium' as const, description: 'Fix flaky integration path' }],
+      opportunities: [],
+      projectHealth: 78,
+      summary: 'One actionable issue detected',
+    };
+    const plan = {
+      tasks: [{
+        id: 'T001',
+        description: 'Fix flaky integration path',
+        priority: 1,
+        executor: 'codex' as const,
+        subtasks: [{ id: 'S1', description: 'Implement focused fix', executor: 'codex' as const }],
+        dependsOn: [],
+        estimatedComplexity: 'low' as const,
+      }],
+      reasoning: 'Address the issue from scan',
+    };
+    const mockTask: Task = {
+      id: 'task-happy-1',
+      project_path: '/tmp/db-coder-main-loop-test',
+      task_description: 'Fix flaky integration path',
+      phase: 'init',
+      priority: 1,
+      plan: plan.tasks[0],
+      subtasks: [{ id: 'S1', description: 'Implement focused fix', executor: 'codex', status: 'pending' }],
+      review_results: [],
+      iteration: 0,
+      total_cost_usd: 0,
+      git_branch: null,
+      start_commit: null,
+      depends_on: [],
+      status: 'queued',
+      created_at: now,
+      updated_at: now,
+    };
+
+    const { loop } = createMainLoopForCycle({
+      brain: {
+        hasChanges: async (projectPath: string) => {
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return true;
+        },
+        scanProject: async (projectPath: string) => {
+          scanProjectCalls++;
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return { analysis: scanAnalysis, cost: 0.01 };
+        },
+        createPlan: async (projectPath: string, analysis) => {
+          createPlanCalls++;
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          assert.equal(analysis, scanAnalysis);
+          return { plan, cost: 0.005 };
+        },
+      },
+      taskQueue: {
+        enqueue: async (projectPath: string, queuedPlan) => {
+          enqueueCalls.push({ projectPath, plan: queuedPlan });
+          return [];
+        },
+        getNext: async (projectPath: string) => {
+          getNextCalls++;
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return getNextCalls === 1 ? mockTask : null;
+        },
+      },
+      claude: {
+        plan: async () => {
+          claudePlanCalls++;
+          return {
+            success: true,
+            output: JSON.stringify({
+              problemLegitimacy: 1,
+              solutionProportionality: 1,
+              expectedComplexity: 1,
+              historicalSuccess: 1,
+              reasoning: 'High value task',
+            }),
+            cost_usd: 0,
+            duration_ms: 0,
+          };
+        },
+      },
+      taskStore: {
+        addDailyCost: async (cost: number) => {
+          addDailyCostCalls.push(cost);
+        },
+      },
+    });
+
+    const internals = getMainLoopInternals(loop);
+    const executionInternals = getMainLoopExecutionInternals(loop);
+    const originalPrepareTaskBranch = executionInternals.prepareTaskBranch;
+    const originalExecuteSubtasks = executionInternals.executeSubtasks;
+    const originalRunReviewCycle = executionInternals.runReviewCycle;
+    const originalReflectOnTask = executionInternals.reflectOnTask;
+
+    executionInternals.prepareTaskBranch = async () => {
+      prepareTaskBranchCalls++;
+      return { originalBranch: 'main', startCommit: '' };
+    };
+    executionInternals.executeSubtasks = async task => {
+      executeSubtasksCalls++;
+      return { subtasks: task.subtasks, stuckAdjustments: [], aborted: false };
+    };
+    executionInternals.runReviewCycle = async () => {
+      runReviewCycleCalls++;
+      return {
+        aborted: false,
+        reviewResult: { passed: false, mustFix: [], shouldFix: [], summary: 'Short-circuit review' },
+        reviewRetries: 0,
+      };
+    };
+    executionInternals.reflectOnTask = async () => {
+      reflectOnTaskCalls++;
+    };
+
+    internals.setRunning(true);
+    const { states, remove } = collectStates(loop);
+
+    try {
+      await loop.runCycle();
+    } finally {
+      remove();
+      internals.setRunning(false);
+      executionInternals.prepareTaskBranch = originalPrepareTaskBranch;
+      executionInternals.executeSubtasks = originalExecuteSubtasks;
+      executionInternals.runReviewCycle = originalRunReviewCycle;
+      executionInternals.reflectOnTask = originalReflectOnTask;
+    }
+
+    const transitions = states
+      .map(snapshot => snapshot.state)
+      .filter((state, index, all) => index === 0 || all[index - 1] !== state);
+
+    assert.deepEqual(transitions, ['scanning', 'planning', 'evaluating', 'executing', 'idle']);
+    assert.deepEqual(addDailyCostCalls, [0.01, 0.005]);
+    assert.equal(enqueueCalls.length, 1);
+    assert.equal(enqueueCalls[0]?.projectPath, '/tmp/db-coder-main-loop-test');
+    assert.equal(enqueueCalls[0]?.plan, plan);
+    assert.equal(scanProjectCalls, 1);
+    assert.equal(createPlanCalls, 1);
+    assert.equal(claudePlanCalls, 1);
+    assert.equal(getNextCalls, 2);
+    assert.equal(prepareTaskBranchCalls, 1);
+    assert.equal(executeSubtasksCalls, 1);
+    assert.equal(runReviewCycleCalls, 1);
+    assert.equal(reflectOnTaskCalls, 1);
+  });
+
   test('no changes and no queued tasks — returns idle immediately', async () => {
     let scanProjectCalls = 0;
     let createPlanCalls = 0;
