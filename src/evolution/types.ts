@@ -59,6 +59,45 @@ export interface ConfigProposal {
   created_at: Date;
 }
 
+// --- Prompt meta-reflection ---
+export type PromptName = 'brain_system' | 'scan' | 'plan' | 'reflect' | 'executor' | 'reviewer';
+
+export type PromptPatchOp = 'prepend' | 'append' | 'replace_section' | 'remove_section';
+
+export interface PromptPatch {
+  op: PromptPatchOp;
+  section?: string;  // markdown ## heading anchor
+  content: string;
+  reason: string;
+}
+
+export type PromptVersionStatus = 'candidate' | 'active' | 'superseded' | 'rolled_back';
+
+export interface PromptMetrics {
+  passRate: number;       // 0-1
+  avgCostUsd: number;
+  issueCount: number;
+  tasksEvaluated: number;
+}
+
+export interface PromptVersion {
+  id: number;
+  project_path: string;
+  prompt_name: PromptName;
+  version: number;
+  patches: PromptPatch[];
+  rationale: string;
+  confidence: number;       // 0-1
+  effectiveness: number;    // -1 to 1
+  status: PromptVersionStatus;
+  baseline_metrics: PromptMetrics | null;
+  current_metrics: PromptMetrics | null;
+  tasks_evaluated: number;
+  activated_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
 // --- Dynamic prompt context ---
 export interface DynamicPromptContext {
   learnedPatterns: string[];

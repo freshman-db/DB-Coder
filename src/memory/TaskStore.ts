@@ -1,6 +1,6 @@
 import type postgres from 'postgres';
 import type { Task, TaskLog, TaskStatus, ScanResult, ReviewEvent, RecurringIssueCategory } from './types.js';
-import type { Adjustment, AdjustmentCategory, AdjustmentStatus, GoalProgress, ConfigProposal, ProposalStatus } from '../evolution/types.js';
+import type { Adjustment, AdjustmentCategory, AdjustmentStatus, GoalProgress, ConfigProposal, ProposalStatus, PromptVersion, PromptName, PromptPatch, PromptMetrics, PromptVersionStatus } from '../evolution/types.js';
 import { closeDb, getDb } from '../db.js';
 import { log } from '../utils/logger.js';
 
@@ -104,6 +104,27 @@ CREATE TABLE IF NOT EXISTS review_events (
 );
 
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS depends_on UUID[] DEFAULT '{}';
+
+CREATE TABLE IF NOT EXISTS prompt_versions (
+  id SERIAL PRIMARY KEY,
+  project_path TEXT NOT NULL,
+  prompt_name TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  patches JSONB NOT NULL,
+  rationale TEXT NOT NULL DEFAULT '',
+  confidence REAL DEFAULT 0.5,
+  effectiveness REAL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'candidate',
+  baseline_metrics JSONB,
+  current_metrics JSONB,
+  tasks_evaluated INTEGER DEFAULT 0,
+  activated_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (project_path, prompt_name, version)
+);
+CREATE INDEX IF NOT EXISTS idx_prompt_versions_active
+  ON prompt_versions (project_path, prompt_name) WHERE status = 'active';
 `;
 
 type TaskUpdateInput = Partial<Pick<Task, 'phase' | 'status' | 'plan' | 'subtasks' | 'review_results' | 'iteration' | 'total_cost_usd' | 'git_branch' | 'start_commit'>>;
@@ -497,6 +518,120 @@ export class TaskStore {
       SET effectiveness = LEAST(1.0, GREATEST(-1.0, effectiveness + ${delta})),
           updated_at = NOW()
       WHERE task_id = ${taskId} AND status = 'active'
+    `;
+  }
+
+  // --- Prompt Versions ---
+
+  async getNextPromptVersion(projectPath: string, promptName: PromptName): Promise<number> {
+    const sql = this.getSql();
+    const [row] = await sql<Array<{ max_version: number | null }>>`
+      SELECT MAX(version) AS max_version FROM prompt_versions
+      WHERE project_path = ${projectPath} AND prompt_name = ${promptName}
+    `;
+    return (row?.max_version ?? 0) + 1;
+  }
+
+  async savePromptVersion(pv: {
+    project_path: string;
+    prompt_name: PromptName;
+    version: number;
+    patches: PromptPatch[];
+    rationale: string;
+    confidence: number;
+    baseline_metrics: PromptMetrics | null;
+  }): Promise<PromptVersion> {
+    const sql = this.getSql();
+    const [row] = await sql<PromptVersion[]>`
+      INSERT INTO prompt_versions (project_path, prompt_name, version, patches, rationale, confidence, baseline_metrics)
+      VALUES (${pv.project_path}, ${pv.prompt_name}, ${pv.version},
+              ${sql.json(pv.patches as any)}, ${pv.rationale}, ${pv.confidence},
+              ${pv.baseline_metrics ? sql.json(pv.baseline_metrics as any) : null})
+      RETURNING *
+    `;
+    return row;
+  }
+
+  async getActivePromptVersions(projectPath: string): Promise<PromptVersion[]> {
+    const sql = this.getSql();
+    return sql<PromptVersion[]>`
+      SELECT * FROM prompt_versions
+      WHERE project_path = ${projectPath} AND status = 'active'
+      ORDER BY prompt_name
+    `;
+  }
+
+  async getCandidatePromptVersions(projectPath: string): Promise<PromptVersion[]> {
+    const sql = this.getSql();
+    return sql<PromptVersion[]>`
+      SELECT * FROM prompt_versions
+      WHERE project_path = ${projectPath} AND status = 'candidate'
+      ORDER BY confidence DESC, created_at DESC
+    `;
+  }
+
+  async updatePromptVersionStatus(id: number, status: PromptVersionStatus): Promise<void> {
+    const sql = this.getSql();
+    await sql`
+      UPDATE prompt_versions SET status = ${status}, updated_at = NOW() WHERE id = ${id}
+    `;
+  }
+
+  async updatePromptVersionEffectiveness(id: number, delta: number): Promise<void> {
+    const sql = this.getSql();
+    await sql`
+      UPDATE prompt_versions
+      SET effectiveness = LEAST(1.0, GREATEST(-1.0, effectiveness + ${delta})),
+          tasks_evaluated = tasks_evaluated + 1,
+          updated_at = NOW()
+      WHERE id = ${id}
+    `;
+  }
+
+  async activatePromptVersion(id: number): Promise<void> {
+    const sql = this.getSql();
+    await sql`
+      UPDATE prompt_versions
+      SET status = 'active', activated_at = NOW(), updated_at = NOW()
+      WHERE id = ${id}
+    `;
+  }
+
+  async supersedeActivePromptVersion(projectPath: string, promptName: PromptName): Promise<void> {
+    const sql = this.getSql();
+    await sql`
+      UPDATE prompt_versions
+      SET status = 'superseded', updated_at = NOW()
+      WHERE project_path = ${projectPath} AND prompt_name = ${promptName} AND status = 'active'
+    `;
+  }
+
+  async getPromptVersionHistory(projectPath: string, promptName: PromptName, limit = 20): Promise<PromptVersion[]> {
+    const sql = this.getSql();
+    return sql<PromptVersion[]>`
+      SELECT * FROM prompt_versions
+      WHERE project_path = ${projectPath} AND prompt_name = ${promptName}
+      ORDER BY version DESC
+      LIMIT ${limit}
+    `;
+  }
+
+  async getPromptVersion(id: number): Promise<PromptVersion | null> {
+    const sql = this.getSql();
+    const [row] = await sql<PromptVersion[]>`
+      SELECT * FROM prompt_versions WHERE id = ${id}
+    `;
+    return row ?? null;
+  }
+
+  async getRecentReviewEvents(projectPath: string, limit = 20): Promise<ReviewEvent[]> {
+    const sql = this.getSql();
+    return sql<ReviewEvent[]>`
+      SELECT re.* FROM review_events re
+      JOIN tasks t ON t.id = re.task_id
+      WHERE t.project_path = ${projectPath}
+      ORDER BY re.created_at DESC
+      LIMIT ${limit}
     `;
   }
 

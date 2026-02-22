@@ -6,6 +6,7 @@ import type { TaskStore } from '../memory/TaskStore.js';
 import type { ProjectAnalysis, TaskPlan, ReflectionResult } from './types.js';
 import type { QuestionHandler } from '../bridges/MessageHandler.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
+import type { PromptRegistry } from '../prompts/PromptRegistry.js';
 import { BRAIN_SYSTEM_PROMPT, scanPrompt, planPrompt, reflectPrompt, brainMcpGuidance } from '../prompts/brain.js';
 import { buildAgentGuidance } from '../prompts/agents.js';
 import { getHeadCommit, getRecentLog, getChangedFilesSince } from '../utils/git.js';
@@ -13,6 +14,7 @@ import { log } from '../utils/logger.js';
 
 export class Brain implements QuestionHandler {
   private evolutionEngine?: EvolutionEngine;
+  private promptRegistry?: PromptRegistry;
 
   constructor(
     private claude: ClaudeBridge,
@@ -24,6 +26,10 @@ export class Brain implements QuestionHandler {
 
   setEvolutionEngine(engine: EvolutionEngine): void {
     this.evolutionEngine = engine;
+  }
+
+  setPromptRegistry(registry: PromptRegistry): void {
+    this.promptRegistry = registry;
   }
 
   async scanProject(
@@ -60,9 +66,12 @@ export class Brain implements QuestionHandler {
       : undefined;
     const pluginIds = this.claude.getLoadedPluginIds();
     const agentGuide = buildAgentGuidance('scan', pluginIds);
-    const prompt = scanPrompt(projectPath, depth, recentChanges, allMemories, mcpGuidance, goalsSection, dynamicContext, agentGuide);
+    const basePrompt = scanPrompt(projectPath, depth, recentChanges, allMemories, mcpGuidance, goalsSection, dynamicContext, agentGuide);
+    const prompt = this.promptRegistry ? await this.promptRegistry.resolve('scan', basePrompt) : basePrompt;
+    const baseSystem = BRAIN_SYSTEM_PROMPT;
+    const systemPrompt = this.promptRegistry ? await this.promptRegistry.resolve('brain_system', baseSystem) : baseSystem;
     const result = await this.claude.plan(prompt, projectPath, {
-      systemPrompt: BRAIN_SYSTEM_PROMPT,
+      systemPrompt,
       maxTurns: depth === 'deep' ? 30 : depth === 'normal' ? 20 : 10,
     });
 
@@ -110,9 +119,11 @@ export class Brain implements QuestionHandler {
       ? await this.evolutionEngine.synthesizePromptContext(projectPath)
       : undefined;
     const agentGuide = buildAgentGuidance('plan', this.claude.getLoadedPluginIds());
-    const prompt = planPrompt(JSON.stringify(analysis, null, 2), memories, allTasks, goalsSection, dynamicContext, agentGuide);
+    const basePrompt = planPrompt(JSON.stringify(analysis, null, 2), memories, allTasks, goalsSection, dynamicContext, agentGuide);
+    const prompt = this.promptRegistry ? await this.promptRegistry.resolve('plan', basePrompt) : basePrompt;
+    const systemPrompt = this.promptRegistry ? await this.promptRegistry.resolve('brain_system', BRAIN_SYSTEM_PROMPT) : BRAIN_SYSTEM_PROMPT;
     const result = await this.claude.plan(prompt, projectPath, {
-      systemPrompt: BRAIN_SYSTEM_PROMPT,
+      systemPrompt,
     });
 
     const plan = parsePlan(result.output);
@@ -130,9 +141,11 @@ export class Brain implements QuestionHandler {
   ): Promise<{ reflection: ReflectionResult; cost: number }> {
     log.info(`Reflecting on task (outcome=${outcome})...`);
 
-    const prompt = reflectPrompt(taskDescription, result, reviewSummary, outcome);
+    const basePrompt = reflectPrompt(taskDescription, result, reviewSummary, outcome);
+    const prompt = this.promptRegistry ? await this.promptRegistry.resolve('reflect', basePrompt) : basePrompt;
+    const systemPrompt = this.promptRegistry ? await this.promptRegistry.resolve('brain_system', BRAIN_SYSTEM_PROMPT) : BRAIN_SYSTEM_PROMPT;
     const r = await this.claude.plan(prompt, projectPath, {
-      systemPrompt: BRAIN_SYSTEM_PROMPT,
+      systemPrompt,
       maxTurns: 5,
     });
 

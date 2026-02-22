@@ -2,8 +2,9 @@ import type { TaskStore } from '../memory/TaskStore.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { Config } from '../config/Config.js';
 import type { TrendAnalyzer } from './TrendAnalyzer.js';
-import type { AdjustmentCategory, DynamicPromptContext } from './types.js';
+import type { AdjustmentCategory, DynamicPromptContext, PromptName, PromptPatch } from './types.js';
 import type { ProjectAnalysis } from '../memory/types.js';
+import type { ClaudeBridge } from '../bridges/ClaudeBridge.js';
 import { log } from '../utils/logger.js';
 
 // Keywords for categorizing adjustments
@@ -229,6 +230,198 @@ export class EvolutionEngine {
       proposals: { pending: proposals.length, items: proposals },
       trends: { health: healthTrend, areas: areaTrends },
     };
+  }
+
+  /**
+   * Meta-reflect: analyze recent results and propose prompt patches.
+   * Called every N completed tasks.
+   */
+  async metaReflect(projectPath: string, claude: ClaudeBridge): Promise<void> {
+    log.info('Starting meta-reflect: analyzing prompt effectiveness...');
+
+    // 1. Collect data
+    const [reviewEvents, recentTasks, healthTrend, activeVersions] = await Promise.all([
+      this.taskStore.getRecentReviewEvents(projectPath, 20),
+      this.taskStore.listTasks(projectPath, 'done'),
+      this.trendAnalyzer.getHealthTrend(projectPath),
+      this.taskStore.getActivePromptVersions(projectPath),
+    ]);
+
+    // 2. Compute per-stage metrics
+    const totalReviews = reviewEvents.length;
+    const passedReviews = reviewEvents.filter(e => e.passed).length;
+    const passRate = totalReviews > 0 ? passedReviews / totalReviews : 1;
+    const avgCost = recentTasks.length > 0
+      ? recentTasks.slice(-20).reduce((sum, t) => sum + Number(t.total_cost_usd || 0), 0) / Math.min(recentTasks.length, 20)
+      : 0;
+    const issueCategories = await this.taskStore.getRecurringIssueCategories(projectPath, 10);
+
+    // 3. Build meta-reflection prompt
+    const activeVersionsSummary = activeVersions.length > 0
+      ? activeVersions.map(v => `- ${v.prompt_name} v${v.version}: effectiveness=${v.effectiveness.toFixed(2)}, tasks=${v.tasks_evaluated}`).join('\n')
+      : 'No active prompt patches.';
+
+    const metaPrompt = `You are analyzing the effectiveness of an AI coding agent's prompt templates.
+
+## Current Performance Metrics
+- Review pass rate: ${(passRate * 100).toFixed(1)}%
+- Average task cost: $${avgCost.toFixed(4)}
+- Health trend: ${healthTrend?.direction ?? 'unknown'} (${healthTrend?.current ?? 'N/A'}/100)
+- Recurring issue categories: ${issueCategories.map(c => `${c.category}(${c.count})`).join(', ') || 'none'}
+- Total completed tasks: ${recentTasks.length}
+
+## Active Prompt Patches
+${activeVersionsSummary}
+
+## Recent Review Failures
+${reviewEvents.filter(e => !e.passed).slice(0, 5).map(e => `- Task ${e.task_id.slice(0, 8)}: must_fix=${e.must_fix_count}, should_fix=${e.should_fix_count}, categories=${JSON.stringify(e.issue_categories)}`).join('\n') || 'None'}
+
+## Available Prompt Names
+brain_system, scan, plan, reflect, executor, reviewer
+
+## Instructions
+Analyze the data and propose 0-3 prompt patches to improve performance.
+Each patch modifies a section of a prompt template using these operations:
+- prepend: Add content before the prompt
+- append: Add content after the prompt
+- replace_section: Replace content under a ## heading
+- remove_section: Remove a ## heading and its content
+
+Only propose patches when there's clear evidence of a problem.
+Focus on the most impactful changes.
+
+Output as JSON:
+{
+  "patches": [{
+    "promptName": "scan"|"plan"|"reflect"|"executor"|"reviewer"|"brain_system",
+    "patches": [{ "op": "prepend"|"append"|"replace_section"|"remove_section", "section": string|null, "content": string, "reason": string }],
+    "rationale": string,
+    "confidence": number (0-1)
+  }],
+  "analysis": string
+}`;
+
+    try {
+      const result = await claude.plan(metaPrompt, projectPath, { maxTurns: 5 });
+      const parsed = this.parseMetaReflectOutput(result.output);
+      if (!parsed) {
+        log.info('Meta-reflect: no actionable patches proposed');
+        return;
+      }
+
+      // 4. Store as candidate prompt versions
+      const maxActive = this.config.values.evolution?.maxActivePromptPatches ?? 3;
+      for (const proposal of parsed.patches.slice(0, 3)) {
+        const activeCount = (await this.taskStore.getActivePromptVersions(projectPath))
+          .filter(v => v.prompt_name === proposal.promptName).length;
+        if (activeCount >= maxActive) {
+          log.info(`Skipping ${proposal.promptName} patch: max active patches reached (${maxActive})`);
+          continue;
+        }
+
+        const version = await this.taskStore.getNextPromptVersion(projectPath, proposal.promptName as PromptName);
+        await this.taskStore.savePromptVersion({
+          project_path: projectPath,
+          prompt_name: proposal.promptName as PromptName,
+          version,
+          patches: proposal.patches,
+          rationale: proposal.rationale,
+          confidence: proposal.confidence,
+          baseline_metrics: { passRate, avgCostUsd: avgCost, issueCount: issueCategories.reduce((s, c) => s + c.count, 0), tasksEvaluated: totalReviews },
+        });
+        log.info(`Meta-reflect: stored candidate patch for "${proposal.promptName}" v${version} (confidence=${proposal.confidence})`);
+      }
+
+      // 5. Promote and rollback
+      await this.promoteReadyCandidates(projectPath);
+      await this.rollbackDegradedVersions(projectPath);
+    } catch (err) {
+      log.warn(`Meta-reflect failed: ${err}`);
+    }
+  }
+
+  /**
+   * Promote candidate prompt versions with confidence ≥ 0.7 to active.
+   */
+  async promoteReadyCandidates(projectPath: string): Promise<number> {
+    const autoApply = this.config.values.evolution?.promptPatchAutoApply ?? true;
+    if (!autoApply) return 0;
+
+    const maxActive = this.config.values.evolution?.maxActivePromptPatches ?? 3;
+    const candidates = await this.taskStore.getCandidatePromptVersions(projectPath);
+    let promoted = 0;
+
+    for (const c of candidates) {
+      if (c.confidence < 0.7) continue;
+
+      const activeVersions = await this.taskStore.getActivePromptVersions(projectPath);
+      const activeForPrompt = activeVersions.filter(v => v.prompt_name === c.prompt_name);
+      if (activeForPrompt.length >= maxActive) continue;
+
+      // Supersede existing active version for this prompt
+      await this.taskStore.supersedeActivePromptVersion(projectPath, c.prompt_name);
+      await this.taskStore.activatePromptVersion(c.id);
+      promoted++;
+      log.info(`Promoted prompt patch: "${c.prompt_name}" v${c.version} (confidence=${c.confidence})`);
+    }
+
+    return promoted;
+  }
+
+  /**
+   * Roll back active prompt versions that show degraded effectiveness.
+   */
+  async rollbackDegradedVersions(projectPath: string): Promise<number> {
+    const activeVersions = await this.taskStore.getActivePromptVersions(projectPath);
+    let rolledBack = 0;
+
+    for (const v of activeVersions) {
+      if (v.tasks_evaluated < 3) continue;
+
+      // Effectiveness-based rollback
+      if (v.effectiveness < -0.3) {
+        await this.taskStore.updatePromptVersionStatus(v.id, 'rolled_back');
+        rolledBack++;
+        log.info(`Rolled back prompt patch: "${v.prompt_name}" v${v.version} (effectiveness=${v.effectiveness.toFixed(2)})`);
+        continue;
+      }
+
+      // Metrics-based rollback: pass rate dropped > 15% compared to baseline
+      if (v.tasks_evaluated >= 5 && v.baseline_metrics && v.current_metrics) {
+        const baselinePassRate = v.baseline_metrics.passRate;
+        const currentPassRate = v.current_metrics.passRate;
+        if (baselinePassRate - currentPassRate > 0.15) {
+          await this.taskStore.updatePromptVersionStatus(v.id, 'rolled_back');
+          rolledBack++;
+          log.info(`Rolled back prompt patch: "${v.prompt_name}" v${v.version} (pass rate drop: ${(baselinePassRate * 100).toFixed(0)}% → ${(currentPassRate * 100).toFixed(0)}%)`);
+        }
+      }
+    }
+
+    return rolledBack;
+  }
+
+  private parseMetaReflectOutput(output: string): { patches: Array<{ promptName: string; patches: PromptPatch[]; rationale: string; confidence: number }>; analysis: string } | null {
+    try {
+      // Find JSON in output
+      const jsonMatch = output.match(/\{[\s\S]*"patches"[\s\S]*\}/);
+      if (!jsonMatch) return null;
+
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (!Array.isArray(parsed.patches) || parsed.patches.length === 0) return null;
+
+      // Validate each patch proposal
+      const validPatches = parsed.patches.filter((p: any) =>
+        typeof p.promptName === 'string' &&
+        Array.isArray(p.patches) &&
+        p.patches.length > 0 &&
+        typeof p.confidence === 'number'
+      );
+
+      return validPatches.length > 0 ? { patches: validPatches, analysis: parsed.analysis ?? '' } : null;
+    } catch {
+      return null;
+    }
   }
 
   private categorize(text: string): AdjustmentCategory {

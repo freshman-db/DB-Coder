@@ -16,6 +16,7 @@ import { Server } from './server/Server.js';
 import { McpDiscovery } from './mcp/McpDiscovery.js';
 import { TrendAnalyzer } from './evolution/TrendAnalyzer.js';
 import { EvolutionEngine } from './evolution/EvolutionEngine.js';
+import { PromptRegistry } from './prompts/PromptRegistry.js';
 import { PluginMonitor } from './plugins/PluginMonitor.js';
 import { log, type LogEntry } from './utils/logger.js';
 import { validateConfigForStartup } from './startup/configValidation.js';
@@ -61,6 +62,11 @@ program
     const taskQueue = new TaskQueue(taskStore);
     const costTracker = new CostTracker(taskStore, budget);
 
+    // Prompt registry (meta-prompt reflection system)
+    const promptRegistry = new PromptRegistry(taskStore, projectPath);
+    await promptRegistry.refresh();
+    brain.setPromptRegistry(promptRegistry);
+
     // Evolution system
     const trendAnalyzer = new TrendAnalyzer(taskStore);
     const evolutionEngine = new EvolutionEngine(taskStore, globalMemory, config, trendAnalyzer);
@@ -72,6 +78,7 @@ program
     const mainLoop = new MainLoop(config, brain, taskQueue, claudeBridge, codexBridge, taskStore, globalMemory, costTracker);
     mainLoop.setEvolutionEngine(evolutionEngine);
     mainLoop.setPluginMonitor(pluginMonitor);
+    mainLoop.setPromptRegistry(promptRegistry);
     const server = new Server(config, mainLoop, taskStore, globalMemory, costTracker, evolutionEngine, pluginMonitor);
 
     // Global error handlers

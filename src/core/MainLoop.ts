@@ -8,6 +8,7 @@ import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { CostTracker } from '../utils/cost.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PluginMonitor } from '../plugins/PluginMonitor.js';
+import type { PromptRegistry } from '../prompts/PromptRegistry.js';
 import type { Task, SubTaskRecord, ReviewEvent } from '../memory/types.js';
 import type { MergedReviewResult, LoopState, PlanTask } from './types.js';
 import type { AgentResult, ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
@@ -31,7 +32,9 @@ export class MainLoop {
 
   private evolutionEngine?: EvolutionEngine;
   private pluginMonitor?: PluginMonitor;
+  private promptRegistry?: PromptRegistry;
   private lastPluginCheck = 0;
+  private tasksCompletedSinceMetaReflect = 0;
 
   constructor(
     private config: Config,
@@ -58,6 +61,10 @@ export class MainLoop {
 
   setPluginMonitor(monitor: PluginMonitor): void {
     this.pluginMonitor = monitor;
+  }
+
+  setPromptRegistry(registry: PromptRegistry): void {
+    this.promptRegistry = registry;
   }
 
   async start(): Promise<void> {
@@ -372,6 +379,21 @@ export class MainLoop {
           log.warn(`Auto-merge failed for ${branchName}: ${mergeErr}`);
         }
       }
+
+      // PROMPT EVOLUTION: update effectiveness of active prompt versions
+      await this.updatePromptVersionEffectiveness(reviewResult.passed);
+
+      // PROMPT EVOLUTION: trigger meta-reflect after N completed tasks
+      this.tasksCompletedSinceMetaReflect++;
+      const metaReflectInterval = this.config.values.evolution?.metaReflectInterval ?? 5;
+      if (this.evolutionEngine && this.tasksCompletedSinceMetaReflect >= metaReflectInterval) {
+        this.tasksCompletedSinceMetaReflect = 0;
+        try {
+          await this.evolutionEngine.metaReflect(projectPath, this.claude);
+        } catch (err) {
+          log.warn(`Meta-reflect failed: ${err}`);
+        }
+      }
     } catch (err) {
       log.error('Task execution error', err);
       await this.taskStore.updateTask(task.id, { status: 'failed', phase: 'failed' });
@@ -402,7 +424,8 @@ export class MainLoop {
   ): Promise<AgentResult> {
     const agent = subtask.executor === 'claude' ? this.claude : this.codex;
     const mcpNames = subtask.executor === 'claude' ? this.claude.getMcpServerNames('execute') : [];
-    const prompt = executorPrompt(task.task_description, subtask.description, standards, '', mcpNames);
+    const basePrompt = executorPrompt(task.task_description, subtask.description, standards, '', mcpNames);
+    const prompt = this.promptRegistry ? await this.promptRegistry.resolve('executor', basePrompt) : basePrompt;
     const result = await agent.execute(prompt, projectPath, {
       timeout: this.config.values.autonomy.subtaskTimeout * 1000,
     });
@@ -467,7 +490,8 @@ export class MainLoop {
     const filesStr = changedFiles.join('\n');
     const reviewMcpNames = this.claude.getMcpServerNames('review');
     const agentGuide = buildAgentGuidance('review', this.claude.getLoadedPluginIds());
-    const reviewPromptText = reviewerPrompt(task.task_description, filesStr, reviewMcpNames, agentGuide);
+    const baseReviewPrompt = reviewerPrompt(task.task_description, filesStr, reviewMcpNames, agentGuide);
+    const reviewPromptText = this.promptRegistry ? await this.promptRegistry.resolve('reviewer', baseReviewPrompt) : baseReviewPrompt;
 
     // Run both reviews in parallel
     const reviewStart = Date.now();
@@ -654,6 +678,21 @@ Fix these issues while maintaining code quality. Do not introduce new issues.`;
       });
     } catch (err) {
       log.warn(`Failed to save review event: ${err}`);
+    }
+  }
+
+  /** Update effectiveness of all active prompt versions based on task outcome */
+  private async updatePromptVersionEffectiveness(passed: boolean): Promise<void> {
+    if (!this.promptRegistry) return;
+    const projectPath = this.config.projectPath;
+    try {
+      const versions = await this.taskStore.getActivePromptVersions(projectPath);
+      const delta = passed ? 0.1 : -0.15;
+      for (const v of versions) {
+        await this.taskStore.updatePromptVersionEffectiveness(v.id, delta);
+      }
+    } catch (err) {
+      log.warn(`Failed to update prompt version effectiveness: ${err}`);
     }
   }
 

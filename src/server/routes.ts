@@ -250,6 +250,38 @@ route('POST', '/api/evolution/proposals/:id/reject', async (_req, res, ctx, para
   json(res, { ok: true, status: 'rejected' });
 });
 
+// --- Prompt Versions ---
+route('GET', '/api/evolution/prompt-versions', async (_req, res, ctx) => {
+  const [active, candidates] = await Promise.all([
+    ctx.taskStore.getActivePromptVersions(ctx.config.projectPath),
+    ctx.taskStore.getCandidatePromptVersions(ctx.config.projectPath),
+  ]);
+  json(res, { active, candidates });
+});
+
+route('GET', '/api/evolution/prompt-versions/:name', async (_req, res, ctx, params) => {
+  const name = params.name;
+  const history = await ctx.taskStore.getPromptVersionHistory(ctx.config.projectPath, name as any);
+  json(res, history);
+});
+
+route('POST', '/api/evolution/prompt-versions/:id/activate', async (_req, res, ctx, params) => {
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) { json(res, { error: 'Invalid version ID' }, 400); return; }
+  const version = await ctx.taskStore.getPromptVersion(id);
+  if (!version) { json(res, { error: 'Version not found' }, 404); return; }
+  await ctx.taskStore.supersedeActivePromptVersion(ctx.config.projectPath, version.prompt_name);
+  await ctx.taskStore.activatePromptVersion(id);
+  json(res, { ok: true, status: 'active' });
+});
+
+route('POST', '/api/evolution/prompt-versions/:id/rollback', async (_req, res, ctx, params) => {
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) { json(res, { error: 'Invalid version ID' }, 400); return; }
+  await ctx.taskStore.updatePromptVersionStatus(id, 'rolled_back');
+  json(res, { ok: true, status: 'rolled_back' });
+});
+
 // --- Plugins ---
 route('GET', '/api/plugins', async (_req, res, ctx) => {
   if (!ctx.pluginMonitor) { json(res, { error: 'Plugin monitor not available' }, 503); return; }

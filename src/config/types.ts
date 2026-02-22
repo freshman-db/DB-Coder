@@ -81,6 +81,9 @@ export interface EvolutionConfig {
   autoConfigUpdate?: boolean; // default false — auto-apply safe config proposals
   maxAdjustmentsPerPrompt?: number; // default 5
   trendWindowSize?: number; // default 10 — number of recent scans for trend analysis
+  metaReflectInterval?: number;      // default 5, trigger meta-reflect every N completed tasks
+  promptPatchAutoApply?: boolean;    // default true, auto-promote high-confidence candidates
+  maxActivePromptPatches?: number;   // default 3, max concurrent active patches
 }
 
 export type PluginRelevance = 'essential' | 'recommended' | 'optional' | 'irrelevant';
