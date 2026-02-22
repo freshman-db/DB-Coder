@@ -95,6 +95,11 @@ interface SseStream {
   cleanup(): void;
 }
 
+interface SseStreamOptions {
+  onCleanup?: () => void;
+  connectionTimeoutMs?: number;
+}
+
 const SSE_HEADERS: Record<string, string> = {
   'Content-Type': 'text/event-stream',
   'Cache-Control': 'no-cache',
@@ -102,8 +107,55 @@ const SSE_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
 };
 const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
+const SSE_CONNECTION_TIMEOUT_MS = 30 * 60 * 1_000;
+const SSE_MAX_CONNECTIONS_PER_ENDPOINT = 50;
+const SSE_WARN_CONNECTION_THRESHOLD = Math.floor(SSE_MAX_CONNECTIONS_PER_ENDPOINT * 0.8);
+const sseConnectionsByEndpoint = new Map<string, Set<symbol>>();
 
-export function createSseStream(req: IncomingMessage, res: ServerResponse): SseStream {
+function reserveSseConnection(endpoint: string, res: ServerResponse): (() => void) | null {
+  const normalizedEndpoint = endpoint.trim();
+  const endpointKey = normalizedEndpoint.length > 0 ? normalizedEndpoint : 'unknown-sse-endpoint';
+  const connections = sseConnectionsByEndpoint.get(endpointKey) ?? new Set<symbol>();
+  if (!sseConnectionsByEndpoint.has(endpointKey)) {
+    sseConnectionsByEndpoint.set(endpointKey, connections);
+  }
+
+  if (connections.size >= SSE_MAX_CONNECTIONS_PER_ENDPOINT) {
+    log.warn('Rejecting SSE connection because endpoint limit was reached.', {
+      endpoint: endpointKey,
+      activeConnections: connections.size,
+      connectionLimit: SSE_MAX_CONNECTIONS_PER_ENDPOINT,
+    });
+    json(res, { error: 'SSE connection limit exceeded. Please retry later.' }, 503);
+    return null;
+  }
+
+  const connectionId = Symbol(endpointKey);
+  const previousConnections = connections.size;
+  connections.add(connectionId);
+  const activeConnections = connections.size;
+  if (previousConnections <= SSE_WARN_CONNECTION_THRESHOLD && activeConnections > SSE_WARN_CONNECTION_THRESHOLD) {
+    log.warn('SSE connection count is nearing endpoint limit.', {
+      endpoint: endpointKey,
+      activeConnections,
+      connectionLimit: SSE_MAX_CONNECTIONS_PER_ENDPOINT,
+    });
+  }
+
+  let released = false;
+  return () => {
+    if (released) {
+      return;
+    }
+    released = true;
+    connections.delete(connectionId);
+    if (connections.size === 0) {
+      sseConnectionsByEndpoint.delete(endpointKey);
+    }
+  };
+}
+
+export function createSseStream(req: IncomingMessage, res: ServerResponse, options: SseStreamOptions = {}): SseStream {
   if (!req) {
     throw new TypeError('createSseStream requires an IncomingMessage instance.');
   }
@@ -111,9 +163,16 @@ export function createSseStream(req: IncomingMessage, res: ServerResponse): SseS
     throw new TypeError('createSseStream requires a ServerResponse instance.');
   }
 
+  const configuredTimeout = options.connectionTimeoutMs;
+  const connectionTimeoutMs = typeof configuredTimeout === 'number' && Number.isFinite(configuredTimeout) && configuredTimeout > 0
+    ? configuredTimeout
+    : SSE_CONNECTION_TIMEOUT_MS;
+  const onCleanup = options.onCleanup;
+
   res.writeHead(200, SSE_HEADERS);
 
   let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   let cleanedUp = false;
   const cleanup = (): void => {
     if (cleanedUp) {
@@ -124,7 +183,18 @@ export function createSseStream(req: IncomingMessage, res: ServerResponse): SseS
       clearInterval(heartbeat);
       heartbeat = undefined;
     }
+    if (timeoutHandle !== undefined) {
+      clearTimeout(timeoutHandle);
+      timeoutHandle = undefined;
+    }
     req.off('close', cleanup);
+    if (typeof onCleanup === 'function') {
+      try {
+        onCleanup();
+      } catch (error) {
+        log.error('SSE cleanup callback failed.', error);
+      }
+    }
   };
 
   const write = (event: string, data: unknown): boolean => {
@@ -147,6 +217,16 @@ export function createSseStream(req: IncomingMessage, res: ServerResponse): SseS
       cleanup();
     }
   }, SSE_HEARTBEAT_INTERVAL_MS);
+
+  timeoutHandle = setTimeout(() => {
+    log.warn('SSE connection timed out and was closed automatically.', {
+      timeoutMs: connectionTimeoutMs,
+    });
+    cleanup();
+    if (!res.writableEnded && !res.destroyed) {
+      res.end();
+    }
+  }, connectionTimeoutMs);
 
   req.on('close', cleanup);
 
@@ -199,15 +279,19 @@ route('GET', '/api/status', async (_req, res, ctx) => {
 });
 
 route('GET', '/api/status/stream', async (req, res, ctx) => {
-  const stream = createSseStream(req, res);
+  const releaseConnection = reserveSseConnection('/api/status/stream', res);
+  if (!releaseConnection) {
+    return;
+  }
+
   let removeListener = () => {};
-  const cleanup = (): void => {
-    req.off('close', cleanup);
-    stream.cleanup();
-    removeListener();
-    removeListener = () => {};
-  };
-  req.on('close', cleanup);
+  const stream = createSseStream(req, res, {
+    onCleanup: () => {
+      releaseConnection();
+      removeListener();
+      removeListener = () => {};
+    },
+  });
 
   const pushStatus = async (snapshot: StatusSseSnapshot): Promise<boolean> => {
     const payload: StatusSsePayload = {
@@ -215,7 +299,6 @@ route('GET', '/api/status/stream', async (req, res, ctx) => {
       currentTaskTitle: await resolveCurrentTaskTitle(ctx.taskStore, snapshot.currentTaskId),
     };
     if (!stream.write('status', payload)) {
-      cleanup();
       return false;
     }
     return true;
@@ -307,19 +390,23 @@ route('GET', '/api/logs', async (req, res, ctx) => {
   const follow = followParam === null || followParam === 'true';
 
   if (follow) {
-    const stream = createSseStream(req, res);
+    const releaseConnection = reserveSseConnection('/api/logs', res);
+    if (!releaseConnection) {
+      return;
+    }
+
     let removeListener = () => {};
-    const cleanup = (): void => {
-      req.off('close', cleanup);
-      stream.cleanup();
-      removeListener();
-      removeListener = () => {};
-    };
-    req.on('close', cleanup);
+    const stream = createSseStream(req, res, {
+      onCleanup: () => {
+        releaseConnection();
+        removeListener();
+        removeListener = () => {};
+      },
+    });
 
     removeListener = log.addListener((entry: LogEntry) => {
       if (!stream.write('message', entry)) {
-        cleanup();
+        return;
       }
     });
   } else {
@@ -551,19 +638,23 @@ route('GET', '/api/plans/:id/stream', async (req, res, ctx, params) => {
   const id = parseInt(params.id, 10);
   if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
 
-  const stream = createSseStream(req, res);
+  const releaseConnection = reserveSseConnection('/api/plans/:id/stream', res);
+  if (!releaseConnection) {
+    return;
+  }
+
   let remove = () => {};
-  const cleanup = (): void => {
-    req.off('close', cleanup);
-    stream.cleanup();
-    remove();
-    remove = () => {};
-  };
-  req.on('close', cleanup);
+  const stream = createSseStream(req, res, {
+    onCleanup: () => {
+      releaseConnection();
+      remove();
+      remove = () => {};
+    },
+  });
 
   remove = ctx.planWorkflow.addSSEListener(id, (event, data) => {
     if (!stream.write(event, data)) {
-      cleanup();
+      return;
     }
   });
 });

@@ -10,6 +10,7 @@ import type { PlanWorkflow } from '../core/PlanWorkflow.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { CostTracker } from '../utils/cost.js';
+import { log } from '../utils/logger.js';
 import { createSseStream } from './routes.js';
 import { Server } from './Server.js';
 
@@ -500,6 +501,76 @@ test('createSseStream writes heartbeat comments on interval ticks', () => {
   }
 });
 
+test('createSseStream automatically closes stale connections after timeout', () => {
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token: 'token',
+  });
+  const { response } = createMockResponse();
+
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const heartbeatTimer = { id: 'heartbeat-timer' } as unknown as ReturnType<typeof setInterval>;
+  const timeoutTimer = { id: 'timeout-timer' } as unknown as ReturnType<typeof setTimeout>;
+  let timeoutTick: (() => void) | undefined;
+  let timeoutDelayMs: number | undefined;
+  let clearIntervalCalls = 0;
+  let clearTimeoutCalls = 0;
+  let endCalls = 0;
+
+  globalThis.setInterval = ((callback: (...args: unknown[]) => void): ReturnType<typeof setInterval> => {
+    void callback;
+    return heartbeatTimer;
+  }) as typeof setInterval;
+  globalThis.clearInterval = ((timer: ReturnType<typeof setInterval> | undefined): void => {
+    if (timer === heartbeatTimer) {
+      clearIntervalCalls += 1;
+    }
+  }) as typeof clearInterval;
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void, delay?: number): ReturnType<typeof setTimeout> => {
+    timeoutDelayMs = delay;
+    timeoutTick = () => callback();
+    return timeoutTimer;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: ReturnType<typeof setTimeout> | undefined): void => {
+    if (timer === timeoutTimer) {
+      clearTimeoutCalls += 1;
+    }
+  }) as typeof clearTimeout;
+
+  const responseWithTracking = response as unknown as {
+    end: (chunk?: string | Buffer) => void;
+  };
+  const originalEnd = responseWithTracking.end;
+  responseWithTracking.end = (chunk?: string | Buffer): void => {
+    endCalls += 1;
+    originalEnd(chunk);
+  };
+
+  try {
+    const stream = createSseStream(req, response);
+    assert.equal(timeoutDelayMs, 30 * 60 * 1_000);
+    assert.equal(typeof timeoutTick, 'function');
+    assert.equal(req.listenerCount('close'), 1);
+
+    timeoutTick?.();
+
+    assert.equal(endCalls, 1);
+    assert.equal(clearIntervalCalls, 1);
+    assert.equal(clearTimeoutCalls, 1);
+    assert.equal(req.listenerCount('close'), 0);
+    assert.equal(stream.write('status', { ok: true }), false);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});
+
 test('createSseStream cleanup prevents double-close and write after cleanup returns false', () => {
   const req = createMockRequest({
     method: 'GET',
@@ -593,6 +664,124 @@ test('GET /api/logs returns SSE headers', async () => {
   assert.equal(state.headers.connection, 'keep-alive');
 
   req.emit('close');
+});
+
+test('GET /api/logs enforces max SSE connections and releases slots on close', async () => {
+  const { server, token } = createServerFixture();
+  const listener = getRequestListener(server);
+  const openRequests: IncomingMessage[] = [];
+
+  for (let i = 0; i < 50; i += 1) {
+    const req = createMockRequest({
+      method: 'GET',
+      url: '/api/logs',
+      token,
+    });
+    const { response, state } = createMockResponse();
+    await listener(req, response);
+    assert.equal(state.statusCode, 200);
+    openRequests.push(req);
+  }
+
+  const overflowReq = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token,
+  });
+  const { response: overflowRes, state: overflowState } = createMockResponse();
+  await listener(overflowReq, overflowRes);
+  assert.equal(overflowState.statusCode, 503);
+  assert.deepEqual(parseJson<{ error: string }>(overflowState), {
+    error: 'SSE connection limit exceeded. Please retry later.',
+  });
+
+  const releasedReq = openRequests.shift();
+  releasedReq?.emit('close');
+
+  const replacementReq = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token,
+  });
+  const { response: replacementRes, state: replacementState } = createMockResponse();
+  await listener(replacementReq, replacementRes);
+  assert.equal(replacementState.statusCode, 200);
+
+  for (const req of openRequests) {
+    req.emit('close');
+  }
+  replacementReq.emit('close');
+});
+
+test('SSE connection limits are tracked independently per endpoint', async () => {
+  const { server, token } = createServerFixture();
+  const listener = getRequestListener(server);
+  const logRequests: IncomingMessage[] = [];
+
+  for (let i = 0; i < 50; i += 1) {
+    const req = createMockRequest({
+      method: 'GET',
+      url: '/api/logs',
+      token,
+    });
+    const { response, state } = createMockResponse();
+    await listener(req, response);
+    assert.equal(state.statusCode, 200);
+    logRequests.push(req);
+  }
+
+  const statusReq = createMockRequest({
+    method: 'GET',
+    url: '/api/status/stream',
+    token,
+  });
+  const { response: statusRes, state: statusState } = createMockResponse();
+  await listener(statusReq, statusRes);
+  assert.equal(statusState.statusCode, 200);
+
+  for (const req of logRequests) {
+    req.emit('close');
+  }
+  statusReq.emit('close');
+});
+
+test('GET /api/logs warns when active SSE connections exceed 80% of the limit', async () => {
+  const { server, token } = createServerFixture();
+  const listener = getRequestListener(server);
+  const openRequests: IncomingMessage[] = [];
+  const originalWarn = log.warn;
+  const warningCalls: Array<{ message: string; data: unknown }> = [];
+
+  log.warn = ((message: string, data?: unknown): void => {
+    warningCalls.push({ message, data });
+  }) as typeof log.warn;
+
+  try {
+    for (let i = 0; i < 41; i += 1) {
+      const req = createMockRequest({
+        method: 'GET',
+        url: '/api/logs',
+        token,
+      });
+      const { response, state } = createMockResponse();
+      await listener(req, response);
+      assert.equal(state.statusCode, 200);
+      openRequests.push(req);
+    }
+
+    const warning = warningCalls.find(call => call.message === 'SSE connection count is nearing endpoint limit.');
+    assert.ok(warning);
+    assert.deepEqual(warning.data, {
+      endpoint: '/api/logs',
+      activeConnections: 41,
+      connectionLimit: 50,
+    });
+  } finally {
+    log.warn = originalWarn;
+    for (const req of openRequests) {
+      req.emit('close');
+    }
+  }
 });
 
 test('GET /api/status/stream returns SSE headers and cleans up status listeners', async () => {
