@@ -466,6 +466,22 @@ test('createSseStream writes SSE headers and event payloads', async () => {
   assert.equal(wroteAfterClose, false);
 });
 
+test('createSseStream keeps pre-serialized string payloads intact', () => {
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token: 'token',
+  });
+  const { response, state } = createMockResponse();
+
+  const stream = createSseStream(req, response);
+  const wroteEvent = stream.write('status', '{"ok":true}');
+  assert.equal(wroteEvent, true);
+  assert.equal(state.body, 'event: status\ndata: {"ok":true}\n\n');
+
+  stream.cleanup();
+});
+
 test('createSseStream validates nullish request and response inputs', () => {
   const req = createMockRequest({
     method: 'GET',
@@ -504,14 +520,51 @@ test('GET /api/logs returns SSE headers', async () => {
   req.emit('close');
 });
 
+test('GET /api/status/stream returns SSE headers and cleans up status listeners', async () => {
+  let removeCalls = 0;
+  let statusListenerAttached = false;
+
+  const { server, token } = createServerFixture({
+    loop: {
+      addStatusListener: () => {
+        statusListenerAttached = true;
+        return () => {
+          removeCalls += 1;
+        };
+      },
+    },
+  });
+  const listener = getRequestListener(server);
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/status/stream',
+    token,
+  });
+  const { response, state } = createMockResponse();
+
+  await listener(req, response);
+
+  assert.equal(state.statusCode, 200);
+  assert.equal(state.headers['content-type'], 'text/event-stream');
+  assert.equal(state.headers['cache-control'], 'no-cache');
+  assert.equal(state.headers.connection, 'keep-alive');
+  assert.equal(statusListenerAttached, true);
+  assert.match(state.body, /event: status/);
+
+  req.emit('close');
+  assert.equal(removeCalls, 1);
+});
+
 test('GET /api/plans/:id/stream returns SSE headers', async () => {
   let draftId: number | null = null;
+  let emit: ((event: string, data: string) => void) | undefined;
   let cleanupCalls = 0;
 
   const { server, token } = createServerFixture({
     planWorkflow: {
-      addSSEListener: (id) => {
+      addSSEListener: (id, listener) => {
         draftId = id;
+        emit = listener;
         return () => {
           cleanupCalls += 1;
         };
@@ -533,6 +586,9 @@ test('GET /api/plans/:id/stream returns SSE headers', async () => {
   assert.equal(state.headers['cache-control'], 'no-cache');
   assert.equal(state.headers.connection, 'keep-alive');
   assert.equal(draftId, 42);
+
+  emit?.('status', '{"ready":true}');
+  assert.equal(state.body, 'event: status\ndata: {"ready":true}\n\n');
 
   req.emit('close');
   assert.equal(cleanupCalls, 1);
