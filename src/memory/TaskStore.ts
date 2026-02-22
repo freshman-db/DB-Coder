@@ -1,5 +1,6 @@
 import type postgres from 'postgres';
 import type { Task, TaskLog, TaskStatus, ScanResult, ReviewEvent, RecurringIssueCategory, PlanDraft, PlanReviewStatus, PlanDraftAnnotation, ChatMessage, ChatStatus } from './types.js';
+import type { EvaluationScore } from '../core/types.js';
 import type { Adjustment, AdjustmentCategory, AdjustmentStatus, GoalProgress, ConfigProposal, ProposalStatus, PromptVersion, PromptName, PromptPatch, PromptMetrics, PromptVersionStatus } from '../evolution/types.js';
 import type {
   BaselineMetricsJson,
@@ -161,9 +162,24 @@ CREATE TABLE IF NOT EXISTS plan_chat_messages (
   metadata JSONB DEFAULT '{}',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS evaluation_score JSONB;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS evaluation_reasoning TEXT DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS evaluation_events (
+  id SERIAL PRIMARY KEY,
+  task_id UUID REFERENCES tasks(id) ON DELETE CASCADE,
+  passed BOOLEAN NOT NULL,
+  score JSONB NOT NULL,
+  reasoning TEXT NOT NULL DEFAULT '',
+  cost_usd NUMERIC(10,4) DEFAULT 0,
+  duration_ms INTEGER,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 `;
 
-type TaskUpdateInput = Partial<Pick<Task, 'phase' | 'status' | 'plan' | 'subtasks' | 'review_results' | 'iteration' | 'total_cost_usd' | 'git_branch' | 'start_commit'>>;
+type TaskUpdateInput = Partial<Pick<Task, 'phase' | 'status' | 'plan' | 'subtasks' | 'review_results' | 'iteration' | 'total_cost_usd' | 'git_branch' | 'start_commit'>>
+  & { evaluation_score?: EvaluationScore; evaluation_reasoning?: string };
 const TASK_UPDATE_FIELDS: Array<keyof TaskUpdateInput> = [
   'phase',
   'status',
@@ -174,8 +190,10 @@ const TASK_UPDATE_FIELDS: Array<keyof TaskUpdateInput> = [
   'total_cost_usd',
   'git_branch',
   'start_commit',
+  'evaluation_score',
+  'evaluation_reasoning',
 ];
-const TASK_JSONB_FIELDS = new Set<keyof TaskUpdateInput>(['plan', 'subtasks', 'review_results']);
+const TASK_JSONB_FIELDS = new Set<keyof TaskUpdateInput>(['plan', 'subtasks', 'review_results', 'evaluation_score']);
 
 export class TaskStore {
   private sql: postgres.Sql | null;
@@ -255,13 +273,14 @@ export class TaskStore {
       WHERE project_path = ${projectPath} ${statusFilter}
       ORDER BY
         CASE status
-          WHEN 'active' THEN 0
-          WHEN 'queued' THEN 1
-          WHEN 'blocked' THEN 2
-          WHEN 'done' THEN 3
-          WHEN 'failed' THEN 4
-          WHEN 'skipped' THEN 5
-          ELSE 6
+          WHEN 'pending_review' THEN 0
+          WHEN 'active' THEN 1
+          WHEN 'queued' THEN 2
+          WHEN 'blocked' THEN 3
+          WHEN 'done' THEN 4
+          WHEN 'failed' THEN 5
+          WHEN 'skipped' THEN 6
+          ELSE 7
         END ASC,
         CASE WHEN status IN ('done', 'failed', 'skipped') THEN updated_at END DESC NULLS LAST,
         priority ASC,
@@ -724,6 +743,53 @@ export class TaskStore {
       WHERE t.project_path = ${projectPath}
       ORDER BY re.created_at DESC
       LIMIT ${limit}
+    `;
+  }
+
+  // --- Evaluation Events ---
+
+  async saveEvaluationEvent(event: {
+    task_id: string;
+    passed: boolean;
+    score: EvaluationScore;
+    reasoning: string;
+    cost_usd: number;
+    duration_ms: number;
+  }): Promise<void> {
+    const sql = this.getSql();
+    await sql`
+      INSERT INTO evaluation_events (task_id, passed, score, reasoning, cost_usd, duration_ms)
+      VALUES (${event.task_id}, ${event.passed}, ${sql.json(event.score as unknown as postgres.JSONValue)},
+              ${event.reasoning}, ${event.cost_usd}, ${event.duration_ms})
+    `;
+  }
+
+  async getRecentEvaluationEvents(projectPath: string, limit = 20): Promise<Array<{
+    id: number;
+    task_id: string;
+    passed: boolean;
+    score: EvaluationScore;
+    reasoning: string;
+    cost_usd: number;
+    duration_ms: number;
+    created_at: Date;
+  }>> {
+    const sql = this.getSql();
+    return sql`
+      SELECT ee.* FROM evaluation_events ee
+      JOIN tasks t ON t.id = ee.task_id
+      WHERE t.project_path = ${projectPath}
+      ORDER BY ee.created_at DESC
+      LIMIT ${limit}
+    `;
+  }
+
+  async getPendingReviewTasks(projectPath: string): Promise<Task[]> {
+    const sql = this.getSql();
+    return sql<Task[]>`
+      SELECT * FROM tasks
+      WHERE project_path = ${projectPath} AND status = 'pending_review'
+      ORDER BY priority ASC, created_at ASC
     `;
   }
 

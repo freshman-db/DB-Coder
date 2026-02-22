@@ -115,13 +115,18 @@ export class ClaudeBridge implements CodingAgent {
   async plan(prompt: string, cwd: string, options?: {
     systemPrompt?: string;
     maxTurns?: number;
+    internalMcpServers?: Record<string, McpServerConfig>;
   }): Promise<AgentResult> {
     const start = Date.now();
     let result = '';
     let cost = 0;
 
     try {
-      const mcpServers = this.mcpDiscovery?.getServersForPhase('plan') ?? {};
+      const discoveredMcpServers = this.mcpDiscovery?.getServersForPhase('plan') ?? {};
+      const mcpServers: Record<string, McpServerConfig> = {
+        ...(discoveredMcpServers as Record<string, McpServerConfig>),
+        ...(options?.internalMcpServers ?? {}),
+      };
       const plugins = this.mcpDiscovery?.getPluginsForPhase('plan') ?? [];
       for await (const message of this.queryRunner({
         prompt,

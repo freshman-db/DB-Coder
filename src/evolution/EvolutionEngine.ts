@@ -52,6 +52,13 @@ const GOAL_FALLBACK_KEYWORDS = Array.from(
   new Set(GOAL_KEYWORD_RULES.flatMap(rule => rule.taskKeywords.map(keyword => keyword.toLowerCase()))),
 );
 
+interface EvaluationEventSummary {
+  total: number;
+  passed: number;
+  failed: number;
+  avgTotal: number;
+}
+
 interface MetaReflectData {
   reviewEvents: ReviewEvent[];
   recentTasks: Task[];
@@ -60,6 +67,7 @@ interface MetaReflectData {
   passRate: number;
   avgCost: number;
   issueCategories: RecurringIssueCategory[];
+  evaluationStats: EvaluationEventSummary;
 }
 
 interface ParsedMetaReflectOutput {
@@ -402,12 +410,13 @@ export class EvolutionEngine {
       throw new Error('projectPath is required for meta-reflection');
     }
 
-    const [reviewEventsResult, recentTasksResult, healthTrendResult, activeVersionsResult, issueCategoriesResult] = await Promise.all([
+    const [reviewEventsResult, recentTasksResult, healthTrendResult, activeVersionsResult, issueCategoriesResult, evalEventsResult] = await Promise.all([
       this.taskStore.getRecentReviewEvents(projectPath, 20),
       this.taskStore.listTasks(projectPath, 'done'),
       this.trendAnalyzer.getHealthTrend(projectPath),
       this.taskStore.getActivePromptVersions(projectPath),
       this.taskStore.getRecurringIssueCategories(projectPath, 10),
+      this.taskStore.getRecentEvaluationEvents(projectPath, 20),
     ]);
 
     const reviewEvents = reviewEventsResult ?? [];
@@ -415,6 +424,7 @@ export class EvolutionEngine {
     const healthTrend = healthTrendResult ?? null;
     const activeVersions = activeVersionsResult ?? [];
     const issueCategories = issueCategoriesResult ?? [];
+    const evalEvents = evalEventsResult ?? [];
 
     const totalReviews = reviewEvents.length;
     const passedReviews = reviewEvents.filter(event => event?.passed === true).length;
@@ -427,6 +437,12 @@ export class EvolutionEngine {
         .reduce((sum, task) => sum + Number(task?.total_cost_usd ?? 0), 0) / costWindowSize
       : 0;
 
+    const evalTotal = evalEvents.length;
+    const evalPassed = evalEvents.filter(e => e.passed).length;
+    const evalAvgTotal = evalTotal > 0
+      ? evalEvents.reduce((sum, e) => sum + (e.score?.total ?? 0), 0) / evalTotal
+      : 0;
+
     return {
       reviewEvents,
       recentTasks,
@@ -435,6 +451,7 @@ export class EvolutionEngine {
       passRate,
       avgCost,
       issueCategories,
+      evaluationStats: { total: evalTotal, passed: evalPassed, failed: evalTotal - evalPassed, avgTotal: evalAvgTotal },
     };
   }
 
@@ -488,8 +505,14 @@ ${activeVersionsSummary}
 ## Recent Review Failures
 ${failureSummary}
 
+## Pre-execution Evaluation Stats
+- Total evaluations: ${data.evaluationStats.total}
+- Passed: ${data.evaluationStats.passed}, Rejected: ${data.evaluationStats.failed}
+- Average score: ${data.evaluationStats.avgTotal.toFixed(1)}/8
+${data.evaluationStats.total > 0 ? `- Pass rate: ${((data.evaluationStats.passed / data.evaluationStats.total) * 100).toFixed(1)}%` : '- No evaluations yet'}
+
 ## Available Prompt Names
-brain_system, scan, plan, reflect, executor, reviewer
+brain_system, scan, plan, reflect, executor, reviewer, evaluator
 
 ## Instructions
 Analyze the data and propose 0-3 prompt patches to improve performance.
@@ -505,7 +528,7 @@ Focus on the most impactful changes.
 Output as JSON:
 {
   "patches": [{
-    "promptName": "scan"|"plan"|"reflect"|"executor"|"reviewer"|"brain_system",
+    "promptName": "scan"|"plan"|"reflect"|"executor"|"reviewer"|"brain_system"|"evaluator",
     "patches": [{ "op": "prepend"|"append"|"replace_section"|"remove_section", "section": string|null, "content": string, "reason": string }],
     "rationale": string,
     "confidence": number (0-1)

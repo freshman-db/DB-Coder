@@ -374,6 +374,28 @@ route('DELETE', '/api/tasks/:id', async (_req, res, ctx, params) => {
   json(res, { ok: true });
 });
 
+// --- Task Evaluation (pending review) ---
+route('GET', '/api/tasks/pending-review', async (_req, res, ctx) => {
+  const tasks = await ctx.taskStore.getPendingReviewTasks(ctx.config.projectPath);
+  json(res, tasks);
+});
+
+route('POST', '/api/tasks/:id/approve', async (_req, res, ctx, params) => {
+  const task = await ctx.taskStore.getTask(params.id);
+  if (!task) { json(res, { error: 'not found' }, 404); return; }
+  if (task.status !== 'pending_review') { json(res, { error: 'Task is not pending review' }, 400); return; }
+  await ctx.taskStore.updateTask(params.id, { status: 'queued' });
+  json(res, { ok: true, status: 'queued' });
+});
+
+route('POST', '/api/tasks/:id/skip', async (_req, res, ctx, params) => {
+  const task = await ctx.taskStore.getTask(params.id);
+  if (!task) { json(res, { error: 'not found' }, 404); return; }
+  if (task.status !== 'pending_review') { json(res, { error: 'Task is not pending review' }, 400); return; }
+  await ctx.taskStore.updateTask(params.id, { status: 'skipped' });
+  json(res, { ok: true, status: 'skipped' });
+});
+
 // --- Control ---
 route('POST', '/api/control/pause', async (_req, res, ctx) => {
   ctx.loop.pause();

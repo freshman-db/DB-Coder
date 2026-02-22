@@ -167,6 +167,26 @@ export async function forceDeleteBranch(branch: string, cwd: string): Promise<vo
   log.info(`Force-deleted branch: ${branch}`);
 }
 
+export async function getDiffStats(
+  fromCommit: string,
+  toCommit: string,
+  cwd: string,
+): Promise<{ files_changed: number; insertions: number; deletions: number }> {
+  const r = await git(['diff', '--shortstat', fromCommit, toCommit], cwd);
+  const text = r.stdout.trim();
+  if (!text) return { files_changed: 0, insertions: 0, deletions: 0 };
+
+  const filesMatch = text.match(/(\d+) files? changed/);
+  const insertMatch = text.match(/(\d+) insertions?/);
+  const deleteMatch = text.match(/(\d+) deletions?/);
+
+  return {
+    files_changed: filesMatch ? parseInt(filesMatch[1], 10) : 0,
+    insertions: insertMatch ? parseInt(insertMatch[1], 10) : 0,
+    deletions: deleteMatch ? parseInt(deleteMatch[1], 10) : 0,
+  };
+}
+
 export async function isGitRepo(cwd: string): Promise<boolean> {
   const r = await git(['rev-parse', '--git-dir'], cwd);
   return r.exitCode === 0;

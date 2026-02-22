@@ -13,7 +13,7 @@ export interface Memory {
 }
 
 export type TaskPhase = 'init' | 'scanning' | 'planning' | 'executing' | 'reviewing' | 'reflecting' | 'done' | 'failed' | 'blocked';
-export type TaskStatus = 'queued' | 'active' | 'done' | 'failed' | 'blocked' | 'skipped';
+export type TaskStatus = 'queued' | 'active' | 'done' | 'failed' | 'blocked' | 'skipped' | 'pending_review';
 
 export interface Task {
   id: string;

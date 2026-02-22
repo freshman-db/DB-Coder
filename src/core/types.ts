@@ -48,7 +48,23 @@ export interface ExtractedExperience {
 }
 
 export type LoopState = 'idle' | 'scanning' | 'planning' | 'executing' | 'reviewing' | 'reflecting' | 'paused' | 'error'
-  | 'researching' | 'awaiting_approval' | 'analyzing';
+  | 'researching' | 'awaiting_approval' | 'analyzing' | 'evaluating';
+
+export interface EvaluationScore {
+  problemLegitimacy: number;        // -2 to +2: 问题真实性
+  solutionProportionality: number;  // -2 to +2: 方案比例
+  expectedComplexity: number;       // -2 to +2: 预期复杂度影响
+  historicalSuccess: number;        // -2 to +2: 类似任务历史成功率
+  total: number;                    // -8 to +8
+}
+
+export interface EvaluationResult {
+  passed: boolean;       // total > 0
+  score: EvaluationScore;
+  reasoning: string;
+  cost_usd: number;
+  duration_ms: number;
+}
 
 export interface StatusSnapshot {
   state: LoopState;

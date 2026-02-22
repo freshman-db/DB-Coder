@@ -126,6 +126,10 @@ const statusMap = {
   completed: { icon: '✓', badge: 'done', label: '已完成' },
   failed: { icon: '✗', badge: 'failed', label: '失败' },
   paused: { icon: '❚❚', badge: 'paused', label: '已暂停' },
+  pending_review: { icon: '⚠', badge: 'warning', label: '待审核' },
+  blocked: { icon: '⊘', badge: 'failed', label: '已阻断' },
+  skipped: { icon: '⊘', badge: 'pending', label: '已跳过' },
+  active: { icon: '●', badge: 'running', label: '执行中' },
 };
 
 function getStatus(s) {
@@ -414,12 +418,18 @@ function renderTaskRow(t) {
   const st = getStatus(t.status);
   const pri = getPriorityStr(t.priority);
   const title = getTaskTitle(t);
+  const evalScore = t.evaluation_score ? ` (评分: ${t.evaluation_score.total})` : '';
+  const evalActions = t.status === 'pending_review' ? `
+    <button class="btn btn-sm btn-primary" data-action="approveTask" data-id="${escapeHtml(String(t.id ?? ''))}" onclick="event.stopPropagation()">通过</button>
+    <button class="btn btn-sm btn-secondary" data-action="skipTask" data-id="${escapeHtml(String(t.id ?? ''))}" onclick="event.stopPropagation()">跳过</button>
+  ` : '';
   return `
     <div class="list-item" data-action="navigate" data-id="#/tasks/${escapeHtml(String(t.id ?? ''))}">
       <span class="status-icon" title="${st.label}">${st.icon}</span>
-      <span class="list-item-title">${escapeHtml(title)}</span>
+      <span class="list-item-title">${escapeHtml(title)}${evalScore}</span>
       <span class="badge badge-${pri}">${priorityLabels[pri] || pri}</span>
       <span class="badge badge-${st.badge}">${st.label}</span>
+      ${evalActions}
       <span style="color:var(--text-muted);font-size:12px;min-width:70px;text-align:right;">${timeAgo(t.created_at)}</span>
     </div>
   `;
@@ -550,8 +560,45 @@ async function renderTaskDetail(id) {
       <div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:var(--text-secondary);">${escapeHtml(body || fullDesc || '无描述')}</div>
     </div>
 
+    ${renderEvaluationInfo(task)}
     ${renderSubtasks(task.subtasks)}
     ${renderTaskLogs(task.logs)}
+  `;
+}
+
+function renderEvaluationInfo(task) {
+  if (!task.evaluation_score) return '';
+  const s = task.evaluation_score;
+  const dims = [
+    ['问题真实性', s.problemLegitimacy],
+    ['方案比例', s.solutionProportionality],
+    ['预期复杂度', s.expectedComplexity],
+    ['历史成功率', s.historicalSuccess],
+  ];
+  const actions = task.status === 'pending_review' ? `
+    <div style="margin-top:12px;display:flex;gap:8px;">
+      <button class="btn btn-primary" data-action="approveTask" data-id="${escapeHtml(String(task.id ?? ''))}">通过 (回到队列)</button>
+      <button class="btn btn-secondary" data-action="skipTask" data-id="${escapeHtml(String(task.id ?? ''))}">跳过</button>
+    </div>
+  ` : '';
+  return `
+    <h3 class="section-title">改前评估</h3>
+    <div class="card" style="margin-bottom:20px;">
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:12px;">
+        ${dims.map(([label, val]) => `
+          <div style="display:flex;justify-content:space-between;padding:4px 8px;background:var(--bg-secondary);border-radius:4px;">
+            <span style="color:var(--text-muted);font-size:13px;">${label}</span>
+            <span style="font-weight:600;color:${val > 0 ? 'var(--accent)' : val < 0 ? 'var(--danger,#e53e3e)' : 'var(--text-muted)'};">${val > 0 ? '+' : ''}${val}</span>
+          </div>
+        `).join('')}
+      </div>
+      <div style="display:flex;justify-content:space-between;padding:8px;background:var(--bg-secondary);border-radius:4px;font-weight:700;">
+        <span>总分</span>
+        <span style="color:${s.total > 0 ? 'var(--accent)' : 'var(--danger,#e53e3e)'};">${s.total > 0 ? '+' : ''}${s.total}</span>
+      </div>
+      ${task.evaluation_reasoning ? `<p style="margin-top:12px;font-size:13px;color:var(--text-secondary);">${escapeHtml(task.evaluation_reasoning)}</p>` : ''}
+      ${actions}
+    </div>
   `;
 }
 
@@ -1055,6 +1102,22 @@ async function deleteTask(id) {
   if (res !== null) {
     toast('任务已删除');
     location.hash = '#/tasks';
+  }
+}
+
+async function approveTask(id) {
+  const res = await api(`/tasks/${id}/approve`, { method: 'POST' });
+  if (res !== null) {
+    toast('任务已通过，已回到执行队列');
+    router();
+  }
+}
+
+async function skipTask(id) {
+  const res = await api(`/tasks/${id}/skip`, { method: 'POST' });
+  if (res !== null) {
+    toast('任务已跳过');
+    router();
   }
 }
 
@@ -1588,6 +1651,8 @@ function setupActionDelegation() {
       case 'startPatrol': startPatrol(); break;
       case 'stopPatrol': stopPatrol(); break;
       case 'deleteTask': deleteTask(id); break;
+      case 'approveTask': approveTask(id); break;
+      case 'skipTask': skipTask(id); break;
       case 'pluginAction': pluginAction(id, arg); break;
       case 'startNewChat': startNewChat(); break;
       case 'generatePlanFromChat': generatePlanFromChat(id); break;

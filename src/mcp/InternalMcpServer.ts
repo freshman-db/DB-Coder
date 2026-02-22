@@ -5,7 +5,7 @@ import type { TaskStore } from '../memory/TaskStore.js';
 import type { Memory, Task, TaskStatus } from '../memory/types.js';
 
 const MCP_SERVER_NAME = 'db-coder-internal';
-const TASK_STATUSES = ['queued', 'active', 'done', 'failed', 'blocked', 'skipped'] as const;
+const TASK_STATUSES = ['queued', 'active', 'done', 'failed', 'blocked', 'skipped', 'pending_review'] as const;
 const TASK_STATUS_SCHEMA = z.enum(TASK_STATUSES);
 
 type InternalTaskStore = Pick<TaskStore, 'createTask' | 'listTasks'>;

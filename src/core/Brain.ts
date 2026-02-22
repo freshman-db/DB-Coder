@@ -3,7 +3,7 @@ import type { ClaudeBridge } from '../bridges/ClaudeBridge.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { ProjectMemory } from '../memory/ProjectMemory.js';
 import type { TaskStore } from '../memory/TaskStore.js';
-import type { ProjectAnalysis, TaskPlan, ReflectionResult } from './types.js';
+import type { ProjectAnalysis, TaskPlan, ReflectionResult, EvaluationScore, EvaluationResult } from './types.js';
 import type { QuestionHandler } from '../bridges/MessageHandler.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PromptRegistry } from '../prompts/PromptRegistry.js';
@@ -375,4 +375,36 @@ export function parseReflection(output: string): ReflectionResult {
     };
   }
   return { experiences: [], taskSummary: output.slice(0, 200), adjustments: [] };
+}
+
+function clampScore(value: unknown): number {
+  const n = typeof value === 'number' ? value : 0;
+  return Math.max(-2, Math.min(2, n));
+}
+
+export function parseEvaluation(output: string): Omit<EvaluationResult, 'cost_usd' | 'duration_ms'> {
+  const parsed = extractObjectByKey(output, 'problemLegitimacy');
+  if (parsed) {
+    const score: EvaluationScore = {
+      problemLegitimacy: clampScore(parsed.problemLegitimacy),
+      solutionProportionality: clampScore(parsed.solutionProportionality),
+      expectedComplexity: clampScore(parsed.expectedComplexity),
+      historicalSuccess: clampScore(parsed.historicalSuccess),
+      total: 0,
+    };
+    score.total = score.problemLegitimacy + score.solutionProportionality
+      + score.expectedComplexity + score.historicalSuccess;
+    return {
+      passed: score.total > 0,
+      score,
+      reasoning: typeof parsed.reasoning === 'string' ? parsed.reasoning : '',
+    };
+  }
+  // Fallback: default to not passing (safe-side)
+  log.warn(`parseEvaluation: failed to extract JSON (${output.length} chars). Defaulting to fail.`);
+  return {
+    passed: false,
+    score: { problemLegitimacy: 0, solutionProportionality: 0, expectedComplexity: 0, historicalSuccess: 0, total: 0 },
+    reasoning: 'Failed to parse evaluation output',
+  };
 }

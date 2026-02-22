@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import type { McpConfig } from '../config/types.js';
 import { log } from '../utils/logger.js';
 
-export type Phase = 'scan' | 'plan' | 'execute' | 'review';
+export type Phase = 'scan' | 'plan' | 'execute' | 'review' | 'evaluate';
 
 /** Matches Agent SDK's McpServerConfig union */
 export type McpServerEntry =

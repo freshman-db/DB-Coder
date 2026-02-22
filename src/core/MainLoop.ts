@@ -10,12 +10,15 @@ import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PluginMonitor } from '../plugins/PluginMonitor.js';
 import type { PromptRegistry } from '../prompts/PromptRegistry.js';
 import type { Task, SubTaskRecord, ReviewEvent } from '../memory/types.js';
-import type { MergedReviewResult, LoopState, ProjectAnalysis, StatusSnapshot } from './types.js';
+import type { MergedReviewResult, LoopState, ProjectAnalysis, StatusSnapshot, EvaluationResult } from './types.js';
 import type { AgentResult, ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
+import { parseEvaluation } from './Brain.js';
+import { evaluatorPrompt } from '../prompts/evaluator.js';
 import { executorPrompt } from '../prompts/executor.js';
 import { reviewerPrompt } from '../prompts/reviewer.js';
 import { buildAgentGuidance } from '../prompts/agents.js';
-import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch, isWorkingClean, branchExists, getChangedFilesSince, getModifiedAndAddedFiles, mergeBranch, deleteBranch, listBranches, forceDeleteBranch } from '../utils/git.js';
+import { createSystemDataMcpServer } from '../mcp/SystemDataMcp.js';
+import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch, isWorkingClean, branchExists, getChangedFilesSince, getModifiedAndAddedFiles, mergeBranch, deleteBranch, listBranches, forceDeleteBranch, getDiffStats } from '../utils/git.js';
 import { log } from '../utils/logger.js';
 import { calculateRetryDelay } from '../utils/retry.js';
 import { readFileSync, existsSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs';
@@ -324,12 +327,44 @@ export class MainLoop {
       }
     }
 
-    // EXECUTE + REVIEW queued tasks
+    // EXECUTE + REVIEW queued tasks (with pre-execution evaluation)
     let task = await this.taskQueue.getNext(projectPath);
     while (task && this.running && !this.paused) {
       if (await this.checkBudgetOrAbort(task.id)) {
         break;
       }
+
+      // Pre-execution evaluation: is this task worth doing?
+      const evaluation = await this.evaluateTaskValue(task, projectPath);
+      if (!evaluation.passed) {
+        log.info(`Task rejected by evaluation (score=${evaluation.score.total}): ${task.task_description.slice(0, 60)}`);
+        await this.taskStore.updateTask(task.id, {
+          status: 'pending_review',
+          evaluation_score: evaluation.score,
+          evaluation_reasoning: evaluation.reasoning,
+        });
+        await this.taskStore.saveEvaluationEvent({
+          task_id: task.id,
+          passed: evaluation.passed,
+          score: evaluation.score,
+          reasoning: evaluation.reasoning,
+          cost_usd: evaluation.cost_usd,
+          duration_ms: evaluation.duration_ms,
+        });
+        if (evaluation.cost_usd > 0) await this.taskStore.addDailyCost(evaluation.cost_usd);
+        task = await this.taskQueue.getNext(projectPath);
+        continue;
+      }
+      // Evaluation passed — record it and proceed
+      await this.taskStore.saveEvaluationEvent({
+        task_id: task.id,
+        passed: evaluation.passed,
+        score: evaluation.score,
+        reasoning: evaluation.reasoning,
+        cost_usd: evaluation.cost_usd,
+        duration_ms: evaluation.duration_ms,
+      });
+      if (evaluation.cost_usd > 0) await this.taskStore.addDailyCost(evaluation.cost_usd);
 
       await this.executeTask(task);
       task = await this.taskQueue.getNext(projectPath);
@@ -352,6 +387,61 @@ export class MainLoop {
     }
   }
 
+  private async evaluateTaskValue(task: Task, projectPath: string): Promise<EvaluationResult> {
+    this.setState('evaluating');
+    const start = Date.now();
+
+    try {
+      // Build context for the evaluator
+      const planSummary = task.subtasks && (task.subtasks as SubTaskRecord[]).length > 0
+        ? (task.subtasks as SubTaskRecord[]).map(st => `- ${st.description}`).join('\n')
+        : task.plan ? JSON.stringify(task.plan, null, 2).slice(0, 1000) : 'No plan available';
+
+      const lastScan = await this.taskStore.getLastScan(projectPath);
+      const scanContext = lastScan?.result?.summary ?? 'No recent scan data';
+
+      // Create System Data MCP server for historical data access
+      const systemDataMcp = createSystemDataMcpServer({
+        projectPath,
+        taskStore: this.taskStore,
+        globalMemory: this.globalMemory,
+      });
+
+      const basePrompt = evaluatorPrompt(
+        task.task_description,
+        planSummary,
+        scanContext,
+        ['db-coder-system-data'],
+      );
+      const prompt = this.promptRegistry
+        ? await this.promptRegistry.resolve('evaluator', basePrompt)
+        : basePrompt;
+
+      const result = await this.claude.plan(prompt, projectPath, {
+        systemPrompt: 'You are a task value assessor. Use the available MCP tools to query historical data, then output your evaluation as JSON.',
+        maxTurns: 10,
+        internalMcpServers: { 'db-coder-system-data': systemDataMcp },
+      });
+
+      const parsed = parseEvaluation(result.output);
+      return {
+        ...parsed,
+        cost_usd: result.cost_usd,
+        duration_ms: Date.now() - start,
+      };
+    } catch (err) {
+      log.warn(`Evaluation failed, defaulting to pass: ${err}`);
+      // On error, default to PASS so we don't block tasks
+      return {
+        passed: true,
+        score: { problemLegitimacy: 0, solutionProportionality: 0, expectedComplexity: 0, historicalSuccess: 0, total: 1 },
+        reasoning: `Evaluation error: ${err}`,
+        cost_usd: 0,
+        duration_ms: Date.now() - start,
+      };
+    }
+  }
+
   private async executeTask(task: Task): Promise<void> {
     const projectPath = this.config.projectPath;
     this.setCurrentTaskId(task.id);
@@ -365,6 +455,9 @@ export class MainLoop {
 
     try {
       ({ originalBranch, startCommit } = await this.prepareTaskBranch(task, branchName, projectPath));
+
+      // Record baseline tsc error count before any changes
+      const baselineErrors = await countTscErrors(projectPath);
 
       // Auto-decompose: if task has no subtasks, use Brain to generate them
       if (!task.subtasks || (task.subtasks as SubTaskRecord[]).length === 0) {
@@ -395,12 +488,24 @@ export class MainLoop {
 
       const reviewCycle = await this.runReviewCycle(task, startCommit, stuckAdjustments, projectPath);
       if (reviewCycle.aborted) return;
-      const { reviewResult, reviewRetries } = reviewCycle;
+      let { reviewResult, reviewRetries } = reviewCycle;
+
+      // Post-execution check: hard metrics gate (zero LLM cost)
+      let shouldMerge = reviewResult.passed;
+      if (reviewResult.passed) {
+        const postCheck = await this.postExecutionCheck(baselineErrors, startCommit, projectPath);
+        if (!postCheck.passed) {
+          log.warn(`Post-execution check failed: ${postCheck.reason}`);
+          shouldMerge = false;
+          // Override reviewResult for reflection
+          reviewResult = { ...reviewResult, passed: false, summary: `${reviewResult.summary}\nPost-check: ${postCheck.reason}` };
+        }
+      }
 
       await this.reflectOnTask(task, subtasks, reviewResult, reviewRetries, stuckAdjustments, projectPath);
 
       // Merge completed task branch back to main
-      if (reviewResult.passed) {
+      if (shouldMerge) {
         try {
           await switchBranch(originalBranch, projectPath);
           await mergeBranch(branchName, projectPath);
@@ -420,7 +525,7 @@ export class MainLoop {
           log.warn(`Auto-merge failed for ${branchName}: ${mergeErr}`);
         }
       } else {
-        // Review failed — clean up task branch
+        // Review failed or post-check failed — clean up task branch
         await switchBranch(originalBranch, projectPath).catch(cleanupErr => {
           log.warn(`Failed to cleanup branch ${branchName}: ${cleanupErr}`);
         });
@@ -428,7 +533,7 @@ export class MainLoop {
       }
 
       // PROMPT EVOLUTION: update effectiveness of active prompt versions
-      await this.updatePromptVersionEffectiveness(reviewResult.passed);
+      await this.updatePromptVersionEffectiveness(shouldMerge);
 
       // PROMPT EVOLUTION: trigger meta-reflect after N completed tasks
       this.tasksCompletedSinceMetaReflect++;
@@ -930,6 +1035,37 @@ Fix these issues while maintaining code quality. Do not introduce new issues.`;
     try { unlinkSync(this.lockFile); } catch { /* ignore */ }
   }
 
+  /**
+   * Post-execution check: compare hard metrics (tsc errors) before and after.
+   * Zero LLM cost — purely mechanical check.
+   */
+  private async postExecutionCheck(
+    baselineErrors: number,
+    startCommit: string,
+    projectPath: string,
+  ): Promise<{ passed: boolean; reason?: string }> {
+    // Check tsc error count
+    const currentErrors = await countTscErrors(projectPath);
+    if (currentErrors > baselineErrors) {
+      return {
+        passed: false,
+        reason: `TypeScript errors increased: ${baselineErrors} → ${currentErrors} (+${currentErrors - baselineErrors})`,
+      };
+    }
+
+    // Check diff anomaly: if task looks small but touches many files, warn (but don't block)
+    try {
+      const stats = await getDiffStats(startCommit, 'HEAD', projectPath);
+      if (stats.files_changed > 15) {
+        log.warn(`Post-check warning: ${stats.files_changed} files changed (${stats.insertions}+ ${stats.deletions}-)`);
+      }
+    } catch {
+      // Non-critical, ignore
+    }
+
+    return { passed: true };
+  }
+
   /** Remove branches matching the prefix that don't belong to any queued/active task */
   private async cleanupOrphanedBranches(): Promise<void> {
     const projectPath = this.config.projectPath;
@@ -1085,6 +1221,19 @@ export function extractIssueCategories(issues: ReviewIssue[]): string[] {
     }
   }
   return [...categories];
+}
+
+async function countTscErrors(cwd: string): Promise<number> {
+  if (!existsSync(join(cwd, 'tsconfig.json'))) return 0;
+  try {
+    const { runProcess } = await import('../utils/process.js');
+    const result = await runProcess('npx', ['tsc', '--noEmit'], { cwd, timeout: 60_000 });
+    // Count lines containing ': error TS'
+    const lines = (result.stdout + result.stderr).split('\n');
+    return lines.filter(l => l.includes(': error TS')).length;
+  } catch {
+    return 0;
+  }
 }
 
 function sleep(ms: number): Promise<void> {

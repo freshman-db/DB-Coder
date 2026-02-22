@@ -353,6 +353,7 @@ a:hover { text-decoration: underline; }
 .badge-done { background: #23863544; color: var(--accent-green); border: 1px solid var(--accent-green); }
 .badge-failed { background: #9e1c2344; color: var(--accent-red); border: 1px solid var(--accent-red); }
 .badge-paused { background: #9e6a0344; color: var(--accent-orange); border: 1px solid var(--accent-orange); }
+.badge-warning { background: #d4961044; color: #f0b429; border: 1px solid #f0b429; }
 
 .badge-low { background: #2d333b; color: var(--text-secondary); }
 .badge-medium { background: #0d419d44; color: var(--accent-blue); }

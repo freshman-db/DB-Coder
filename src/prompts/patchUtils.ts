@@ -109,6 +109,7 @@ export function validatePatchedPrompt(patchedPrompt: string, promptName: string)
     research: [],       // free-form markdown output
     plan_markdown: ['"tasks"', '"reasoning"', '"markdown"'],
     analysis: ['"title"', '"modules"', '"markdown"'],
+    evaluator: ['"problemLegitimacy"', '"reasoning"'],
   };
 
   const markers = markersByPrompt[promptName] ?? [];
