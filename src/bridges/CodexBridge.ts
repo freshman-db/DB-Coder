@@ -1,4 +1,4 @@
-import type { CodingAgent, AgentResult, ReviewResult, ReviewIssue } from './CodingAgent.js';
+import type { CodingAgent, AgentResult, ReviewResult } from './CodingAgent.js';
 import type { CodexConfig, TokenPricing } from '../config/types.js';
 import { runProcess, spawnWithJsonl, type JsonlEvent } from '../utils/process.js';
 import { log } from '../utils/logger.js';

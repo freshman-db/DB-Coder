@@ -28,6 +28,25 @@ test('extractJsonFromText returns null for empty or non-string input', () => {
   assert.equal(extractJsonFromText(undefined as unknown as string), null);
 });
 
+test('extractJsonFromText can match a later JSON object', () => {
+  const input = [
+    'metadata: {"requestId":"123"}',
+    'payload:',
+    '{"projectHealth":87,"issues":[],"opportunities":[],"summary":"ok"}',
+  ].join('\n');
+  const parsed = extractJsonFromText(
+    input,
+    (value) => Boolean(value && typeof value === 'object' && !Array.isArray(value) && 'projectHealth' in value),
+  ) as Record<string, unknown> | null;
+
+  assert.deepEqual(parsed, {
+    projectHealth: 87,
+    issues: [],
+    opportunities: [],
+    summary: 'ok',
+  });
+});
+
 test('tryParseReview finds the review JSON object even when earlier JSON exists', () => {
   const input = [
     'Metadata: {"requestId":"abc-123"}',

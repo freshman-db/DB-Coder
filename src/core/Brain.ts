@@ -11,6 +11,7 @@ import { BRAIN_SYSTEM_PROMPT, scanPrompt, planPrompt, reflectPrompt, brainMcpGui
 import { buildAgentGuidance } from '../prompts/agents.js';
 import { getHeadCommit, getRecentLog, getChangedFilesSince } from '../utils/git.js';
 import { log } from '../utils/logger.js';
+import { extractJsonFromText } from '../utils/parse.js';
 
 export class Brain implements QuestionHandler {
   private evolutionEngine?: EvolutionEngine;
@@ -234,52 +235,20 @@ export class Brain implements QuestionHandler {
   }
 }
 
-/** Extract a balanced JSON object containing requiredKey from LLM output */
-function extractJson(text: string, requiredKey: string, parserName: string): unknown | null {
-  const keyIdx = text.indexOf(`"${requiredKey}"`);
-  if (keyIdx === -1) return null;
-
-  // Walk backward from the key to find the opening brace
-  let start = -1;
-  for (let i = keyIdx - 1; i >= 0; i--) {
-    if (text[i] === '{') { start = i; break; }
-  }
-  if (start === -1) return null;
-
-  // Walk forward counting braces to find the balanced closing brace
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (escape) { escape = false; continue; }
-    if (ch === '\\' && inString) { escape = true; continue; }
-    if (ch === '"' && !escape) { inString = !inString; continue; }
-    if (inString) continue;
-    if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth === 0) {
-        try {
-          return JSON.parse(text.slice(start, i + 1));
-        } catch (error) {
-          const rawJson = text.slice(start, i + 1);
-          const snippet = rawJson.length > 400
-            ? `${rawJson.slice(0, 400)}...(truncated)`
-            : rawJson;
-          const reason = error instanceof Error ? error.message : String(error);
-          log.warn(`${parserName}: JSON.parse failed for "${requiredKey}" (${reason}). Raw snippet: ${snippet}`);
-          return null;
-        }
-      }
-    }
-  }
-  log.warn(`extractJson: unbalanced braces for "${requiredKey}"`);
-  return null;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function parseAnalysis(output: string): ProjectAnalysis {
-  const parsed = extractJson(output, 'projectHealth', 'parseAnalysis') as Record<string, unknown> | null;
+function extractObjectByKey(text: string, requiredKey: string): Record<string, unknown> | null {
+  const parsed = extractJsonFromText(
+    text,
+    (value) => isRecord(value) && Object.prototype.hasOwnProperty.call(value, requiredKey),
+  );
+  return isRecord(parsed) ? parsed : null;
+}
+
+export function parseAnalysis(output: string): ProjectAnalysis {
+  const parsed = extractObjectByKey(output, 'projectHealth');
   if (parsed) {
     return {
       issues: Array.isArray(parsed.issues) ? parsed.issues : [],
@@ -299,8 +268,8 @@ function parseAnalysis(output: string): ProjectAnalysis {
   };
 }
 
-function parsePlan(output: string): TaskPlan {
-  const parsed = extractJson(output, 'tasks', 'parsePlan') as Record<string, unknown> | null;
+export function parsePlan(output: string): TaskPlan {
+  const parsed = extractObjectByKey(output, 'tasks');
   if (parsed) {
     return {
       tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [],
@@ -310,8 +279,8 @@ function parsePlan(output: string): TaskPlan {
   return { tasks: [], reasoning: output.slice(0, 500) };
 }
 
-function parseReflection(output: string): ReflectionResult {
-  const parsed = extractJson(output, 'experiences', 'parseReflection') as Record<string, unknown> | null;
+export function parseReflection(output: string): ReflectionResult {
+  const parsed = extractObjectByKey(output, 'experiences');
   if (parsed) {
     return {
       experiences: Array.isArray(parsed.experiences) ? parsed.experiences : [],

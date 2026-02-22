@@ -67,11 +67,15 @@ function findBalancedJson(
  * Find and parse the first valid balanced JSON object embedded in text.
  *
  * @param text Input text that may contain JSON and free-form commentary.
+ * @param matcher Optional predicate used to pick a specific JSON object.
  * @returns Parsed JSON value, or `null` when none can be parsed.
  */
-export function extractJsonFromText(text: string): unknown | null {
+export function extractJsonFromText(
+  text: string,
+  matcher?: (value: unknown) => boolean,
+): unknown | null {
   if (typeof text !== 'string') return null;
-  return findBalancedJson(text);
+  return findBalancedJson(text, matcher);
 }
 
 /**
@@ -82,7 +86,7 @@ export function extractJsonFromText(text: string): unknown | null {
  */
 export function tryParseReview(text: string): Omit<ReviewResult, 'cost_usd'> {
   const output = typeof text === 'string' ? text : '';
-  const parsed = findBalancedJson(
+  const parsed = extractJsonFromText(
     output,
     (value) => isRecord(value) && Object.prototype.hasOwnProperty.call(value, 'passed'),
   );

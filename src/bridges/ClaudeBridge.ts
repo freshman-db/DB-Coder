@@ -1,5 +1,5 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { CodingAgent, AgentResult, ReviewResult, ReviewIssue } from './CodingAgent.js';
+import type { CodingAgent, AgentResult, ReviewResult } from './CodingAgent.js';
 import type { ClaudeConfig } from '../config/types.js';
 import type { McpDiscovery, Phase } from '../mcp/McpDiscovery.js';
 import { buildCanUseTool, type QuestionHandler } from './MessageHandler.js';
