@@ -400,6 +400,53 @@ describe('extractIssueCategories', () => {
   });
 });
 
+describe('MainLoop runCycle integration', () => {
+  test('no changes and no queued tasks — returns idle immediately', async () => {
+    let scanProjectCalls = 0;
+    let createPlanCalls = 0;
+    let getNextCalls = 0;
+
+    const { loop } = createMainLoopForCycle({
+      brain: {
+        hasChanges: async (projectPath: string) => {
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return false;
+        },
+        scanProject: async () => {
+          scanProjectCalls++;
+          return {
+            analysis: { issues: [], opportunities: [], projectHealth: 100, summary: 'No changes' },
+            cost: 0,
+          };
+        },
+        createPlan: async () => {
+          createPlanCalls++;
+          return { plan: { tasks: [], reasoning: 'No tasks' }, cost: 0 };
+        },
+      },
+      taskQueue: {
+        getQueued: async (projectPath: string) => {
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return [];
+        },
+        getNext: async () => {
+          getNextCalls++;
+          return null;
+        },
+      },
+    });
+
+    const { states, remove } = collectStates(loop);
+    await loop.runCycle();
+    remove();
+
+    assert.deepEqual(states.map(snapshot => snapshot.state), ['scanning', 'idle']);
+    assert.equal(scanProjectCalls, 0);
+    assert.equal(createPlanCalls, 0);
+    assert.equal(getNextCalls, 0);
+  });
+});
+
 describe('MainLoop status listeners', () => {
   test('registers and removes listeners', () => {
     const loop = createMainLoop();
