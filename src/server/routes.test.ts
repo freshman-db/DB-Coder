@@ -9,6 +9,7 @@ import type { PatrolManager } from '../core/ModeManager.js';
 import type { PlanWorkflow } from '../core/PlanWorkflow.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { TaskStore } from '../memory/TaskStore.js';
+import type { OperationalMetrics } from '../memory/types.js';
 import type { CostTracker } from '../utils/cost.js';
 import { log } from '../utils/logger.js';
 import { createSseStream, emitSseEvent, HttpError, parseRouteId } from './routes.js';
@@ -697,6 +698,108 @@ test('GET /api/status returns health-style status fields', async () => {
     projectPath: '/workspace/project',
     dailyCosts,
   });
+});
+
+test('GET /api/metrics returns operational metrics and prefers loop projectPath when available', async () => {
+  let requestedProjectPath: string | undefined;
+  const expectedMetrics: OperationalMetrics = {
+    cycleCount: 12,
+    avgCycleDurationMs: 1450.5,
+    taskPassRate: 0.8,
+    dailyCostUsd: 3.25,
+    queueDepth: 4,
+    tasksByStatus: {
+      queued: 4,
+      done: 8,
+      failed: 2,
+    },
+    recentHealthScores: [82, 79, 85],
+  };
+
+  const { server, token } = createServerFixture({
+    loop: {
+      projectPath: '/workspace/loop-project',
+    } as Partial<MainLoop> & { projectPath: string },
+    taskStore: {
+      getOperationalMetrics: async (projectPath) => {
+        requestedProjectPath = projectPath;
+        return expectedMetrics;
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: 'GET',
+    url: '/api/metrics',
+    token,
+  });
+
+  assert.equal(state.statusCode, 200);
+  assert.equal(requestedProjectPath, '/workspace/loop-project');
+  assert.deepEqual(parseJson<OperationalMetrics>(state), expectedMetrics);
+});
+
+test('GET /api/metrics falls back to config projectPath and returns empty metric payload unchanged', async () => {
+  let requestedProjectPath: string | undefined;
+  const emptyMetrics: OperationalMetrics = {
+    cycleCount: 0,
+    avgCycleDurationMs: 0,
+    taskPassRate: 0,
+    dailyCostUsd: 0,
+    queueDepth: 0,
+    tasksByStatus: {},
+    recentHealthScores: [],
+  };
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getOperationalMetrics: async (projectPath) => {
+        requestedProjectPath = projectPath;
+        return emptyMetrics;
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: 'GET',
+    url: '/api/metrics',
+    token,
+  });
+
+  assert.equal(state.statusCode, 200);
+  assert.equal(requestedProjectPath, '/workspace/project');
+  assert.deepEqual(parseJson<OperationalMetrics>(state), emptyMetrics);
+});
+
+test('GET /api/metrics requires auth and does not query metrics without token', async () => {
+  let metricsCalls = 0;
+  const { server } = createServerFixture({
+    taskStore: {
+      getOperationalMetrics: async () => {
+        metricsCalls += 1;
+        return {
+          cycleCount: 0,
+          avgCycleDurationMs: 0,
+          taskPassRate: 0,
+          dailyCostUsd: 0,
+          queueDepth: 0,
+          tasksByStatus: {},
+          recentHealthScores: [],
+        };
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: 'GET',
+    url: '/api/metrics',
+  });
+
+  assert.equal(state.statusCode, 401);
+  assert.deepEqual(parseJson<{ error: string }>(state), {
+    error: 'Unauthorized',
+  });
+  assert.equal(metricsCalls, 0);
 });
 
 test('createSseStream writes SSE headers and event payloads', () => {

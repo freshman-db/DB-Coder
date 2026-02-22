@@ -308,6 +308,15 @@ route('GET', '/api/status', async (_req, res, ctx) => {
   });
 });
 
+route('GET', '/api/metrics', async (_req, res, ctx) => {
+  const rawProjectPath = (ctx.loop as unknown as { projectPath?: unknown }).projectPath;
+  const projectPath = typeof rawProjectPath === 'string' && rawProjectPath.length > 0
+    ? rawProjectPath
+    : ctx.config.projectPath;
+  const metrics = await ctx.taskStore.getOperationalMetrics(projectPath);
+  json(res, metrics);
+});
+
 route('GET', '/api/status/stream', async (req, res, ctx) => {
   const releaseConnection = reserveSseConnection('/api/status/stream', res);
   if (!releaseConnection) {
