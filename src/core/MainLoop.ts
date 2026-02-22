@@ -265,13 +265,15 @@ export class MainLoop {
           log.warn(`Subtask failed: ${subtask.description}`);
           const handled = await this.handleRetry(
             task,
-            subtasks,
             subtask,
-            result.output,
-            stuckAdjustments,
-            retryCounts,
-            branchName,
-            projectPath,
+            {
+              subtasks,
+              error: result.output,
+              stuckAdjustments,
+              retryCounts,
+              branchName,
+              projectPath,
+            },
           );
           if (!handled) {
             stopSubtasks = true;
@@ -413,18 +415,20 @@ export class MainLoop {
 
   private async handleRetry(
     task: Task,
-    subtasks: SubTaskRecord[],
     subtask: SubTaskRecord,
-    error: string,
-    stuckAdjustments: string[],
-    retryCounts: Map<string, number>,
-    branchName: string,
-    projectPath: string,
+    context: {
+      subtasks: SubTaskRecord[];
+      error: string;
+      stuckAdjustments: string[];
+      retryCounts: Map<string, number>;
+      branchName: string;
+      projectPath: string;
+    },
   ): Promise<boolean> {
-    const attempt = (retryCounts.get(subtask.id) ?? 0) + 1;
-    retryCounts.set(subtask.id, attempt);
+    const attempt = (context.retryCounts.get(subtask.id) ?? 0) + 1;
+    context.retryCounts.set(subtask.id, attempt);
     const maxRetries = this.config.values.autonomy.maxRetries;
-    const shouldRetry = await this.handleStuck(task, subtask, error, stuckAdjustments, attempt, maxRetries);
+    const shouldRetry = await this.handleStuck(task, subtask, context.error, context.stuckAdjustments, attempt, maxRetries);
     if (!shouldRetry) return false;
 
     const baseDelayMs = this.config.values.autonomy.retryBaseDelayMs;
@@ -437,9 +441,9 @@ export class MainLoop {
 
     subtask.status = 'pending';
     subtask.result = `Retrying (attempt ${attempt + 1})`;
-    await this.taskStore.updateTask(task.id, { subtasks });
+    await this.taskStore.updateTask(task.id, { subtasks: context.subtasks });
     await sleep(backoffMs);
-    await switchBranch(branchName, projectPath).catch(() => {});
+    await switchBranch(context.branchName, context.projectPath).catch(() => {});
     return true;
   }
 
@@ -744,7 +748,7 @@ export function extractIssueCategories(issues: ReviewIssue[]): string[] {
         matched = true;
       }
     }
-    // Fallback: use severity as category if this specific issue matched no pattern
+    // Fallback: use severity as category if no pattern matched
     if (!matched) {
       categories.add(`severity-${issue.severity}`);
     }

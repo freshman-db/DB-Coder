@@ -1,5 +1,5 @@
 import type { CodingAgent, AgentResult, ReviewResult, ReviewIssue } from './CodingAgent.js';
-import type { CodexConfig } from '../config/types.js';
+import type { CodexConfig, TokenPricing } from '../config/types.js';
 import { runProcess, spawnWithJsonl, type JsonlEvent } from '../utils/process.js';
 import { log } from '../utils/logger.js';
 import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
@@ -205,25 +205,38 @@ ${prompt}`;
   }
 }
 
-interface TokenPricing {
-  inputPerMillion: number;
-  cachedInputPerMillion: number;
-  outputPerMillion: number;
-}
-
 function extractCost(events: JsonlEvent[], pricing?: TokenPricing): number {
-  // 1. Search for explicit cost fields in events
+  // 1. Search for explicit cost fields in events, preferring total cost fields.
+  let lastTotalCost = 0;
+  let lastPartialCost = 0;
+
   for (const e of events) {
-    if (typeof e.cost === 'number' && e.cost > 0) return e.cost;
-    if (typeof e.total_cost === 'number' && e.total_cost > 0) return e.total_cost;
-    if (typeof e.total_cost_usd === 'number' && e.total_cost_usd > 0) return e.total_cost_usd;
+    const directTotal = firstPositiveNumber([e.total_cost_usd, e.total_cost]);
+    if (directTotal !== null) {
+      lastTotalCost = directTotal;
+    }
+
+    const directPartial = firstPositiveNumber([e.cost]);
+    if (directPartial !== null) {
+      lastPartialCost = directPartial;
+    }
+
     if (typeof e.usage === 'object' && e.usage !== null) {
       const u = e.usage as Record<string, unknown>;
-      if (typeof u.cost === 'number' && u.cost > 0) return u.cost;
-      if (typeof u.total_cost === 'number' && u.total_cost > 0) return u.total_cost;
-      if (typeof u.total_cost_usd === 'number' && u.total_cost_usd > 0) return u.total_cost_usd;
+      const usageTotal = firstPositiveNumber([u.total_cost_usd, u.total_cost]);
+      if (usageTotal !== null) {
+        lastTotalCost = usageTotal;
+      }
+
+      const usagePartial = firstPositiveNumber([u.cost]);
+      if (usagePartial !== null) {
+        lastPartialCost = usagePartial;
+      }
     }
   }
+
+  if (lastTotalCost > 0) return lastTotalCost;
+  if (lastPartialCost > 0) return lastPartialCost;
 
   // 2. Estimate from token usage in turn.completed events
   if (pricing) {
@@ -244,6 +257,15 @@ function extractCost(events: JsonlEvent[], pricing?: TokenPricing): number {
   }
 
   return 0;
+}
+
+function firstPositiveNumber(values: unknown[]): number | null {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return value;
+    }
+  }
+  return null;
 }
 
 function tryParseJson(text: string): unknown {

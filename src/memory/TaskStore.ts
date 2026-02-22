@@ -209,8 +209,23 @@ export class TaskStore {
 
   async recoverActiveTasks(projectPath: string): Promise<number> {
     const sql = this.getSql();
+    const activeTasks = await sql<Array<{ id: string; subtasks: unknown }>>`
+      SELECT id, subtasks FROM tasks
+      WHERE project_path = ${projectPath} AND status = 'active'
+    `;
+    if (activeTasks.length === 0) return 0;
+
+    const recoveredWithDoneSubtasks = activeTasks
+      .map(task => ({ id: task.id, done: countDoneSubtasks(task.subtasks) }))
+      .filter(task => task.done > 0)
+      .map(task => `${task.id}: ${task.done} done`);
+
+    if (recoveredWithDoneSubtasks.length > 0) {
+      log.warn(`Recovering active tasks with completed subtasks (${recoveredWithDoneSubtasks.join(', ')})`);
+    }
+
     const result = await sql`
-      UPDATE tasks SET status = 'queued', phase = 'init', updated_at = NOW()
+      UPDATE tasks SET status = 'queued', phase = 'executing', updated_at = NOW()
       WHERE project_path = ${projectPath} AND status = 'active'
     `;
     return result.count;
@@ -483,4 +498,13 @@ export class TaskStore {
     await closeDb();
     this.sql = null;
   }
+}
+
+function countDoneSubtasks(subtasks: unknown): number {
+  if (!Array.isArray(subtasks)) return 0;
+  return subtasks.reduce((count, subtask) => {
+    if (typeof subtask !== 'object' || subtask === null) return count;
+    const status = (subtask as { status?: unknown }).status;
+    return status === 'done' ? count + 1 : count;
+  }, 0);
 }
