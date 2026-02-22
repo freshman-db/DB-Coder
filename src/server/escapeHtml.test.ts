@@ -95,12 +95,12 @@ test('renderTaskDetail escapes task.phase', () => {
   );
 });
 
-test('renderTaskDetail escapes task.id in deleteTask onclick', () => {
+test('renderTaskDetail escapes task.id in deleteTask data-id', () => {
   const fn = extractFunction(appSource, 'renderTaskDetail');
   assert.ok(fn);
   assert.ok(
-    fn.includes("deleteTask('${escapeHtml(String(task.id"),
-    'task.id in onclick handler should be escaped',
+    fn.includes('data-action="deleteTask"') && fn.includes('data-id="${escapeHtml(String(task.id'),
+    'task.id in deleteTask data-id should be escaped',
   );
 });
 

@@ -8,6 +8,13 @@ import type { HealthTrend, PromptPatch, PromptVersion } from './types.js';
 import type { TrendAnalyzer } from './TrendAnalyzer.js';
 import { EvolutionEngine } from './EvolutionEngine.js';
 
+type EvaluationEventSummary = {
+  total: number;
+  passed: number;
+  failed: number;
+  avgTotal: number;
+};
+
 type MetaReflectData = {
   reviewEvents: ReviewEvent[];
   recentTasks: Task[];
@@ -16,6 +23,7 @@ type MetaReflectData = {
   passRate: number;
   avgCost: number;
   issueCategories: RecurringIssueCategory[];
+  evaluationStats: EvaluationEventSummary;
 };
 
 type ParsedMetaReflectOutput = {
@@ -88,6 +96,7 @@ function makeMetaReflectData(overrides: Partial<MetaReflectData> = {}): MetaRefl
     passRate: 1,
     avgCost: 0,
     issueCategories: [],
+    evaluationStats: { total: 0, passed: 0, failed: 0, avgTotal: 0 },
     ...overrides,
   };
 }
@@ -287,6 +296,19 @@ describe('EvolutionEngine.collectMetaReflectData', () => {
       { category: 'type-error', count: 3 },
     ];
 
+    const evalEvents = [
+      {
+        id: 1, task_id: 'task-1', passed: true,
+        score: { problemLegitimacy: 2, solutionProportionality: 1, expectedComplexity: 1, historicalSuccess: 1, total: 5 },
+        reasoning: 'ok', cost_usd: 0.01, duration_ms: 50, created_at: new Date('2026-01-01'),
+      },
+      {
+        id: 2, task_id: 'task-2', passed: false,
+        score: { problemLegitimacy: -1, solutionProportionality: 0, expectedComplexity: -1, historicalSuccess: -1, total: -3 },
+        reasoning: 'bad', cost_usd: 0.01, duration_ms: 40, created_at: new Date('2026-01-01'),
+      },
+    ];
+
     const taskStore: Partial<TaskStore> = {
       getRecentReviewEvents: async (projectPath: string, limit = 20) => {
         assert.equal(projectPath, '/repo');
@@ -306,6 +328,11 @@ describe('EvolutionEngine.collectMetaReflectData', () => {
         assert.equal(projectPath, '/repo');
         assert.equal(limit, 10);
         return issueCategories;
+      },
+      getRecentEvaluationEvents: async (projectPath: string, limit = 20) => {
+        assert.equal(projectPath, '/repo');
+        assert.equal(limit, 20);
+        return evalEvents;
       },
     };
 
@@ -330,6 +357,7 @@ describe('EvolutionEngine.collectMetaReflectData', () => {
     assert.equal(result.passRate, expectedPassRate);
     assert.equal(result.avgCost, expectedAvgCost);
     assert.deepEqual(result.issueCategories, issueCategories);
+    assert.deepEqual(result.evaluationStats, { total: 2, passed: 1, failed: 1, avgTotal: 1 });
   });
 
   test('throws when projectPath is nullish or empty', async () => {
@@ -414,6 +442,7 @@ describe('EvolutionEngine.buildMetaReflectPrompt', () => {
       passRate: 0.5,
       avgCost: 0.6789,
       issueCategories: [{ category: 'null-safety', count: 4 }],
+      evaluationStats: { total: 10, passed: 7, failed: 3, avgTotal: 4.5 },
     };
 
     const engine = createEvolutionEngine({}, {});
@@ -427,6 +456,9 @@ describe('EvolutionEngine.buildMetaReflectPrompt', () => {
     assert.match(prompt, /Total completed tasks: 2/);
     assert.match(prompt, /- scan v3: effectiveness=0\.24, tasks=5/);
     assert.match(prompt, /Task task-123: must_fix=2, should_fix=1, categories=\["null-safety","types"\]/);
+    assert.match(prompt, /Total evaluations: 10/);
+    assert.match(prompt, /Passed: 7, Rejected: 3/);
+    assert.match(prompt, /Average score: 4\.5\/8/);
   });
 
   test('uses safe defaults when fields are nullish or invalid', () => {
@@ -451,6 +483,8 @@ describe('EvolutionEngine.buildMetaReflectPrompt', () => {
     assert.match(prompt, /Total completed tasks: 0/);
     assert.match(prompt, /No active prompt patches\./);
     assert.match(prompt, /## Recent Review Failures\nNone/);
+    assert.match(prompt, /Total evaluations: 0/);
+    assert.match(prompt, /No evaluations yet/);
   });
 
   test('throws when data is nullish', () => {

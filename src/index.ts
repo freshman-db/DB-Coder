@@ -94,7 +94,7 @@ program
     // Create workflow instances
     const planWorkflow = new PlanWorkflow(brain, claudeBridge, codexBridge, taskStore, taskQueue, config, globalMemory);
     // Create patrol manager
-    const patrolManager = new PatrolManager(mainLoop);
+    const patrolManager = new PatrolManager(mainLoop, taskStore, projectPath);
 
     const server = new Server(config, mainLoop, taskStore, globalMemory, costTracker, evolutionEngine, pluginMonitor, patrolManager, planWorkflow);
 
@@ -119,9 +119,21 @@ program
       process.exit(RESTART_EXIT_CODE);
     });
 
-    // Start server only — default to idle mode, user selects mode via API/UI
+    // Start server
     await server.start();
-    log.info('db-coder ready. Awaiting mode selection via Web UI or API.');
+
+    // Resume patrol if it was active before shutdown/restart
+    try {
+      if (await patrolManager.shouldResumePatrol()) {
+        log.info('Resuming patrol from previous session');
+        await patrolManager.startPatrol();
+      } else {
+        log.info('db-coder ready. Awaiting mode selection via Web UI or API.');
+      }
+    } catch (err) {
+      log.warn(`Failed to resume patrol: ${err}`);
+      log.info('db-coder ready. Awaiting mode selection via Web UI or API.');
+    }
   });
 
 // --- Client commands ---

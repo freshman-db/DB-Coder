@@ -176,6 +176,14 @@ CREATE TABLE IF NOT EXISTS evaluation_events (
   duration_ms INTEGER,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS service_state (
+  project_path TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (project_path, key)
+);
 `;
 
 type TaskUpdateInput = Partial<Pick<Task, 'phase' | 'status' | 'plan' | 'subtasks' | 'review_results' | 'iteration' | 'total_cost_usd' | 'git_branch' | 'start_commit'>>
@@ -915,6 +923,20 @@ export class TaskStore {
           cost_usd = ${data.cost_usd}
       WHERE id = ${draftId}
     `;
+  }
+
+
+  async getServiceState(projectPath: string, key: string): Promise<string | null> {
+    const sql = this.getSql();
+    const rows = await sql`SELECT value FROM service_state WHERE project_path = ${projectPath} AND key = ${key}`;
+    return rows.length > 0 ? rows[0].value : null;
+  }
+
+  async setServiceState(projectPath: string, key: string, value: string): Promise<void> {
+    const sql = this.getSql();
+    await sql`INSERT INTO service_state (project_path, key, value, updated_at)
+              VALUES (${projectPath}, ${key}, ${value}, NOW())
+              ON CONFLICT (project_path, key) DO UPDATE SET value = ${value}, updated_at = NOW()`;
   }
 
   async close(): Promise<void> {

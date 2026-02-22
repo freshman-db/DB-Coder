@@ -467,6 +467,7 @@ export class EvolutionEngine {
     const passRate = Number.isFinite(data.passRate) ? data.passRate : 0;
     const avgCost = Number.isFinite(data.avgCost) ? data.avgCost : 0;
     const issueCategories = Array.isArray(data.issueCategories) ? data.issueCategories : [];
+    const evalStats = data.evaluationStats ?? { total: 0, passed: 0, failed: 0, avgTotal: 0 };
 
     const activeVersionsSummary = activeVersions.length > 0
       ? activeVersions
@@ -506,10 +507,10 @@ ${activeVersionsSummary}
 ${failureSummary}
 
 ## Pre-execution Evaluation Stats
-- Total evaluations: ${data.evaluationStats.total}
-- Passed: ${data.evaluationStats.passed}, Rejected: ${data.evaluationStats.failed}
-- Average score: ${data.evaluationStats.avgTotal.toFixed(1)}/8
-${data.evaluationStats.total > 0 ? `- Pass rate: ${((data.evaluationStats.passed / data.evaluationStats.total) * 100).toFixed(1)}%` : '- No evaluations yet'}
+- Total evaluations: ${evalStats.total}
+- Passed: ${evalStats.passed}, Rejected: ${evalStats.failed}
+- Average score: ${(evalStats.avgTotal ?? 0).toFixed(1)}/8
+${evalStats.total > 0 ? `- Pass rate: ${((evalStats.passed / evalStats.total) * 100).toFixed(1)}%` : '- No evaluations yet'}
 
 ## Available Prompt Names
 brain_system, scan, plan, reflect, executor, reviewer, evaluator
