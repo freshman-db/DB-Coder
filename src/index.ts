@@ -17,7 +17,7 @@ import { McpDiscovery } from './mcp/McpDiscovery.js';
 import { TrendAnalyzer } from './evolution/TrendAnalyzer.js';
 import { EvolutionEngine } from './evolution/EvolutionEngine.js';
 import { PluginMonitor } from './plugins/PluginMonitor.js';
-import { log } from './utils/logger.js';
+import { log, type LogEntry } from './utils/logger.js';
 
 const program = new Command()
   .name('db-coder')
@@ -94,6 +94,19 @@ function getClient(): Client {
   return new Client();
 }
 
+function isLogEntry(entry: unknown): entry is LogEntry {
+  if (typeof entry !== 'object' || entry === null) {
+    return false;
+  }
+
+  const candidate = entry as { timestamp?: unknown; level?: unknown; message?: unknown };
+  return (
+    typeof candidate.timestamp === 'string'
+    && (candidate.level === 'debug' || candidate.level === 'info' || candidate.level === 'warn' || candidate.level === 'error')
+    && typeof candidate.message === 'string'
+  );
+}
+
 program
   .command('status')
   .description('Show service status')
@@ -137,7 +150,10 @@ program
   .action(async (opts) => {
     if (opts.follow) {
       console.log('Following logs (Ctrl+C to stop)...');
-      await getClient().followLogs((entry: any) => {
+      await getClient().followLogs((entry) => {
+        if (!isLogEntry(entry)) {
+          return;
+        }
         const { timestamp, level, message } = entry;
         console.log(`[${timestamp}] [${level.toUpperCase()}] ${message}`);
       });

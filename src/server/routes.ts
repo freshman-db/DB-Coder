@@ -2,7 +2,6 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { MainLoop } from '../core/MainLoop.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
-import type { MemoryCategory } from '../memory/types.js';
 import type { CostTracker } from '../utils/cost.js';
 import type { Config } from '../config/Config.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
@@ -28,16 +27,10 @@ interface Route {
   handler: RouteHandler;
 }
 
+const memoryCategories = ['habit', 'experience', 'standard', 'workflow', 'framework', 'failure', 'simplification'] as const;
+type MemoryCategory = (typeof memoryCategories)[number];
+
 const routes: Route[] = [];
-const memoryCategories: ReadonlySet<MemoryCategory> = new Set([
-  'habit',
-  'experience',
-  'standard',
-  'workflow',
-  'framework',
-  'failure',
-  'simplification',
-]);
 const MAX_TASK_DESCRIPTION_LENGTH = 4_000;
 const MAX_MEMORY_CONTENT_LENGTH = 32_000;
 const MAX_MEMORY_TITLE_LENGTH = 200;
@@ -506,5 +499,5 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isMemoryCategory(value: string): value is MemoryCategory {
-  return memoryCategories.has(value as MemoryCategory);
+  return memoryCategories.some(category => category === value);
 }

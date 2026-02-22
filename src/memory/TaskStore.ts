@@ -248,7 +248,7 @@ export class TaskStore {
     await this.sql`
       INSERT INTO scan_results (project_path, commit_hash, depth, result, health_score, cost_usd)
       VALUES (${scan.project_path}, ${scan.commit_hash}, ${scan.depth},
-              ${this.sql.json(scan.result as any)}, ${scan.health_score}, ${scan.cost_usd})
+              ${this.sql.json(scan.result as unknown as postgres.JSONValue)}, ${scan.health_score}, ${scan.cost_usd})
     `;
   }
 
