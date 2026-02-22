@@ -1,5 +1,5 @@
 import type postgres from 'postgres';
-import type { Task, TaskLog, TaskStatus, ScanResult, ReviewEvent, RecurringIssueCategory, PlanDraft, PlanReviewStatus, PlanDraftAnnotation, ChatMessage, ChatStatus } from './types.js';
+import type { Task, TaskLog, TaskStatus, ScanResult, ReviewEvent, RecurringIssueCategory, PlanDraft, PlanReviewStatus, PlanDraftAnnotation, ChatMessage, ChatStatus, OperationalMetrics } from './types.js';
 import type { EvaluationScore } from '../core/types.js';
 import type { Adjustment, AdjustmentCategory, AdjustmentStatus, GoalProgress, ConfigProposal, ProposalStatus, PromptVersion, PromptName, PromptPatch, PromptMetrics, PromptVersionStatus } from '../evolution/types.js';
 import type {
@@ -597,6 +597,77 @@ export class TaskStore {
     `;
   }
 
+  async getOperationalMetrics(projectPath: string): Promise<OperationalMetrics> {
+    const sql = this.getSql();
+    const [cycleRows, passRateRows, queueDepthRows, statusRows, dailyCost, recentScans] = await Promise.all([
+      sql<Array<{ cycle_count: number | string | null; avg_cycle_duration_ms: number | string | null }>>`
+        SELECT
+          COUNT(*)::int AS cycle_count,
+          COALESCE(AVG(cycle_duration_ms), 0) AS avg_cycle_duration_ms
+        FROM (
+          SELECT t.id,
+                 COALESCE(EXTRACT(EPOCH FROM (MAX(tl.created_at) - MIN(tl.created_at))) * 1000, 0) AS cycle_duration_ms
+          FROM tasks t
+          LEFT JOIN task_logs tl ON tl.task_id = t.id
+          WHERE t.project_path = ${projectPath} AND t.status = 'done'
+          GROUP BY t.id
+        ) AS completed_cycles
+      `,
+      sql<Array<{ done_count: number | string | null; failed_count: number | string | null }>>`
+        SELECT
+          COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0)::int AS done_count,
+          COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0)::int AS failed_count
+        FROM tasks
+        WHERE project_path = ${projectPath}
+          AND status IN ('done', 'failed')
+      `,
+      sql<Array<{ queue_depth: number | string | null }>>`
+        SELECT COUNT(*)::int AS queue_depth
+        FROM tasks
+        WHERE project_path = ${projectPath} AND status = 'queued'
+      `,
+      sql<Array<{ status: string; count: number | string | null }>>`
+        SELECT status, COUNT(*)::int AS count
+        FROM tasks
+        WHERE project_path = ${projectPath}
+        GROUP BY status
+      `,
+      this.getDailyCost(),
+      this.getRecentScans(projectPath, 10),
+    ]);
+
+    const cycleRow = cycleRows[0];
+    const passRateRow = passRateRows[0];
+    const queueDepthRow = queueDepthRows[0];
+
+    const doneCount = toFiniteNumber(passRateRow?.done_count);
+    const failedCount = toFiniteNumber(passRateRow?.failed_count);
+    const totalCompleted = doneCount + failedCount;
+    const taskPassRate = totalCompleted > 0 ? doneCount / totalCompleted : 0;
+
+    const tasksByStatus = statusRows.reduce<Record<string, number>>((acc, row) => {
+      if (!row?.status) {
+        return acc;
+      }
+      acc[row.status] = toFiniteNumber(row.count);
+      return acc;
+    }, {});
+
+    const recentHealthScores = recentScans
+      .map(scan => scan.health_score)
+      .filter((score): score is number => typeof score === 'number' && Number.isFinite(score));
+
+    return {
+      cycleCount: toFiniteNumber(cycleRow?.cycle_count),
+      avgCycleDurationMs: toFiniteNumber(cycleRow?.avg_cycle_duration_ms),
+      taskPassRate,
+      dailyCostUsd: toFiniteNumber(dailyCost.total_cost_usd),
+      queueDepth: toFiniteNumber(queueDepthRow?.queue_depth),
+      tasksByStatus,
+      recentHealthScores,
+    };
+  }
+
   // --- Review Events ---
 
   async saveReviewEvent(event: Omit<ReviewEvent, 'id' | 'created_at'>): Promise<void> {
@@ -956,4 +1027,19 @@ function countDoneSubtasks(subtasks: unknown): number {
     const status = (subtask as { status?: unknown }).status;
     return status === 'done' ? count + 1 : count;
   }, 0);
+}
+
+function toFiniteNumber(value: unknown): number {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : 0;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  if (typeof value === 'bigint') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
 }
