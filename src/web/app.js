@@ -170,7 +170,8 @@ function getCurrentTaskSubtitle(status) {
   if (typeof currentTaskTitle === 'string' && currentTaskTitle.trim().length > 0) {
     return getTaskTitle({ id: currentTaskId, task_description: currentTaskTitle });
   }
-  return `任务 #${currentTaskId}`;
+  const taskIdLabel = String(currentTaskId).slice(0, 8);
+  return `任务 #${taskIdLabel}...`;
 }
 
 // ---- 路由 ----

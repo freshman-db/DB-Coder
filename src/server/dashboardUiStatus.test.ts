@@ -67,7 +67,17 @@ test('dashboard current task subtitle falls back to task id when title missing',
     currentTaskTitle: null,
   });
 
-  assert.equal(subtitle, '\u4efb\u52a1 #task-404');
+  assert.equal(subtitle, '\u4efb\u52a1 #task-404...');
+});
+
+test('dashboard current task subtitle truncates long task id fallback', async () => {
+  const getCurrentTaskSubtitle = await loadCurrentTaskSubtitleFn();
+  const subtitle = getCurrentTaskSubtitle({
+    currentTaskId: '1234567890abcdef',
+    currentTaskTitle: undefined,
+  });
+
+  assert.equal(subtitle, '\u4efb\u52a1 #12345678...');
 });
 
 test('dashboard current task subtitle returns idle text when no active task', async () => {
