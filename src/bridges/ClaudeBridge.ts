@@ -4,6 +4,7 @@ import type { ClaudeConfig } from '../config/types.js';
 import type { McpDiscovery, Phase } from '../mcp/McpDiscovery.js';
 import { buildCanUseTool, type QuestionHandler } from './MessageHandler.js';
 import { log } from '../utils/logger.js';
+import { tryParseReview } from '../utils/parse.js';
 
 // Tools to remove from env to avoid nesting conflicts
 const CLAUDE_ENV_VARS = [
@@ -215,31 +216,4 @@ Output your review as JSON: { "passed": boolean, "issues": [{ "severity": "criti
       return false;
     }
   }
-}
-
-function tryParseReview(output: string): Omit<ReviewResult, 'cost_usd'> {
-  // Try to find JSON in the output
-  const jsonMatch = output.match(/\{[\s\S]*"passed"[\s\S]*\}/);
-  if (jsonMatch) {
-    try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        passed: Boolean(parsed.passed),
-        issues: Array.isArray(parsed.issues) ? parsed.issues : [],
-        summary: parsed.summary ?? '',
-      };
-    } catch (err) {
-      log.debug('ClaudeBridge tryParseReview JSON parse failed', {
-        error: err,
-        inputPreview: output.slice(0, 200),
-      });
-    }
-  }
-  // Fallback: treat as text review
-  const hasIssues = /critical|error|bug|vulnerability|security/i.test(output);
-  return {
-    passed: !hasIssues,
-    issues: [],
-    summary: output.slice(0, 500),
-  };
 }

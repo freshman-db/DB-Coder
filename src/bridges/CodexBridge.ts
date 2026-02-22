@@ -2,6 +2,7 @@ import type { CodingAgent, AgentResult, ReviewResult, ReviewIssue } from './Codi
 import type { CodexConfig, TokenPricing } from '../config/types.js';
 import { runProcess, spawnWithJsonl, type JsonlEvent } from '../utils/process.js';
 import { log } from '../utils/logger.js';
+import { tryParseReview } from '../utils/parse.js';
 import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -270,29 +271,4 @@ function firstPositiveNumber(values: unknown[]): number | null {
 
 function tryParseJson(text: string): unknown {
   try { return JSON.parse(text); } catch { return undefined; }
-}
-
-function tryParseReview(output: string): Omit<ReviewResult, 'cost_usd'> {
-  const jsonMatch = output.match(/\{[\s\S]*"passed"[\s\S]*\}/);
-  if (jsonMatch) {
-    try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        passed: Boolean(parsed.passed),
-        issues: Array.isArray(parsed.issues) ? parsed.issues : [],
-        summary: parsed.summary ?? '',
-      };
-    } catch (err) {
-      log.debug('CodexBridge tryParseReview JSON parse failed', {
-        error: err,
-        inputPreview: output.slice(0, 200),
-      });
-    }
-  }
-  const hasIssues = /critical|error|bug|vulnerability|security/i.test(output);
-  return {
-    passed: !hasIssues,
-    issues: [],
-    summary: output.slice(0, 500),
-  };
 }
