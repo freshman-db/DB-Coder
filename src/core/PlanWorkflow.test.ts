@@ -15,6 +15,7 @@ type UserChannelMessage = {
 
 type PlanWorkflowInternals = {
   chatSessions: Map<number, ChatSession>;
+  sessionLocks: Map<number, Promise<void>>;
   sseListeners: Map<number, Set<SseListener>>;
 };
 
@@ -74,6 +75,20 @@ function createWorkflow(overrides: {
     {} as ConstructorParameters<typeof PlanWorkflow>[5],
     {} as ConstructorParameters<typeof PlanWorkflow>[6],
   );
+}
+
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 test('closeSession closes active chat session and clears listener map entry', () => {
@@ -225,9 +240,59 @@ test('processUserMessage keeps listeners when draft lookup fails for a new sessi
   );
 
   assert.equal(internals.chatSessions.has(11), false);
+  assert.equal(internals.sessionLocks.has(11), false);
   assert.equal(internals.sseListeners.has(11), true);
   assert.deepEqual(receivedEvents, ['message']);
 
   (workflow as unknown as PlanWorkflowEmitter).emit(11, 'status', { status: 'chatting' });
   assert.deepEqual(receivedEvents, ['message', 'status']);
+});
+
+test('processUserMessage creates one chat session when concurrent requests target the same draft', async () => {
+  const draftLookup = createDeferred<{ project_path: string }>();
+  const createSessionCalls: number[] = [];
+  const getPlanDraftCalls: number[] = [];
+  const sessionHistoryBySessionId = new Map<string, string[]>();
+
+  const workflow = createWorkflow({
+    getPlanDraft: async (draftId) => {
+      getPlanDraftCalls.push(draftId);
+      return draftLookup.promise;
+    },
+    createChatSession: () => {
+      createSessionCalls.push(1);
+      return createMockSession({
+        sessionId: 'session-21',
+        onPush: (message) => {
+          const history = sessionHistoryBySessionId.get(message.session_id) ?? [];
+          history.push(message.message.content);
+          sessionHistoryBySessionId.set(message.session_id, history);
+        },
+      });
+    },
+  });
+  const internals = getInternals(workflow);
+
+  const firstRequest = workflow.processUserMessage(21, 'first');
+  await Promise.resolve();
+
+  const secondRequest = workflow.processUserMessage(21, 'second');
+  await Promise.resolve();
+
+  assert.equal(internals.sessionLocks.has(21), true);
+  assert.equal(getPlanDraftCalls.length, 1);
+  assert.equal(createSessionCalls.length, 0);
+
+  draftLookup.resolve({ project_path: '/tmp/project' });
+
+  await Promise.all([firstRequest, secondRequest]);
+
+  assert.equal(getPlanDraftCalls.length, 1);
+  assert.equal(createSessionCalls.length, 1);
+  assert.equal(internals.sessionLocks.has(21), false);
+  assert.equal(internals.chatSessions.size, 1);
+  assert.equal(internals.chatSessions.has(21), true);
+  const activeSession = internals.chatSessions.get(21);
+  assert.ok(activeSession);
+  assert.deepEqual(sessionHistoryBySessionId.get(activeSession.sessionId), ['first', 'second']);
 });
