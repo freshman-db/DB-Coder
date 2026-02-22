@@ -1,6 +1,7 @@
-import postgres from 'postgres';
+import type postgres from 'postgres';
 import type { Task, TaskLog, TaskStatus, ScanResult, ReviewEvent, RecurringIssueCategory } from './types.js';
 import type { Adjustment, AdjustmentCategory, AdjustmentStatus, GoalProgress, ConfigProposal, ProposalStatus } from '../evolution/types.js';
+import { closeDb, getDb } from '../db.js';
 import { log } from '../utils/logger.js';
 
 const SCHEMA_SQL = `
@@ -117,25 +118,32 @@ const TASK_UPDATE_FIELDS: Array<keyof TaskUpdateInput> = [
 const TASK_JSONB_FIELDS = new Set<keyof TaskUpdateInput>(['plan', 'subtasks', 'review_results']);
 
 export class TaskStore {
-  private sql: postgres.Sql;
+  private sql: postgres.Sql | null;
+  private isClosed = false;
 
   constructor(connectionString: string) {
-    this.sql = postgres(connectionString, {
-      idle_timeout: 120,
-      max_lifetime: 3600,
-      max: 10,
-    });
+    this.sql = getDb(connectionString);
+  }
+
+  /** Returns the live SQL connection, or throws if this instance has been closed. */
+  private getSql(): postgres.Sql {
+    if (this.isClosed || !this.sql) {
+      throw new Error('TaskStore is closed');
+    }
+    return this.sql;
   }
 
   async init(): Promise<void> {
-    await this.sql.unsafe(SCHEMA_SQL);
+    const sql = this.getSql();
+    await sql.unsafe(SCHEMA_SQL);
     log.info('TaskStore initialized');
   }
 
   // --- Tasks ---
 
   async createTask(projectPath: string, description: string, priority = 2): Promise<Task> {
-    const [row] = await this.sql<Task[]>`
+    const sql = this.getSql();
+    const [row] = await sql<Task[]>`
       INSERT INTO tasks (project_path, task_description, priority)
       VALUES (${projectPath}, ${description}, ${priority})
       RETURNING *
@@ -144,24 +152,27 @@ export class TaskStore {
   }
 
   async getTask(id: string): Promise<Task | null> {
-    const [row] = await this.sql<Task[]>`SELECT * FROM tasks WHERE id = ${id}`;
+    const sql = this.getSql();
+    const [row] = await sql<Task[]>`SELECT * FROM tasks WHERE id = ${id}`;
     return row ?? null;
   }
 
   async listTasks(projectPath: string, status?: TaskStatus): Promise<Task[]> {
+    const sql = this.getSql();
     if (status) {
-      return this.sql<Task[]>`
+      return sql<Task[]>`
         SELECT * FROM tasks WHERE project_path = ${projectPath} AND status = ${status}
         ORDER BY priority ASC, created_at ASC
       `;
     }
-    return this.sql<Task[]>`
+    return sql<Task[]>`
       SELECT * FROM tasks WHERE project_path = ${projectPath}
       ORDER BY priority ASC, created_at ASC
     `;
   }
 
   async updateTask(id: string, updates: TaskUpdateInput): Promise<void> {
+    const sql = this.getSql();
     const sets: string[] = [];
     const vals: unknown[] = [];
     for (const field of TASK_UPDATE_FIELDS) {
@@ -176,26 +187,29 @@ export class TaskStore {
     }
     if (sets.length === 0) return;
     sets.push('updated_at = NOW()');
-    await this.sql.unsafe(
+    await sql.unsafe(
       `UPDATE tasks SET ${sets.join(', ')} WHERE id = $${vals.length + 1}`,
       [...vals, id] as postgres.ParameterOrJSON<never>[],
     );
   }
 
   async incrementTaskCost(taskId: string, amount: number): Promise<void> {
-    await this.sql.unsafe(
+    const sql = this.getSql();
+    await sql.unsafe(
       'UPDATE tasks SET total_cost_usd = COALESCE(total_cost_usd, 0) + $1 WHERE id = $2',
       [amount, taskId] as postgres.ParameterOrJSON<never>[],
     );
   }
 
   async deleteTask(id: string): Promise<void> {
-    await this.sql`DELETE FROM task_logs WHERE task_id = ${id}`;
-    await this.sql`DELETE FROM tasks WHERE id = ${id}`;
+    const sql = this.getSql();
+    await sql`DELETE FROM task_logs WHERE task_id = ${id}`;
+    await sql`DELETE FROM tasks WHERE id = ${id}`;
   }
 
   async recoverActiveTasks(projectPath: string): Promise<number> {
-    const result = await this.sql`
+    const sql = this.getSql();
+    const result = await sql`
       UPDATE tasks SET status = 'queued', phase = 'init', updated_at = NOW()
       WHERE project_path = ${projectPath} AND status = 'active'
     `;
@@ -203,7 +217,8 @@ export class TaskStore {
   }
 
   async getNextTask(projectPath: string): Promise<Task | null> {
-    const [row] = await this.sql<Task[]>`
+    const sql = this.getSql();
+    const [row] = await sql<Task[]>`
       SELECT * FROM tasks
       WHERE project_path = ${projectPath} AND status = 'queued'
       ORDER BY priority ASC, created_at ASC
@@ -213,7 +228,8 @@ export class TaskStore {
   }
 
   async findSimilarTask(projectPath: string, description: string): Promise<Task | null> {
-    const [row] = await this.sql<Task[]>`
+    const sql = this.getSql();
+    const [row] = await sql<Task[]>`
       SELECT *, similarity(task_description, ${description}) AS sim
       FROM tasks
       WHERE project_path = ${projectPath}
@@ -228,7 +244,8 @@ export class TaskStore {
   // --- Logs ---
 
   async addLog(entry: Omit<TaskLog, 'id' | 'created_at'>): Promise<void> {
-    await this.sql`
+    const sql = this.getSql();
+    await sql`
       INSERT INTO task_logs (task_id, phase, agent, input_summary, output_summary, cost_usd, duration_ms)
       VALUES (${entry.task_id}, ${entry.phase}, ${entry.agent},
               ${entry.input_summary}, ${entry.output_summary},
@@ -237,7 +254,8 @@ export class TaskStore {
   }
 
   async getTaskLogs(taskId: string): Promise<TaskLog[]> {
-    return this.sql<TaskLog[]>`
+    const sql = this.getSql();
+    return sql<TaskLog[]>`
       SELECT * FROM task_logs WHERE task_id = ${taskId} ORDER BY created_at ASC
     `;
   }
@@ -245,15 +263,17 @@ export class TaskStore {
   // --- Scan Results ---
 
   async saveScanResult(scan: Omit<ScanResult, 'id' | 'created_at'>): Promise<void> {
-    await this.sql`
+    const sql = this.getSql();
+    await sql`
       INSERT INTO scan_results (project_path, commit_hash, depth, result, health_score, cost_usd)
       VALUES (${scan.project_path}, ${scan.commit_hash}, ${scan.depth},
-              ${this.sql.json(scan.result as unknown as postgres.JSONValue)}, ${scan.health_score}, ${scan.cost_usd})
+              ${sql.json(scan.result as any)}, ${scan.health_score}, ${scan.cost_usd})
     `;
   }
 
   async getLastScan(projectPath: string): Promise<ScanResult | null> {
-    const [row] = await this.sql<ScanResult[]>`
+    const sql = this.getSql();
+    const [row] = await sql<ScanResult[]>`
       SELECT * FROM scan_results
       WHERE project_path = ${projectPath}
       ORDER BY created_at DESC LIMIT 1
@@ -264,7 +284,8 @@ export class TaskStore {
   // --- Costs ---
 
   async addDailyCost(costUsd: number): Promise<void> {
-    await this.sql`
+    const sql = this.getSql();
+    await sql`
       INSERT INTO daily_costs (date, total_cost_usd, task_count)
       VALUES (CURRENT_DATE, ${costUsd}, 1)
       ON CONFLICT (date) DO UPDATE SET
@@ -274,15 +295,17 @@ export class TaskStore {
   }
 
   async getDailyCost(date?: string): Promise<{ total_cost_usd: number; task_count: number }> {
+    const sql = this.getSql();
     const d = date ?? new Date().toISOString().slice(0, 10);
-    const [row] = await this.sql<Array<{ total_cost_usd: number; task_count: number }>>`
+    const [row] = await sql<Array<{ total_cost_usd: number; task_count: number }>>`
       SELECT total_cost_usd, task_count FROM daily_costs WHERE date = ${d}
     `;
     return row ?? { total_cost_usd: 0, task_count: 0 };
   }
 
   async getRecentCosts(days = 7): Promise<Array<{ date: string; total_cost_usd: number; task_count: number }>> {
-    return this.sql<Array<{ date: string; total_cost_usd: number; task_count: number }>>`
+    const sql = this.getSql();
+    return sql<Array<{ date: string; total_cost_usd: number; task_count: number }>>`
       SELECT date::text, total_cost_usd, task_count FROM daily_costs
       ORDER BY date DESC LIMIT ${days}
     `;
@@ -291,7 +314,8 @@ export class TaskStore {
   // --- Adjustments ---
 
   async saveAdjustment(adj: { project_path: string; task_id: string | null; text: string; category: AdjustmentCategory }): Promise<Adjustment> {
-    const [row] = await this.sql<Adjustment[]>`
+    const sql = this.getSql();
+    const [row] = await sql<Adjustment[]>`
       INSERT INTO adjustments (project_path, task_id, text, category)
       VALUES (${adj.project_path}, ${adj.task_id}, ${adj.text}, ${adj.category})
       RETURNING *
@@ -300,7 +324,8 @@ export class TaskStore {
   }
 
   async getActiveAdjustments(projectPath: string, limit = 20): Promise<Adjustment[]> {
-    return this.sql<Adjustment[]>`
+    const sql = this.getSql();
+    return sql<Adjustment[]>`
       SELECT * FROM adjustments
       WHERE project_path = ${projectPath} AND status = 'active'
       ORDER BY effectiveness DESC, created_at DESC
@@ -309,7 +334,8 @@ export class TaskStore {
   }
 
   async updateAdjustmentEffectiveness(projectPath: string, delta: number): Promise<void> {
-    await this.sql`
+    const sql = this.getSql();
+    await sql`
       UPDATE adjustments
       SET effectiveness = LEAST(1.0, GREATEST(-1.0, effectiveness + ${delta})),
           updated_at = NOW()
@@ -318,13 +344,15 @@ export class TaskStore {
   }
 
   async supersedeAdjustment(id: number): Promise<void> {
-    await this.sql`
+    const sql = this.getSql();
+    await sql`
       UPDATE adjustments SET status = 'superseded', updated_at = NOW() WHERE id = ${id}
     `;
   }
 
   async supersedeWeakAdjustments(projectPath: string, threshold = -0.3): Promise<number> {
-    const result = await this.sql`
+    const sql = this.getSql();
+    const result = await sql`
       UPDATE adjustments SET status = 'superseded', updated_at = NOW()
       WHERE project_path = ${projectPath} AND status = 'active' AND effectiveness < ${threshold}
     `;
@@ -334,7 +362,8 @@ export class TaskStore {
   // --- Goal Progress ---
 
   async saveGoalProgress(gp: { project_path: string; goal_index: number; progress_pct: number; evidence: string; scan_id: number | null }): Promise<GoalProgress> {
-    const [row] = await this.sql<GoalProgress[]>`
+    const sql = this.getSql();
+    const [row] = await sql<GoalProgress[]>`
       INSERT INTO goal_progress (project_path, goal_index, progress_pct, evidence, scan_id)
       VALUES (${gp.project_path}, ${gp.goal_index}, ${gp.progress_pct}, ${gp.evidence}, ${gp.scan_id})
       RETURNING *
@@ -343,7 +372,8 @@ export class TaskStore {
   }
 
   async getLatestGoalProgress(projectPath: string): Promise<GoalProgress[]> {
-    return this.sql<GoalProgress[]>`
+    const sql = this.getSql();
+    return sql<GoalProgress[]>`
       SELECT DISTINCT ON (goal_index) *
       FROM goal_progress
       WHERE project_path = ${projectPath}
@@ -352,7 +382,8 @@ export class TaskStore {
   }
 
   async getGoalProgressHistory(projectPath: string, goalIndex: number, limit = 10): Promise<GoalProgress[]> {
-    return this.sql<GoalProgress[]>`
+    const sql = this.getSql();
+    return sql<GoalProgress[]>`
       SELECT * FROM goal_progress
       WHERE project_path = ${projectPath} AND goal_index = ${goalIndex}
       ORDER BY created_at DESC
@@ -363,17 +394,19 @@ export class TaskStore {
   // --- Config Proposals ---
 
   async saveConfigProposal(cp: { project_path: string; field_path: string; current_value: unknown; proposed_value: unknown; reason: string; confidence: number }): Promise<ConfigProposal> {
-    const [row] = await this.sql<ConfigProposal[]>`
+    const sql = this.getSql();
+    const [row] = await sql<ConfigProposal[]>`
       INSERT INTO config_proposals (project_path, field_path, current_value, proposed_value, reason, confidence)
-      VALUES (${cp.project_path}, ${cp.field_path}, ${this.sql.json(cp.current_value as any)},
-              ${this.sql.json(cp.proposed_value as any)}, ${cp.reason}, ${cp.confidence})
+      VALUES (${cp.project_path}, ${cp.field_path}, ${sql.json(cp.current_value as any)},
+              ${sql.json(cp.proposed_value as any)}, ${cp.reason}, ${cp.confidence})
       RETURNING *
     `;
     return row;
   }
 
   async getPendingProposals(projectPath: string): Promise<ConfigProposal[]> {
-    return this.sql<ConfigProposal[]>`
+    const sql = this.getSql();
+    return sql<ConfigProposal[]>`
       SELECT * FROM config_proposals
       WHERE project_path = ${projectPath} AND status = 'pending'
       ORDER BY confidence DESC, created_at DESC
@@ -381,7 +414,8 @@ export class TaskStore {
   }
 
   async updateProposalStatus(id: number, status: ProposalStatus): Promise<void> {
-    await this.sql`
+    const sql = this.getSql();
+    await sql`
       UPDATE config_proposals SET status = ${status} WHERE id = ${id}
     `;
   }
@@ -389,7 +423,8 @@ export class TaskStore {
   // --- Recent Scans (for trend analysis) ---
 
   async getRecentScans(projectPath: string, limit = 10): Promise<ScanResult[]> {
-    return this.sql<ScanResult[]>`
+    const sql = this.getSql();
+    return sql<ScanResult[]>`
       SELECT * FROM scan_results
       WHERE project_path = ${projectPath}
       ORDER BY created_at DESC
@@ -400,22 +435,25 @@ export class TaskStore {
   // --- Review Events ---
 
   async saveReviewEvent(event: Omit<ReviewEvent, 'id' | 'created_at'>): Promise<void> {
-    await this.sql`
+    const sql = this.getSql();
+    await sql`
       INSERT INTO review_events (task_id, attempt, passed, must_fix_count, should_fix_count, issue_categories, fix_agent, duration_ms, cost_usd)
       VALUES (${event.task_id}, ${event.attempt}, ${event.passed}, ${event.must_fix_count},
-              ${event.should_fix_count}, ${this.sql.json(event.issue_categories as any)},
+              ${event.should_fix_count}, ${sql.json(event.issue_categories as any)},
               ${event.fix_agent}, ${event.duration_ms}, ${event.cost_usd})
     `;
   }
 
   async getReviewEvents(taskId: string): Promise<ReviewEvent[]> {
-    return this.sql<ReviewEvent[]>`
+    const sql = this.getSql();
+    return sql<ReviewEvent[]>`
       SELECT * FROM review_events WHERE task_id = ${taskId} ORDER BY attempt ASC
     `;
   }
 
   async getRecurringIssueCategories(projectPath: string, limit = 10): Promise<RecurringIssueCategory[]> {
-    return this.sql<RecurringIssueCategory[]>`
+    const sql = this.getSql();
+    return sql<RecurringIssueCategory[]>`
       SELECT cat AS category, COUNT(*)::int AS count
       FROM review_events re
       JOIN tasks t ON t.id = re.task_id,
@@ -428,7 +466,8 @@ export class TaskStore {
   }
 
   async updateTaskAdjustmentEffectiveness(taskId: string, delta: number): Promise<void> {
-    await this.sql`
+    const sql = this.getSql();
+    await sql`
       UPDATE adjustments
       SET effectiveness = LEAST(1.0, GREATEST(-1.0, effectiveness + ${delta})),
           updated_at = NOW()
@@ -437,6 +476,11 @@ export class TaskStore {
   }
 
   async close(): Promise<void> {
-    await this.sql.end();
+    if (this.isClosed) {
+      return;
+    }
+    this.isClosed = true;
+    await closeDb();
+    this.sql = null;
   }
 }

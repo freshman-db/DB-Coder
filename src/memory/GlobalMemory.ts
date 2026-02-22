@@ -1,5 +1,6 @@
-import postgres from 'postgres';
+import type postgres from 'postgres';
 import type { Memory, MemoryCategory } from './types.js';
+import { closeDb, getDb } from '../db.js';
 import { log } from '../utils/logger.js';
 
 const SCHEMA_SQL = `
@@ -24,20 +25,26 @@ CREATE INDEX IF NOT EXISTS idx_memories_fts ON memories USING gin (to_tsvector('
 `;
 
 export class GlobalMemory {
-  private sql: postgres.Sql;
+  private sql: postgres.Sql | null;
+  private isClosed = false;
 
   constructor(connectionString: string) {
-    this.sql = postgres(connectionString, {
-      idle_timeout: 120,
-      max_lifetime: 3600,
-      max: 10,
-    });
+    this.sql = getDb(connectionString);
+  }
+
+  /** Returns the live SQL connection, or throws if this instance has been closed. */
+  private getSql(): postgres.Sql {
+    if (this.isClosed || !this.sql) {
+      throw new Error('GlobalMemory is closed');
+    }
+    return this.sql;
   }
 
   async init(): Promise<void> {
-    await this.sql.unsafe(SCHEMA_SQL);
+    const sql = this.getSql();
+    await sql.unsafe(SCHEMA_SQL);
     // Update CHECK constraint to include 'failure' category (for existing tables)
-    await this.sql.unsafe(`
+    await sql.unsafe(`
       DO $$ BEGIN
         ALTER TABLE memories DROP CONSTRAINT IF EXISTS memories_category_check;
         ALTER TABLE memories ADD CONSTRAINT memories_category_check
@@ -49,7 +56,8 @@ export class GlobalMemory {
   }
 
   async search(query: string, limit = 10): Promise<Memory[]> {
-    const rows = await this.sql<Memory[]>`
+    const sql = this.getSql();
+    const rows = await sql<Memory[]>`
       SELECT *, ts_rank(to_tsvector('simple', title || ' ' || content),
         plainto_tsquery('simple', ${query})) * confidence AS relevance
       FROM memories
@@ -62,17 +70,19 @@ export class GlobalMemory {
   }
 
   async add(memory: Omit<Memory, 'id' | 'created_at' | 'updated_at'>): Promise<Memory> {
-    const [row] = await this.sql<Memory[]>`
+    const sql = this.getSql();
+    const [row] = await sql<Memory[]>`
       INSERT INTO memories (category, title, content, tags, source_project, confidence)
       VALUES (${memory.category}, ${memory.title}, ${memory.content},
-              ${JSON.stringify(memory.tags)}::jsonb, ${memory.source_project}, ${memory.confidence})
+              ${sql.json(memory.tags)}, ${memory.source_project}, ${memory.confidence})
       RETURNING *
     `;
     return row;
   }
 
   async updateConfidence(id: number, delta: number): Promise<void> {
-    await this.sql`
+    const sql = this.getSql();
+    await sql`
       UPDATE memories
       SET confidence = LEAST(1.0, GREATEST(0.0, confidence + ${delta})),
           updated_at = NOW()
@@ -81,7 +91,8 @@ export class GlobalMemory {
   }
 
   async getByCategory(category: MemoryCategory, limit = 20): Promise<Memory[]> {
-    return this.sql<Memory[]>`
+    const sql = this.getSql();
+    return sql<Memory[]>`
       SELECT * FROM memories
       WHERE category = ${category}
       ORDER BY confidence DESC, updated_at DESC
@@ -90,6 +101,7 @@ export class GlobalMemory {
   }
 
   async getRelevant(query: string, maxTokens = 2000): Promise<string> {
+    // No assertOpen() needed — delegates to search() which already guards
     const memories = await this.search(query, 10);
     let result = '';
     let approxTokens = 0;
@@ -104,6 +116,11 @@ export class GlobalMemory {
   }
 
   async close(): Promise<void> {
-    await this.sql.end();
+    if (this.isClosed) {
+      return;
+    }
+    this.isClosed = true;
+    await closeDb();
+    this.sql = null;
   }
 }
