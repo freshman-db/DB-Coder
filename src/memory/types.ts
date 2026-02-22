@@ -124,6 +124,7 @@ export interface AnalysisItem {
 }
 
 export type PlanReviewStatus = 'draft' | 'approved' | 'rejected' | 'expired';
+export type ChatStatus = 'chatting' | 'researching' | 'generating' | 'ready' | 'error';
 
 export interface PlanDraftAnnotation {
   task_index: number;
@@ -143,8 +144,19 @@ export interface PlanDraft {
   annotations: PlanDraftAnnotation[];
   scan_id: number | null;
   cost_usd: number;
+  chat_session_id: string | null;   // Agent SDK session ID (for resume)
+  chat_status: ChatStatus | null;   // chat lifecycle status
   created_at: Date;
   reviewed_at: Date | null;
+}
+
+export interface ChatMessage {
+  id: number;
+  session_id: number;      // references plan_drafts.id
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  metadata: Record<string, unknown>;
+  created_at: Date;
 }
 
 export interface AnalysisReport {

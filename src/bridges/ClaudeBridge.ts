@@ -1,10 +1,19 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import type { Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { CodingAgent, AgentResult, ReviewResult } from './CodingAgent.js';
 import type { ClaudeConfig } from '../config/types.js';
 import type { McpDiscovery, Phase } from '../mcp/McpDiscovery.js';
 import { buildCanUseTool, type QuestionHandler } from './MessageHandler.js';
 import { log } from '../utils/logger.js';
 import { tryParseReview } from '../utils/parse.js';
+import { AsyncChannel } from '../utils/AsyncChannel.js';
+
+export interface ChatSession {
+  readonly sessionId: string;
+  readonly query: Query;
+  readonly channel: AsyncChannel<SDKUserMessage>;
+  close(): void;
+}
 
 // Tools to remove from env to avoid nesting conflicts
 const CLAUDE_ENV_VARS = [
@@ -204,6 +213,61 @@ Output your review as JSON: { "passed": boolean, "issues": [{ "severity": "criti
         cost_usd: cost,
       };
     }
+  }
+
+  /**
+   * Create a persistent chat session backed by an Agent SDK process.
+   * The process stays alive, consuming messages from the AsyncChannel.
+   */
+  createChatSession(
+    cwd: string,
+    onMessage: (msg: SDKMessage) => void,
+    options?: { systemPrompt?: string },
+  ): ChatSession {
+    const channel = new AsyncChannel<SDKUserMessage>();
+    const mcpServers = this.mcpDiscovery?.getServersForPhase('plan') ?? {};
+    const plugins = this.mcpDiscovery?.getPluginsForPhase('plan') ?? [];
+
+    const q = query({
+      prompt: channel,
+      options: {
+        cwd,
+        tools: ['Read', 'Glob', 'Grep', 'Bash', 'Task'],
+        permissionMode: 'bypassPermissions',
+        systemPrompt: options?.systemPrompt,
+        model: this.config.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
+        env: cleanEnv(),
+        includePartialMessages: true,
+        ...(Object.keys(mcpServers).length > 0 && { mcpServers }),
+        ...(plugins.length > 0 && { plugins }),
+      },
+    });
+
+    let sessionId = '';
+
+    // Consume response stream in background
+    (async () => {
+      try {
+        for await (const msg of q) {
+          if ('session_id' in msg && msg.session_id) sessionId = msg.session_id;
+          onMessage(msg);
+        }
+      } catch (err) {
+        if (!channel.isClosed) {
+          log.error('ChatSession stream error', err);
+        }
+      }
+    })();
+
+    return {
+      get sessionId() { return sessionId; },
+      query: q,
+      channel,
+      close() {
+        channel.close();
+        q.close();
+      },
+    };
   }
 
   async isAvailable(): Promise<boolean> {

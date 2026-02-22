@@ -1,17 +1,23 @@
 import type { Brain } from './Brain.js';
-import type { ClaudeBridge } from '../bridges/ClaudeBridge.js';
+import type { ClaudeBridge, ChatSession } from '../bridges/ClaudeBridge.js';
 import type { CodexBridge } from '../bridges/CodexBridge.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { TaskQueue } from './TaskQueue.js';
 import type { Config } from '../config/Config.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { PlanRequest } from '../prompts/brain.js';
-import type { PlanDraft } from '../memory/types.js';
+import type { PlanDraft, ChatStatus } from '../memory/types.js';
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { log } from '../utils/logger.js';
 
 export type { PlanRequest };
 
+type SSEListener = (event: string, data: string) => void;
+
 export class PlanWorkflow {
+  private chatSessions = new Map<number, ChatSession>();
+  private sseListeners = new Map<number, Set<SSEListener>>();
+
   constructor(
     private brain: Brain,
     private claude: ClaudeBridge,
@@ -22,28 +28,184 @@ export class PlanWorkflow {
     private globalMemory: GlobalMemory,
   ) {}
 
-  /**
-   * Submit a plan request: research → generate plan draft.
-   * Returns the draft ID. The draft starts in 'draft' status awaiting approval.
-   */
+  // === SSE Management ===
+
+  addSSEListener(draftId: number, listener: SSEListener): () => void {
+    let set = this.sseListeners.get(draftId);
+    if (!set) {
+      set = new Set();
+      this.sseListeners.set(draftId, set);
+    }
+    set.add(listener);
+    return () => { set!.delete(listener); };
+  }
+
+  private emit(draftId: number, event: string, data: unknown): void {
+    const set = this.sseListeners.get(draftId);
+    if (!set) return;
+    const json = typeof data === 'string' ? data : JSON.stringify(data);
+    for (const listener of set) {
+      try { listener(event, json); } catch { /* ignore */ }
+    }
+  }
+
+  // === Chat Session Lifecycle ===
+
+  async createChatSession(projectPath: string): Promise<number> {
+    const draft = await this.taskStore.createChatSession(projectPath);
+    this.startSession(draft.id, projectPath);
+    log.info(`Plan chat session created: #${draft.id}`);
+    return draft.id;
+  }
+
+  private startSession(draftId: number, projectPath: string): void {
+    const session = this.claude.createChatSession(
+      projectPath,
+      (msg: SDKMessage) => this.handleSDKMessage(draftId, msg),
+      {
+        systemPrompt: {
+          type: 'preset' as const,
+          preset: 'claude_code' as const,
+          append: `你是一个专业的代码架构师和需求分析师。你正在帮助用户梳理和细化一个编程任务的需求。
+
+你的工作流程：
+1. 仔细理解用户的需求描述
+2. 使用可用的工具（Read, Glob, Grep, Bash）主动研究项目代码库
+3. 提出澄清问题，帮助用户明确需求细节
+4. 分析技术可行性和潜在风险
+5. 当需求足够清晰时，输出 [READY_TO_PLAN] 标记，表示可以生成正式计划
+
+请用中文回复用户。每次回复都应该推进需求的梳理进度。`,
+        } as any,
+      },
+    );
+    this.chatSessions.set(draftId, session);
+  }
+
+  private async handleSDKMessage(draftId: number, msg: SDKMessage): Promise<void> {
+    // Forward stream events (partial text) to SSE
+    if (msg.type === 'stream_event') {
+      this.emit(draftId, 'partial', msg);
+      return;
+    }
+
+    // assistant complete message — extract text
+    if (msg.type === 'assistant') {
+      const text = extractAssistantText(msg);
+      if (text) {
+        this.emit(draftId, 'assistant_text', { text });
+      }
+      return;
+    }
+
+    // result message — one round of conversation done
+    if (msg.type === 'result') {
+      const result = msg as any;
+      const text = result.result ?? '';
+      const cost = result.total_cost_usd ?? 0;
+
+      // Save assistant message to DB
+      if (text) {
+        await this.taskStore.addChatMessage(draftId, 'assistant', text, { cost });
+        this.emit(draftId, 'message', { role: 'assistant', content: text });
+      }
+      await this.taskStore.addDailyCost(cost);
+
+      // Save session ID for potential resume
+      const session = this.chatSessions.get(draftId);
+      if (session?.sessionId) {
+        await this.taskStore.updateChatSessionId(draftId, session.sessionId);
+      }
+
+      // Check [READY_TO_PLAN]
+      if (text.includes('[READY_TO_PLAN]')) {
+        await this.taskStore.updateChatStatus(draftId, 'ready');
+        this.emit(draftId, 'status', { status: 'ready' });
+      } else {
+        await this.taskStore.updateChatStatus(draftId, 'chatting');
+        this.emit(draftId, 'status', { status: 'chatting' });
+      }
+    }
+  }
+
+  async processUserMessage(draftId: number, userMessage: string): Promise<void> {
+    // Save user message to DB
+    await this.taskStore.addChatMessage(draftId, 'user', userMessage);
+    this.emit(draftId, 'message', { role: 'user', content: userMessage });
+
+    // Get or start ChatSession
+    let session = this.chatSessions.get(draftId);
+    if (!session) {
+      const draft = await this.taskStore.getPlanDraft(draftId);
+      if (!draft) throw new Error(`Plan draft #${draftId} not found`);
+      this.startSession(draftId, draft.project_path);
+      session = this.chatSessions.get(draftId)!;
+    }
+
+    // Update status
+    await this.taskStore.updateChatStatus(draftId, 'researching');
+    this.emit(draftId, 'status', { status: 'researching' });
+
+    // Push message to channel — Claude processes it automatically
+    session.channel.push({
+      type: 'user',
+      message: { role: 'user', content: userMessage },
+      parent_tool_use_id: null,
+      session_id: session.sessionId || '',
+    });
+  }
+
+  async generatePlan(draftId: number, projectPath: string): Promise<void> {
+    // Build description from chat history
+    const messages = await this.taskStore.getChatMessages(draftId);
+    const description = messages.filter(m => m.role === 'user').map(m => m.content).join('\n');
+
+    await this.taskStore.updateChatStatus(draftId, 'generating');
+    this.emit(draftId, 'status', { status: 'generating' });
+
+    try {
+      // Reuse existing research → plan pipeline
+      const request: PlanRequest = { description };
+      const { report, cost: rCost } = await this.brain.research(projectPath, request);
+      const { plan, markdown, reasoning, cost: pCost } = await this.brain.createPlanWithMarkdown(
+        projectPath, report, request,
+      );
+
+      await this.taskStore.addDailyCost(rCost + pCost);
+      await this.taskStore.updatePlanDraftPlan(draftId, { plan, markdown, reasoning, cost_usd: rCost + pCost });
+      await this.taskStore.updateChatStatus(draftId, 'ready');
+      await this.taskStore.updatePlanDraftStatus(draftId, 'draft');
+
+      this.emit(draftId, 'status', { status: 'ready' });
+      this.emit(draftId, 'plan_ready', { draftId, taskCount: plan.tasks.length });
+
+      log.info(`Plan generated for session #${draftId}: ${plan.tasks.length} tasks`);
+    } catch (err) {
+      await this.taskStore.updateChatStatus(draftId, 'error');
+      this.emit(draftId, 'status', { status: 'error', error: String(err) });
+      throw err;
+    } finally {
+      // Close persistent process
+      this.closeSession(draftId);
+    }
+  }
+
+  // === Original submit flow (kept for backward compat) ===
+
   async submitRequest(projectPath: string, request: PlanRequest): Promise<number> {
     log.info(`Plan request submitted: ${request.description.slice(0, 80)}`);
     let totalCost = 0;
 
-    // Phase 1: Deep research
     const { report: researchReport, cost: researchCost } = await this.brain.research(projectPath, request);
     totalCost += researchCost;
 
-    // Phase 2: Generate plan
     const { plan, markdown, reasoning, cost: planCost } = await this.brain.createPlanWithMarkdown(
       projectPath, researchReport, request,
     );
     totalCost += planCost;
 
-    // Track daily cost (no task ID for plan workflow)
     await this.taskStore.addDailyCost(totalCost);
 
-    // Save draft
     const draft = await this.taskStore.savePlanDraft({
       project_path: projectPath,
       plan,
@@ -57,9 +219,6 @@ export class PlanWorkflow {
     return draft.id;
   }
 
-  /**
-   * Execute an approved plan: enqueue tasks via TaskQueue.
-   */
   async executeApprovedPlan(draftId: number): Promise<void> {
     const draft = await this.taskStore.getPlanDraft(draftId);
     if (!draft) throw new Error(`Plan draft #${draftId} not found`);
@@ -74,10 +233,6 @@ export class PlanWorkflow {
     log.info(`Plan #${draftId} execution started: ${taskIds.length} tasks enqueued`);
   }
 
-  /**
-   * Revise a plan based on annotations: regenerate with feedback.
-   * Returns the new draft ID.
-   */
   async revisePlan(draftId: number): Promise<number> {
     const draft = await this.taskStore.getPlanDraft(draftId);
     if (!draft) throw new Error(`Plan draft #${draftId} not found`);
@@ -87,7 +242,6 @@ export class PlanWorkflow {
       .map(a => `Task #${a.task_index}: ${a.action}${a.comment ? ` — ${a.comment}` : ''}${a.modified_description ? ` → "${a.modified_description}"` : ''}`)
       .join('\n');
 
-    // Re-submit with feedback as additional constraint
     const originalPlan = draft.plan as { reasoning?: string };
     const request: PlanRequest = {
       description: `Revise the previous plan based on reviewer feedback.\n\nOriginal reasoning: ${originalPlan.reasoning ?? draft.reasoning}\n\nFeedback:\n${feedback}`,
@@ -95,10 +249,29 @@ export class PlanWorkflow {
     };
 
     const newDraftId = await this.submitRequest(draft.project_path, request);
-
-    // Mark old draft as expired
     await this.taskStore.updatePlanDraftStatus(draftId, 'expired');
 
     return newDraftId;
   }
+
+  // === Process lifecycle ===
+
+  closeSession(draftId: number): void {
+    this.chatSessions.get(draftId)?.close();
+    this.chatSessions.delete(draftId);
+    this.emit(draftId, 'status', { status: 'closed' });
+  }
+
+  shutdown(): void {
+    for (const [id] of this.chatSessions) {
+      this.closeSession(id);
+    }
+  }
+}
+
+function extractAssistantText(msg: any): string {
+  return (msg.message?.content ?? [])
+    .filter((b: any) => b.type === 'text')
+    .map((b: any) => b.text)
+    .join('');
 }

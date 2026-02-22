@@ -1,5 +1,5 @@
 import type postgres from 'postgres';
-import type { Task, TaskLog, TaskStatus, ScanResult, ReviewEvent, RecurringIssueCategory, PlanDraft, PlanReviewStatus, PlanDraftAnnotation, AnalysisReport } from './types.js';
+import type { Task, TaskLog, TaskStatus, ScanResult, ReviewEvent, RecurringIssueCategory, PlanDraft, PlanReviewStatus, PlanDraftAnnotation, AnalysisReport, ChatMessage, ChatStatus } from './types.js';
 import type { Adjustment, AdjustmentCategory, AdjustmentStatus, GoalProgress, ConfigProposal, ProposalStatus, PromptVersion, PromptName, PromptPatch, PromptMetrics, PromptVersionStatus } from '../evolution/types.js';
 import { closeDb, getDb } from '../db.js';
 import { log } from '../utils/logger.js';
@@ -150,6 +150,18 @@ CREATE TABLE IF NOT EXISTS analysis_reports (
   summary TEXT NOT NULL DEFAULT '',
   modules JSONB DEFAULT '[]',
   cost_usd NUMERIC(10,4) DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE plan_drafts ADD COLUMN IF NOT EXISTS chat_session_id TEXT;
+ALTER TABLE plan_drafts ADD COLUMN IF NOT EXISTS chat_status TEXT DEFAULT NULL;
+
+CREATE TABLE IF NOT EXISTS plan_chat_messages (
+  id SERIAL PRIMARY KEY,
+  session_id INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  metadata JSONB DEFAULT '{}',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `;
@@ -778,6 +790,68 @@ export class TaskStore {
         WHERE id = ${id}
       `;
     }
+  }
+
+  // --- Plan Chat Sessions ---
+
+  async createChatSession(projectPath: string): Promise<PlanDraft> {
+    const sql = this.getSql();
+    const [row] = await sql<PlanDraft[]>`
+      INSERT INTO plan_drafts (project_path, plan, chat_status, status)
+      VALUES (${projectPath}, '{"tasks":[]}'::jsonb, 'chatting', 'draft')
+      RETURNING *
+    `;
+    return row;
+  }
+
+  async addChatMessage(sessionId: number, role: string, content: string, metadata?: Record<string, unknown>): Promise<ChatMessage> {
+    const sql = this.getSql();
+    const [row] = await sql<ChatMessage[]>`
+      INSERT INTO plan_chat_messages (session_id, role, content, metadata)
+      VALUES (${sessionId}, ${role}, ${content}, ${sql.json((metadata ?? {}) as any)})
+      RETURNING *
+    `;
+    return row;
+  }
+
+  async getChatMessages(sessionId: number): Promise<ChatMessage[]> {
+    const sql = this.getSql();
+    return sql<ChatMessage[]>`
+      SELECT * FROM plan_chat_messages
+      WHERE session_id = ${sessionId}
+      ORDER BY created_at ASC
+    `;
+  }
+
+  async updateChatStatus(draftId: number, status: ChatStatus): Promise<void> {
+    const sql = this.getSql();
+    await sql`
+      UPDATE plan_drafts SET chat_status = ${status} WHERE id = ${draftId}
+    `;
+  }
+
+  async updateChatSessionId(draftId: number, chatSessionId: string): Promise<void> {
+    const sql = this.getSql();
+    await sql`
+      UPDATE plan_drafts SET chat_session_id = ${chatSessionId} WHERE id = ${draftId}
+    `;
+  }
+
+  async updatePlanDraftPlan(draftId: number, data: {
+    plan: unknown;
+    markdown: string;
+    reasoning: string;
+    cost_usd: number;
+  }): Promise<void> {
+    const sql = this.getSql();
+    await sql`
+      UPDATE plan_drafts
+      SET plan = ${sql.json(data.plan as any)},
+          markdown = ${data.markdown},
+          reasoning = ${data.reasoning},
+          cost_usd = ${data.cost_usd}
+      WHERE id = ${draftId}
+    `;
   }
 
   // --- Analysis Reports ---

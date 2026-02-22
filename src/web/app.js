@@ -162,7 +162,7 @@ const routes = [
   { pattern: /^#\/history$/, page: 'history', title: '历史记录' },
   { pattern: /^#\/logs$/, page: 'logs', title: '运行日志' },
   { pattern: /^#\/memory$/, page: 'memory', title: '记忆检索' },
-  { pattern: /^#\/plans$/, page: 'plans', title: '计划审批' },
+  { pattern: /^#\/plans$/, page: 'plans', title: '计划对话' },
   { pattern: /^#\/plans\/(.+)$/, page: 'planDetail', title: '计划详情' },
   { pattern: /^#\/analysis$/, page: 'analysis', title: '代码分析' },
   { pattern: /^#\/analysis\/(.+)$/, page: 'analysisDetail', title: '分析报告' },
@@ -211,6 +211,10 @@ function cleanup() {
   if (state.logAbort) {
     state.logAbort.abort();
     state.logAbort = null;
+  }
+  if (state.chatEventSource) {
+    state.chatEventSource.abort();
+    state.chatEventSource = null;
   }
 }
 
@@ -294,16 +298,6 @@ async function renderDashboard() {
         <div class="card-label">巡逻模式</div>
         <div class="card-sub" style="margin:8px 0;">自动 scan → plan → execute → review 循环</div>
         ${patrolBtn}
-      </div>
-      <div class="card mode-card" style="cursor:pointer;" onclick="location.hash='#/plans'">
-        <div class="card-label">计划</div>
-        <div class="card-sub" style="margin:8px 0;">需求输入 → 深度研究 → 生成计划 → 审批</div>
-        <button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); showPlanForm()">新建计划</button>
-      </div>
-      <div class="card mode-card" style="cursor:pointer;" onclick="location.hash='#/analysis'">
-        <div class="card-label">分析</div>
-        <div class="card-sub" style="margin:8px 0;">按模块深度分析代码库</div>
-        <button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); showAnalysisForm()">发起分析</button>
       </div>
     </div>
 
@@ -1157,12 +1151,20 @@ async function submitTask() {
   }
 }
 
-// ---- 计划审批页面 ----
+// ---- 计划对话页面 ----
 const planStatusLabels = {
   draft: { label: '草案', badge: 'pending' },
   approved: { label: '已批准', badge: 'done' },
   rejected: { label: '已拒绝', badge: 'failed' },
   expired: { label: '已过期', badge: 'paused' },
+};
+
+const chatStatusLabels = {
+  chatting: { label: '对话中', badge: 'running' },
+  researching: { label: '研究中', badge: 'running' },
+  generating: { label: '生成计划中', badge: 'running' },
+  ready: { label: '计划就绪', badge: 'done' },
+  error: { label: '出错', badge: 'failed' },
 };
 
 async function renderPlans() {
@@ -1171,26 +1173,37 @@ async function renderPlans() {
 
   content.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-      <h2 style="margin:0;">计划审批</h2>
-      <button class="btn btn-primary" onclick="showPlanForm()">+ 新建计划</button>
+      <h2 style="margin:0;">计划对话</h2>
+      <button class="btn btn-primary" onclick="startNewChat()">+ 开始新对话</button>
     </div>
     <div class="list-container" id="planList">
-      ${!drafts || drafts.length === 0 ? '<div class="empty-state"><p>暂无计划草案</p></div>' :
+      ${!drafts || drafts.length === 0 ? '<div class="empty-state"><p>暂无计划会话，点击上方按钮开始</p></div>' :
         drafts.map(d => {
-          const st = planStatusLabels[d.status] || planStatusLabels.draft;
+          const chatSt = chatStatusLabels[d.chat_status];
+          const planSt = planStatusLabels[d.status] || planStatusLabels.draft;
+          const st = chatSt || planSt;
           const taskCount = d.plan?.tasks?.length ?? 0;
+          const title = d.chat_status
+            ? (d.markdown || '').split('\\n')[0].slice(0, 80) || '对话 #' + d.id
+            : (d.markdown || d.reasoning || '').split('\\n')[0].slice(0, 80) || '计划 #' + d.id;
           return `
             <div class="list-item" onclick="location.hash='#/plans/${d.id}'">
               <span class="badge badge-${st.badge}">${st.label}</span>
-              <span class="list-item-title" style="flex:1;">${escapeHtml((d.markdown || d.reasoning || '').split('\n')[0].slice(0, 80) || '计划 #' + d.id)}</span>
-              <span style="color:var(--text-muted);font-size:12px;">${taskCount} 任务</span>
+              <span class="list-item-title" style="flex:1;">${escapeHtml(title)}</span>
+              ${taskCount > 0 ? `<span style="color:var(--text-muted);font-size:12px;">${taskCount} 任务</span>` : ''}
               <span style="color:var(--text-muted);font-size:12px;min-width:50px;text-align:right;">$${Number(d.cost_usd || 0).toFixed(2)}</span>
               <span style="color:var(--text-muted);font-size:12px;min-width:70px;text-align:right;">${timeAgo(d.created_at)}</span>
             </div>`;
         }).join('')}
     </div>
   `;
+}
 
+async function startNewChat() {
+  const result = await api('/plans/chat', { method: 'POST', body: '{}' });
+  if (result?.id) {
+    location.hash = `#/plans/${result.id}`;
+  }
 }
 
 async function renderPlanDetail(id) {
@@ -1198,6 +1211,72 @@ async function renderPlanDetail(id) {
   const draft = await api(`/plans/${id}`);
   if (!draft) { content.innerHTML = '<div class="empty-state"><p>计划不存在</p></div>'; return; }
 
+  // Chat-based sessions show chat UI; legacy drafts show plan detail
+  const isChatSession = !!draft.chat_status;
+  const isInChat = isChatSession && ['chatting', 'researching', 'generating'].includes(draft.chat_status);
+
+  if (isInChat) {
+    renderChatView(id, draft);
+  } else if (isChatSession && draft.chat_status === 'ready' && draft.plan?.tasks?.length > 0) {
+    renderPlanReviewView(id, draft);
+  } else if (!isChatSession || draft.status !== 'draft' || draft.plan?.tasks?.length > 0) {
+    renderPlanReviewView(id, draft);
+  } else {
+    renderChatView(id, draft);
+  }
+}
+
+async function renderChatView(id, draft) {
+  const content = $('#content');
+  const chatSt = chatStatusLabels[draft.chat_status] || chatStatusLabels.chatting;
+
+  content.innerHTML = `
+    <div class="chat-container">
+      <div class="chat-status-bar">
+        <a href="#/plans" style="font-size:12px;color:var(--text-muted);text-decoration:none;">&larr; 返回列表</a>
+        <span style="flex:1;"></span>
+        <span class="badge badge-${chatSt.badge}" id="chatStatusBadge">${chatSt.label}</span>
+        <button class="btn btn-sm btn-success" id="btnGeneratePlan" style="display:none;" onclick="generatePlanFromChat(${id})">生成计划</button>
+        <button class="btn btn-sm btn-secondary" onclick="closeChatSession(${id})">关闭会话</button>
+      </div>
+      <div class="chat-messages" id="chatMessages"></div>
+      <div class="chat-input-area">
+        <textarea class="chat-input" id="chatInput" placeholder="描述你的需求，或继续对话..." rows="2"></textarea>
+        <button class="btn btn-primary chat-send-btn" id="chatSendBtn" onclick="sendChatMessage(${id})">发送</button>
+      </div>
+    </div>
+  `;
+
+  // Load existing messages
+  const messages = await api(`/plans/${id}/messages`);
+  if (messages && messages.length > 0) {
+    messages.forEach(m => appendChatBubble(m.role, m.content));
+  }
+
+  // Show generate button if ready
+  if (draft.chat_status === 'ready') {
+    const btn = $('#btnGeneratePlan');
+    if (btn) btn.style.display = '';
+  }
+
+  // Setup SSE
+  setupChatSSE(id);
+
+  // Setup Enter key handling
+  const input = $('#chatInput');
+  if (input) {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendChatMessage(id);
+      }
+    });
+    input.focus();
+  }
+}
+
+function renderPlanReviewView(id, draft) {
+  const content = $('#content');
   const st = planStatusLabels[draft.status] || planStatusLabels.draft;
   const tasks = draft.plan?.tasks || [];
 
@@ -1243,6 +1322,174 @@ async function renderPlanDetail(id) {
       ${draft.reviewed_at ? ' | 审核: ' + timeAgo(draft.reviewed_at) : ''}
     </div>
   `;
+}
+
+// ---- Chat helpers ----
+
+function appendChatBubble(role, content) {
+  const container = $('#chatMessages');
+  if (!container) return;
+  const bubble = document.createElement('div');
+  bubble.className = `chat-bubble ${role}`;
+  bubble.innerHTML = `
+    <div class="chat-bubble-role">${role === 'user' ? '你' : role === 'assistant' ? 'Claude' : '系统'}</div>
+    <div class="chat-bubble-content">${escapeHtml(content)}</div>
+  `;
+  container.appendChild(bubble);
+  container.scrollTop = container.scrollHeight;
+}
+
+function getOrCreateStreamingBubble() {
+  let bubble = $('#chatMessages .chat-bubble.assistant.streaming');
+  if (!bubble) {
+    const container = $('#chatMessages');
+    if (!container) return null;
+    bubble = document.createElement('div');
+    bubble.className = 'chat-bubble assistant streaming';
+    bubble.innerHTML = `
+      <div class="chat-bubble-role">Claude</div>
+      <div class="chat-bubble-content"><span class="typing-indicator"><span></span><span></span><span></span></span></div>
+    `;
+    container.appendChild(bubble);
+    container.scrollTop = container.scrollHeight;
+  }
+  return bubble;
+}
+
+function finalizeStreamingBubble(text) {
+  const bubble = $('#chatMessages .chat-bubble.assistant.streaming');
+  if (bubble) {
+    bubble.classList.remove('streaming');
+    const contentEl = bubble.querySelector('.chat-bubble-content');
+    if (contentEl && text) contentEl.textContent = text;
+  }
+}
+
+async function setupChatSSE(draftId) {
+  // Close existing
+  if (state.chatEventSource) {
+    state.chatEventSource.abort();
+    state.chatEventSource = null;
+  }
+
+  const controller = new AbortController();
+  state.chatEventSource = controller;
+
+  try {
+    const res = await fetch(`/api/plans/${draftId}/stream`, {
+      headers: { ...authHeaders(), Accept: 'text/event-stream' },
+      signal: controller.signal,
+    });
+
+    if (!res.ok || !res.body) return;
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      let currentEvent = '';
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          currentEvent = line.slice(7).trim();
+        } else if (line.startsWith('data: ')) {
+          const payload = line.slice(6);
+          handleChatSSEEvent(currentEvent || 'message', payload, draftId);
+          currentEvent = '';
+        } else if (line.trim() === '') {
+          currentEvent = '';
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    // Reconnect after delay
+    setTimeout(() => {
+      if (state.currentPage === 'planDetail') setupChatSSE(draftId);
+    }, 5000);
+  }
+}
+
+function handleChatSSEEvent(event, payload, draftId) {
+  let data;
+  try { data = JSON.parse(payload); } catch { return; }
+
+  if (event === 'message') {
+    if (data.role === 'assistant') {
+      finalizeStreamingBubble(data.content);
+    }
+  } else if (event === 'partial') {
+    getOrCreateStreamingBubble();
+    const container = $('#chatMessages');
+    if (container) container.scrollTop = container.scrollHeight;
+  } else if (event === 'assistant_text') {
+    const bubble = getOrCreateStreamingBubble();
+    if (bubble) {
+      const contentEl = bubble.querySelector('.chat-bubble-content');
+      if (contentEl) contentEl.textContent = data.text;
+      const container = $('#chatMessages');
+      if (container) container.scrollTop = container.scrollHeight;
+    }
+  } else if (event === 'status') {
+    const badge = $('#chatStatusBadge');
+    const st = chatStatusLabels[data.status];
+    if (badge && st) {
+      badge.textContent = st.label;
+      badge.className = `badge badge-${st.badge}`;
+    }
+    const sendBtn = $('#chatSendBtn');
+    const input = $('#chatInput');
+    if (data.status === 'researching' || data.status === 'generating') {
+      if (sendBtn) sendBtn.disabled = true;
+      if (input) input.disabled = true;
+    } else {
+      if (sendBtn) sendBtn.disabled = false;
+      if (input) input.disabled = false;
+    }
+    const genBtn = $('#btnGeneratePlan');
+    if (genBtn) genBtn.style.display = data.status === 'ready' ? '' : 'none';
+    if (data.status === 'ready') {
+      finalizeStreamingBubble('');
+    }
+  } else if (event === 'plan_ready') {
+    toast('计划已生成');
+    cleanup();
+    renderPlanDetail(draftId);
+  }
+}
+
+async function sendChatMessage(draftId) {
+  const input = $('#chatInput');
+  if (!input) return;
+  const msg = input.value.trim();
+  if (!msg) return;
+
+  input.value = '';
+  appendChatBubble('user', msg);
+
+  await api(`/plans/${draftId}/message`, {
+    method: 'POST',
+    body: JSON.stringify({ message: msg }),
+  });
+}
+
+async function generatePlanFromChat(draftId) {
+  const btn = $('#btnGeneratePlan');
+  if (btn) { btn.disabled = true; btn.textContent = '生成中...'; }
+  await api(`/plans/${draftId}/generate`, { method: 'POST', body: '{}' });
+}
+
+async function closeChatSession(draftId) {
+  await api(`/plans/${draftId}/close`, { method: 'POST', body: '{}' });
+  toast('会话已关闭');
+  location.hash = '#/plans';
 }
 
 async function approvePlan(id) {

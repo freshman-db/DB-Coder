@@ -361,24 +361,69 @@ route('POST', '/api/patrol/stop', async (_req, res, ctx) => {
   }
 });
 
-// --- Plans (independent operations, no mode check) ---
-route('POST', '/api/plans', async (req, res, ctx) => {
+// --- Plans: Chat-based workflow ---
+route('POST', '/api/plans/chat', async (_req, res, ctx) => {
   if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
+  const id = await ctx.planWorkflow.createChatSession(ctx.config.projectPath);
+  json(res, { id }, 201);
+});
+
+route('POST', '/api/plans/:id/message', async (req, res, ctx, params) => {
+  if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
   const body = await readBody(req) as Record<string, unknown>;
-  const description = body.description;
-  if (typeof description !== 'string' || description.trim().length === 0) {
-    json(res, { error: 'description is required' }, 400);
+  const message = body.message;
+  if (typeof message !== 'string' || message.trim().length === 0) {
+    json(res, { error: 'message is required' }, 400);
     return;
   }
-  const request: PlanRequest = {
-    description: description.trim(),
-    goals: Array.isArray(body.goals) ? body.goals.filter((g): g is string => typeof g === 'string') : undefined,
-    constraints: Array.isArray(body.constraints) ? body.constraints.filter((c): c is string => typeof c === 'string') : undefined,
-    targetModules: Array.isArray(body.targetModules) ? body.targetModules.filter((m): m is string => typeof m === 'string') : undefined,
-  };
-  const submitPromise = ctx.planWorkflow.submitRequest(ctx.config.projectPath, request);
+  ctx.planWorkflow.processUserMessage(id, message.trim())
+    .catch(err => log.error(`Chat message processing failed for plan #${id}`, err));
+  json(res, { ok: true }, 202);
+});
+
+route('GET', '/api/plans/:id/messages', async (_req, res, ctx, params) => {
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  const messages = await ctx.taskStore.getChatMessages(id);
+  json(res, messages);
+});
+
+route('GET', '/api/plans/:id/stream', async (req, res, ctx, params) => {
+  if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+  });
+
+  const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 15000);
+  const remove = ctx.planWorkflow.addSSEListener(id, (event, data) => {
+    res.write(`event: ${event}\ndata: ${data}\n\n`);
+  });
+  req.on('close', () => { clearInterval(heartbeat); remove(); });
+});
+
+route('POST', '/api/plans/:id/generate', async (req, res, ctx, params) => {
+  if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  ctx.planWorkflow.generatePlan(id, ctx.config.projectPath)
+    .catch(err => log.error(`Plan generation failed for #${id}`, err));
   json(res, { ok: true, message: 'Plan generation started' }, 202);
-  submitPromise.catch(err => log.error('Plan submission failed', err));
+});
+
+route('POST', '/api/plans/:id/close', async (_req, res, ctx, params) => {
+  if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  ctx.planWorkflow.closeSession(id);
+  json(res, { ok: true });
 });
 
 route('GET', '/api/plans', async (req, res, ctx) => {
