@@ -8,16 +8,19 @@ import type { HealthTrend, PromptVersion } from './types.js';
 import type { TrendAnalyzer } from './TrendAnalyzer.js';
 import { EvolutionEngine } from './EvolutionEngine.js';
 
+type MetaReflectData = {
+  reviewEvents: ReviewEvent[];
+  recentTasks: Task[];
+  healthTrend: HealthTrend | null;
+  activeVersions: PromptVersion[];
+  passRate: number;
+  avgCost: number;
+  issueCategories: RecurringIssueCategory[];
+};
+
 type EvolutionEngineInternals = {
-  collectMetaReflectData(projectPath: string): Promise<{
-    reviewEvents: ReviewEvent[];
-    recentTasks: Task[];
-    healthTrend: HealthTrend | null;
-    activeVersions: PromptVersion[];
-    passRate: number;
-    avgCost: number;
-    issueCategories: RecurringIssueCategory[];
-  }>;
+  collectMetaReflectData(projectPath: string): Promise<MetaReflectData>;
+  buildMetaReflectPrompt(data: MetaReflectData): string;
 };
 
 function makeTask(index: number, cost: number): Task {
@@ -191,6 +194,98 @@ describe('EvolutionEngine.collectMetaReflectData', () => {
     await assert.rejects(
       internals.collectMetaReflectData('   '),
       /projectPath is required for meta-reflection/,
+    );
+  });
+});
+
+describe('EvolutionEngine.buildMetaReflectPrompt', () => {
+  test('builds a prompt with metrics, active patches, and recent failures', () => {
+    const data: MetaReflectData = {
+      reviewEvents: [
+        {
+          id: 1,
+          task_id: 'task-12345678',
+          attempt: 1,
+          passed: false,
+          must_fix_count: 2,
+          should_fix_count: 1,
+          issue_categories: ['null-safety', 'types'],
+          fix_agent: null,
+          duration_ms: 50,
+          cost_usd: 0.02,
+          created_at: new Date('2026-01-01T00:00:00.000Z'),
+        },
+        {
+          id: 2,
+          task_id: 'task-99999999',
+          attempt: 1,
+          passed: true,
+          must_fix_count: 0,
+          should_fix_count: 0,
+          issue_categories: [],
+          fix_agent: null,
+          duration_ms: 40,
+          cost_usd: 0.01,
+          created_at: new Date('2026-01-01T00:01:00.000Z'),
+        },
+      ],
+      recentTasks: [makeTask(1, 1.11), makeTask(2, 2.22)],
+      healthTrend: {
+        current: 77,
+        previous: 80,
+        delta: -3,
+        direction: 'degrading',
+        dataPoints: 10,
+      },
+      activeVersions: [
+        {
+          id: 10,
+          project_path: '/repo',
+          prompt_name: 'scan',
+          version: 3,
+          patches: [{ op: 'append', content: 'Validate nulls.', reason: 'Reduce runtime errors.' }],
+          rationale: 'Guard null access',
+          confidence: 0.74,
+          effectiveness: 0.236,
+          status: 'active',
+          baseline_metrics: null,
+          current_metrics: null,
+          tasks_evaluated: 5,
+          activated_at: new Date('2026-01-02T00:00:00.000Z'),
+          created_at: new Date('2026-01-01T00:00:00.000Z'),
+          updated_at: new Date('2026-01-02T00:00:00.000Z'),
+        },
+      ],
+      passRate: 0.5,
+      avgCost: 0.6789,
+      issueCategories: [{ category: 'null-safety', count: 4 }],
+    };
+
+    const engine = createEvolutionEngine({}, {});
+    const internals = engine as unknown as EvolutionEngineInternals;
+    const prompt = internals.buildMetaReflectPrompt(data);
+
+    assert.match(prompt, /Review pass rate: 50\.0%/);
+    assert.match(prompt, /Average task cost: \$0\.6789/);
+    assert.match(prompt, /Health trend: degrading \(77\/100\)/);
+    assert.match(prompt, /Recurring issue categories: null-safety\(4\)/);
+    assert.match(prompt, /Total completed tasks: 2/);
+    assert.match(prompt, /- scan v3: effectiveness=0\.24, tasks=5/);
+    assert.match(prompt, /Task task-123: must_fix=2, should_fix=1, categories=\["null-safety","types"\]/);
+  });
+
+  test('throws when data is nullish', () => {
+    const engine = createEvolutionEngine({}, {});
+    const internals = engine as unknown as EvolutionEngineInternals;
+
+    assert.throws(
+      () => internals.buildMetaReflectPrompt(undefined as unknown as MetaReflectData),
+      /meta-reflect data is required to build prompt/,
+    );
+
+    assert.throws(
+      () => internals.buildMetaReflectPrompt(null as unknown as MetaReflectData),
+      /meta-reflect data is required to build prompt/,
     );
   });
 });

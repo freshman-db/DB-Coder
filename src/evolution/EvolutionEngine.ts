@@ -250,61 +250,12 @@ export class EvolutionEngine {
     log.info('Starting meta-reflect: analyzing prompt effectiveness...');
 
     // 1. Collect data and compute metrics
-    const {
-      reviewEvents,
-      recentTasks,
-      healthTrend,
-      activeVersions,
-      passRate,
-      avgCost,
-      issueCategories,
-    } = await this.collectMetaReflectData(projectPath);
+    const data = await this.collectMetaReflectData(projectPath);
+    const { reviewEvents, passRate, avgCost, issueCategories } = data;
     const totalReviews = reviewEvents.length;
 
     // 2. Build meta-reflection prompt
-    const activeVersionsSummary = activeVersions.length > 0
-      ? activeVersions.map(v => `- ${v.prompt_name} v${v.version}: effectiveness=${v.effectiveness.toFixed(2)}, tasks=${v.tasks_evaluated}`).join('\n')
-      : 'No active prompt patches.';
-
-    const metaPrompt = `You are analyzing the effectiveness of an AI coding agent's prompt templates.
-
-## Current Performance Metrics
-- Review pass rate: ${(passRate * 100).toFixed(1)}%
-- Average task cost: $${avgCost.toFixed(4)}
-- Health trend: ${healthTrend?.direction ?? 'unknown'} (${healthTrend?.current ?? 'N/A'}/100)
-- Recurring issue categories: ${issueCategories.map(c => `${c.category}(${c.count})`).join(', ') || 'none'}
-- Total completed tasks: ${recentTasks.length}
-
-## Active Prompt Patches
-${activeVersionsSummary}
-
-## Recent Review Failures
-${reviewEvents.filter(e => !e.passed).slice(0, 5).map(e => `- Task ${e.task_id.slice(0, 8)}: must_fix=${e.must_fix_count}, should_fix=${e.should_fix_count}, categories=${JSON.stringify(e.issue_categories)}`).join('\n') || 'None'}
-
-## Available Prompt Names
-brain_system, scan, plan, reflect, executor, reviewer
-
-## Instructions
-Analyze the data and propose 0-3 prompt patches to improve performance.
-Each patch modifies a section of a prompt template using these operations:
-- prepend: Add content before the prompt
-- append: Add content after the prompt
-- replace_section: Replace content under a ## heading
-- remove_section: Remove a ## heading and its content
-
-Only propose patches when there's clear evidence of a problem.
-Focus on the most impactful changes.
-
-Output as JSON:
-{
-  "patches": [{
-    "promptName": "scan"|"plan"|"reflect"|"executor"|"reviewer"|"brain_system",
-    "patches": [{ "op": "prepend"|"append"|"replace_section"|"remove_section", "section": string|null, "content": string, "reason": string }],
-    "rationale": string,
-    "confidence": number (0-1)
-  }],
-  "analysis": string
-}`;
+    const metaPrompt = this.buildMetaReflectPrompt(data);
 
     try {
       const result = await claude.plan(metaPrompt, projectPath, { maxTurns: 5 });
@@ -385,6 +336,82 @@ Output as JSON:
       avgCost,
       issueCategories,
     };
+  }
+
+  private buildMetaReflectPrompt(data: MetaReflectData): string {
+    if (!data || typeof data !== 'object') {
+      throw new Error('meta-reflect data is required to build prompt');
+    }
+
+    const reviewEvents = Array.isArray(data.reviewEvents) ? data.reviewEvents : [];
+    const recentTasks = Array.isArray(data.recentTasks) ? data.recentTasks : [];
+    const healthTrend = data.healthTrend ?? null;
+    const activeVersions = Array.isArray(data.activeVersions) ? data.activeVersions : [];
+    const passRate = Number.isFinite(data.passRate) ? data.passRate : 0;
+    const avgCost = Number.isFinite(data.avgCost) ? data.avgCost : 0;
+    const issueCategories = Array.isArray(data.issueCategories) ? data.issueCategories : [];
+
+    const activeVersionsSummary = activeVersions.length > 0
+      ? activeVersions
+        .map(version => `- ${version.prompt_name} v${version.version}: effectiveness=${Number(version.effectiveness ?? 0).toFixed(2)}, tasks=${version.tasks_evaluated ?? 0}`)
+        .join('\n')
+      : 'No active prompt patches.';
+
+    const issueCategorySummary = issueCategories
+      .map(category => `${category?.category ?? 'unknown'}(${Number(category?.count ?? 0)})`)
+      .join(', ') || 'none';
+
+    const failureSummary = reviewEvents
+      .filter(event => event?.passed === false)
+      .slice(0, 5)
+      .map((event) => {
+        const taskId = typeof event?.task_id === 'string' ? event.task_id.slice(0, 8) : 'unknown';
+        const mustFixCount = Number(event?.must_fix_count ?? 0);
+        const shouldFixCount = Number(event?.should_fix_count ?? 0);
+        const issueList = JSON.stringify(event?.issue_categories ?? []);
+        return `- Task ${taskId}: must_fix=${mustFixCount}, should_fix=${shouldFixCount}, categories=${issueList}`;
+      })
+      .join('\n') || 'None';
+
+    return `You are analyzing the effectiveness of an AI coding agent's prompt templates.
+
+## Current Performance Metrics
+- Review pass rate: ${(passRate * 100).toFixed(1)}%
+- Average task cost: $${avgCost.toFixed(4)}
+- Health trend: ${healthTrend?.direction ?? 'unknown'} (${healthTrend?.current ?? 'N/A'}/100)
+- Recurring issue categories: ${issueCategorySummary}
+- Total completed tasks: ${recentTasks.length}
+
+## Active Prompt Patches
+${activeVersionsSummary}
+
+## Recent Review Failures
+${failureSummary}
+
+## Available Prompt Names
+brain_system, scan, plan, reflect, executor, reviewer
+
+## Instructions
+Analyze the data and propose 0-3 prompt patches to improve performance.
+Each patch modifies a section of a prompt template using these operations:
+- prepend: Add content before the prompt
+- append: Add content after the prompt
+- replace_section: Replace content under a ## heading
+- remove_section: Remove a ## heading and its content
+
+Only propose patches when there's clear evidence of a problem.
+Focus on the most impactful changes.
+
+Output as JSON:
+{
+  "patches": [{
+    "promptName": "scan"|"plan"|"reflect"|"executor"|"reviewer"|"brain_system",
+    "patches": [{ "op": "prepend"|"append"|"replace_section"|"remove_section", "section": string|null, "content": string, "reason": string }],
+    "rationale": string,
+    "confidence": number (0-1)
+  }],
+  "analysis": string
+}`;
   }
 
   /**
