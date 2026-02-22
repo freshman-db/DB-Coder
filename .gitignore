@@ -3,3 +3,18 @@ dist/
 *.log
 *.tsbuildinfo
 .env
+
+# Serena cache
+.serena/cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+
+# Coverage
+coverage/
