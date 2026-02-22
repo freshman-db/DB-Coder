@@ -83,6 +83,14 @@ Output as JSON:
     assert.equal(result, base);
   });
 
+  it('should return base for unknown patch operation', () => {
+    const patches = [
+      { op: 'unknown', content: 'ignored', reason: 'test' },
+    ] as unknown as PromptPatch[];
+    const result = applyPatches(base, patches);
+    assert.equal(result, base);
+  });
+
   it('should return base on empty patches array', () => {
     const result = applyPatches(base, []);
     assert.equal(result, base);

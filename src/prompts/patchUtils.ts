@@ -43,7 +43,7 @@ function applySinglePatch(text: string, patch: PromptPatch): string {
     }
 
     default:
-      throw new Error(`Unknown patch op: ${(patch as any).op}`);
+      throw new Error(`Unknown patch op: ${(patch as { op: string }).op}`);
   }
 }
 
