@@ -233,6 +233,14 @@ function extractCost(events: JsonlEvent[], pricing?: TokenPricing): number {
         lastPartialCost = usagePartial;
       }
     }
+
+    const textCosts = extractCostFromEventText(e);
+    if (textCosts.total !== null) {
+      lastTotalCost = textCosts.total;
+    }
+    if (textCosts.partial !== null) {
+      lastPartialCost = textCosts.partial;
+    }
   }
 
   if (lastTotalCost > 0) return lastTotalCost;
@@ -257,6 +265,72 @@ function extractCost(events: JsonlEvent[], pricing?: TokenPricing): number {
   }
 
   return 0;
+}
+
+function extractCostFromEventText(event: JsonlEvent): { total: number | null; partial: number | null } {
+  const strings: string[] = [];
+  collectStringValues(event, strings);
+
+  let total: number | null = null;
+  let partial: number | null = null;
+
+  for (const text of strings) {
+    const totalMatch = extractLastPositiveMatch(text, '\\btotal[_\\s-]*cost(?:[_\\s-]*usd)?\\b\\s*[:=]\\s*\\$?\\s*(-?\\d*\\.?\\d+)');
+    if (totalMatch !== null) {
+      total = totalMatch;
+    }
+
+    const partialMatch = extractLastPositiveMatch(text, '\\bcost(?:[_\\s-]*usd)?\\b\\s*[:=]\\s*\\$?\\s*(-?\\d*\\.?\\d+)');
+    if (partialMatch !== null) {
+      partial = partialMatch;
+    }
+  }
+
+  return { total, partial };
+}
+
+function extractLastPositiveMatch(text: string, pattern: string): number | null {
+  let lastValue: number | null = null;
+
+  for (const match of text.matchAll(new RegExp(pattern, 'gi'))) {
+    const maybeValue = Number(match[1]);
+    if (Number.isFinite(maybeValue) && maybeValue > 0) {
+      lastValue = maybeValue;
+    }
+  }
+
+  return lastValue;
+}
+
+function collectStringValues(
+  value: unknown,
+  output: string[],
+  seen: Set<object> = new Set<object>(),
+): void {
+  if (typeof value === 'string') {
+    output.push(value);
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectStringValues(item, output, seen);
+    }
+    return;
+  }
+
+  if (typeof value !== 'object' || value === null) {
+    return;
+  }
+
+  if (seen.has(value)) {
+    return;
+  }
+  seen.add(value);
+
+  for (const nested of Object.values(value as Record<string, unknown>)) {
+    collectStringValues(nested, output, seen);
+  }
 }
 
 function firstPositiveNumber(values: unknown[]): number | null {
