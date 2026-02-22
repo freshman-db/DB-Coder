@@ -104,6 +104,30 @@ test('closeSession clears stale SSE listeners even when no chat session exists',
   assert.equal(internals.sseListeners.has(77), false);
 });
 
+test('closeSession removes SSE listener map entries and prevents callbacks after cleanup', () => {
+  const workflow = createWorkflow();
+  const internals = getInternals(workflow);
+  const receivedEvents: string[] = [];
+
+  workflow.addSSEListener(88, event => {
+    receivedEvents.push(event);
+  });
+
+  assert.equal(internals.sseListeners.size, 1);
+
+  workflow.closeSession(88);
+
+  assert.equal(internals.sseListeners.size, 0);
+
+  (workflow as unknown as { emit: (draftId: number, event: string, data: unknown) => void }).emit(
+    88,
+    'status',
+    { status: 'chatting' },
+  );
+
+  assert.deepEqual(receivedEvents, []);
+});
+
 test('processUserMessage sends user message through existing chat session', async () => {
   const addChatMessageCalls: Array<[number, string, string]> = [];
   const updateStatusCalls: Array<[number, string]> = [];
