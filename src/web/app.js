@@ -11,6 +11,8 @@ const state = {
   logAbort: null, // AbortController for fetch-based SSE
   logLevel: 'info',
   currentPage: '',
+  taskPage: 1,
+  historyPage: 1,
 };
 
 // ---- 工具函数 ----
@@ -278,17 +280,17 @@ async function renderDashboard() {
     </div>
   `;
 
-  // 加载最近任务
-  const tasks = await api('/tasks');
+  // 加载最近任务 (API now returns {tasks, total, page, pageSize})
+  const taskData = await api('/tasks?page=1&pageSize=5');
   const taskList = $('#dashboardTasks');
-  if (tasks && Array.isArray(tasks) && tasks.length > 0) {
-    const recent = tasks.slice(0, 5);
+  const recentTasks = taskData?.tasks ?? taskData;
+  if (recentTasks && Array.isArray(recentTasks) && recentTasks.length > 0) {
     taskList.innerHTML = `
       <div class="list-header">
         <span>近期任务</span>
         <a href="#/tasks" style="font-size:12px;">查看全部 &rarr;</a>
       </div>
-      ${recent.map((t) => renderTaskRow(t)).join('')}
+      ${recentTasks.map((t) => renderTaskRow(t)).join('')}
     `;
   } else {
     taskList.innerHTML = `
@@ -326,11 +328,19 @@ function renderTaskRow(t) {
 }
 
 // ---- 任务列表 ----
+const TASK_PAGE_SIZE = 20;
+
 async function renderTasks() {
   const content = $('#content');
-  const tasks = await api('/tasks');
+  const page = state.taskPage || 1;
+  const data = await api(`/tasks?page=${page}&pageSize=${TASK_PAGE_SIZE}`);
 
-  if (!tasks || !Array.isArray(tasks) || tasks.length === 0) {
+  // Support both paginated {tasks, total} and legacy array responses
+  const tasks = data?.tasks ?? (Array.isArray(data) ? data : []);
+  const total = data?.total ?? tasks.length;
+  const totalPages = Math.max(1, Math.ceil(total / TASK_PAGE_SIZE));
+
+  if (!tasks.length && page === 1) {
     content.innerHTML = `
       <div class="empty-state">
         <div class="icon">&#128203;</div>
@@ -343,11 +353,47 @@ async function renderTasks() {
   content.innerHTML = `
     <div class="list-container">
       <div class="list-header">
-        <span>全部任务 (${tasks.length})</span>
+        <span>全部任务 (${total})</span>
       </div>
       ${tasks.map((t) => renderTaskRow(t)).join('')}
     </div>
+    ${totalPages > 1 ? renderPagination(page, totalPages, 'task') : ''}
   `;
+
+  bindPagination(content, 'task', (p) => { state.taskPage = p; renderTasks(); });
+}
+
+function renderPagination(current, totalPages, key) {
+  const pages = [];
+  for (let i = 1; i <= totalPages; i++) {
+    if (i === 1 || i === totalPages || (i >= current - 1 && i <= current + 1)) {
+      pages.push(i);
+    } else if (pages.length > 0 && pages[pages.length - 1] !== '...') {
+      pages.push('...');
+    }
+  }
+
+  const attr = `data-${key}-page`;
+  return `
+    <div style="display:flex;align-items:center;justify-content:center;gap:4px;margin-top:16px;">
+      <button class="btn btn-sm btn-secondary" ${attr}="${current - 1}" ${current <= 1 ? 'disabled' : ''}>&#8249;</button>
+      ${pages.map(p =>
+        p === '...'
+          ? '<span style="padding:0 6px;color:var(--text-muted);">...</span>'
+          : `<button class="btn btn-sm ${p === current ? 'btn-primary' : 'btn-secondary'}" ${attr}="${p}">${p}</button>`
+      ).join('')}
+      <button class="btn btn-sm btn-secondary" ${attr}="${current + 1}" ${current >= totalPages ? 'disabled' : ''}>&#8250;</button>
+    </div>
+  `;
+}
+
+function bindPagination(container, key, callback) {
+  container.querySelectorAll(`[data-${key}-page]`).forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      callback(parseInt(btn.dataset[`${key}Page`], 10));
+    });
+  });
 }
 
 // ---- 任务详情 ----
@@ -431,41 +477,53 @@ function renderSubtasks(subtasks) {
 function renderTaskLogs(logs) {
   if (!logs || !Array.isArray(logs) || logs.length === 0) return '';
   return `
-    <h3 class="section-title">任务日志</h3>
-    <div class="log-container" style="height:300px;">
-      <div class="log-output">
-        ${logs.map((l) => {
-          const lvl = (l.level || 'info').toLowerCase();
-          return `<div class="log-line ${lvl}"><span class="timestamp">${l.timestamp || ''}</span><span class="level">[${lvl.toUpperCase()}]</span>${escapeHtml(l.message || l.msg || '')}</div>`;
-        }).join('')}
-      </div>
+    <h3 class="section-title">任务日志 (${logs.length})</h3>
+    <div class="list-container">
+      ${logs.map((l) => {
+        const duration = l.duration_ms ? `${(l.duration_ms / 1000).toFixed(1)}s` : '-';
+        const cost = l.cost_usd ? `$${Number(l.cost_usd).toFixed(4)}` : '-';
+        return `
+          <div class="list-item" style="flex-wrap:wrap;gap:8px;cursor:default;">
+            <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+              <span class="badge badge-blue">${escapeHtml(l.phase || '-')}</span>
+              <span class="badge badge-secondary">${escapeHtml(l.agent || '-')}</span>
+              <span style="color:var(--text-muted);font-size:12px;">${duration} | ${cost}</span>
+              <span style="color:var(--text-muted);font-size:12px;margin-left:auto;">${timeAgo(l.created_at)}</span>
+            </div>
+            ${l.input_summary ? `<div style="width:100%;font-size:12px;color:var(--text-secondary);padding:4px 0 0 8px;border-top:1px solid var(--border);"><strong>Input:</strong> ${escapeHtml(l.input_summary)}</div>` : ''}
+            ${l.output_summary ? `<div style="width:100%;font-size:12px;color:var(--text);padding:4px 0 0 8px;"><strong>Output:</strong> ${escapeHtml(l.output_summary)}</div>` : ''}
+          </div>`;
+      }).join('')}
     </div>
   `;
 }
 
 // ---- 历史记录 ----
+const HISTORY_PAGE_SIZE = 20;
+
 async function renderHistory() {
   const content = $('#content');
-  const tasks = await api('/tasks');
+  const page = state.historyPage || 1;
+  const data = await api(`/tasks?status=done,failed&page=${page}&pageSize=${HISTORY_PAGE_SIZE}`);
 
-  if (!tasks || !Array.isArray(tasks)) {
-    content.innerHTML = `<div class="empty-state"><p>暂无历史记录</p></div>`;
-    return;
-  }
+  const tasks = data?.tasks ?? (Array.isArray(data) ? data : []);
+  const total = data?.total ?? tasks.length;
+  const totalPages = Math.max(1, Math.ceil(total / HISTORY_PAGE_SIZE));
 
-  const completed = tasks.filter((t) => t.status === 'done' || t.status === 'completed' || t.status === 'failed');
-
-  if (completed.length === 0) {
+  if (!tasks.length && page === 1) {
     content.innerHTML = `<div class="empty-state"><div class="icon">&#128214;</div><p>暂无已完成的任务</p></div>`;
     return;
   }
 
   content.innerHTML = `
     <div class="list-container">
-      <div class="list-header"><span>历史记录 (${completed.length})</span></div>
-      ${completed.map((t) => renderTaskRow(t)).join('')}
+      <div class="list-header"><span>历史记录 (${total})</span></div>
+      ${tasks.map((t) => renderTaskRow(t)).join('')}
     </div>
+    ${totalPages > 1 ? renderPagination(page, totalPages, 'history') : ''}
   `;
+
+  bindPagination(content, 'history', (p) => { state.historyPage = p; renderHistory(); });
 }
 
 // ---- 运行日志 ----

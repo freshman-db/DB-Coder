@@ -94,9 +94,16 @@ route('POST', '/api/tasks', async (req, res, ctx) => {
   json(res, task, 201);
 });
 
-route('GET', '/api/tasks', async (_req, res, ctx) => {
-  const tasks = await ctx.taskStore.listTasks(ctx.config.projectPath);
-  json(res, tasks);
+route('GET', '/api/tasks', async (req, res, ctx) => {
+  const url = new URL(req.url ?? '', `http://${req.headers.host}`);
+  const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(url.searchParams.get('pageSize') ?? '20', 10) || 20));
+  const statusParam = url.searchParams.get('status');
+  const status = statusParam
+    ? statusParam.split(',').filter(Boolean) as import('../memory/types.js').TaskStatus[]
+    : undefined;
+  const result = await ctx.taskStore.listTasksPaged(ctx.config.projectPath, page, pageSize, status);
+  json(res, result);
 });
 
 route('GET', '/api/tasks/:id', async (_req, res, ctx, params) => {
