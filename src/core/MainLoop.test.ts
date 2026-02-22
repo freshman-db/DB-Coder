@@ -829,6 +829,122 @@ describe('MainLoop runCycle integration', () => {
     assert.equal(reflectOnTaskCalls, 1);
   });
 
+  test('budget exceeded — task loop breaks before evaluation and execution', async () => {
+    let getQueuedCalls = 0;
+    let getNextCalls = 0;
+    let checkBudgetCalls = 0;
+    let evaluateTaskValueCalls = 0;
+    let executeTaskCalls = 0;
+    const updates: Array<{ taskId: string; patch: unknown }> = [];
+
+    const now = new Date();
+    const queuedTask: Task = {
+      id: 'task-budget-1',
+      project_path: '/tmp/db-coder-main-loop-test',
+      task_description: 'Task should be blocked by budget guard',
+      phase: 'init',
+      priority: 1,
+      plan: null,
+      subtasks: [{ id: 'S1', description: 'Should never execute', executor: 'codex', status: 'pending' }],
+      review_results: [],
+      iteration: 0,
+      total_cost_usd: 0,
+      git_branch: null,
+      start_commit: null,
+      depends_on: [],
+      status: 'queued',
+      created_at: now,
+      updated_at: now,
+    };
+
+    const { loop } = createMainLoopForCycle({
+      brain: {
+        hasChanges: async (projectPath: string) => {
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return false;
+        },
+      },
+      taskQueue: {
+        getQueued: async (projectPath: string) => {
+          getQueuedCalls++;
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return [queuedTask];
+        },
+        getNext: async (projectPath: string) => {
+          getNextCalls++;
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return queuedTask;
+        },
+      },
+      taskStore: {
+        updateTask: async (taskId: string, patch: unknown) => {
+          updates.push({ taskId, patch });
+        },
+      },
+      costTracker: {
+        checkBudget: async (taskId: string) => {
+          checkBudgetCalls++;
+          assert.equal(taskId, 'task-budget-1');
+          return { allowed: false, reason: 'limit' };
+        },
+      },
+    });
+
+    const internals = getMainLoopInternals(loop);
+    const loopWithTaskMethods = loop as unknown as {
+      evaluateTaskValue(task: Task, projectPath: string): Promise<unknown>;
+      executeTask(task: Task): Promise<void>;
+    };
+    const originalEvaluateTaskValue = loopWithTaskMethods.evaluateTaskValue;
+    const originalExecuteTask = loopWithTaskMethods.executeTask;
+
+    loopWithTaskMethods.evaluateTaskValue = async () => {
+      evaluateTaskValueCalls++;
+      return {
+        passed: true,
+        score: {
+          problemLegitimacy: 1,
+          solutionProportionality: 1,
+          expectedComplexity: 1,
+          historicalSuccess: 1,
+          total: 4,
+        },
+        reasoning: 'Should not be reached',
+        cost_usd: 0,
+        duration_ms: 0,
+      };
+    };
+    loopWithTaskMethods.executeTask = async () => {
+      executeTaskCalls++;
+    };
+
+    internals.setRunning(true);
+    const { states, remove } = collectStates(loop);
+
+    try {
+      await loop.runCycle();
+    } finally {
+      remove();
+      internals.setRunning(false);
+      loopWithTaskMethods.evaluateTaskValue = originalEvaluateTaskValue;
+      loopWithTaskMethods.executeTask = originalExecuteTask;
+    }
+
+    assert.equal(getQueuedCalls, 1);
+    assert.equal(getNextCalls, 1);
+    assert.equal(checkBudgetCalls, 1);
+    assert.equal(evaluateTaskValueCalls, 0);
+    assert.equal(executeTaskCalls, 0);
+    assert.deepEqual(states.map(snapshot => snapshot.state), ['scanning', 'idle']);
+    assert.equal(loop.getState(), 'idle');
+    assert.deepEqual(updates, [
+      {
+        taskId: 'task-budget-1',
+        patch: { status: 'blocked', phase: 'blocked' },
+      },
+    ]);
+  });
+
   test('evaluation rejects task — task marked pending_review, executeTask not called', async () => {
     let getQueuedCalls = 0;
     let getNextCalls = 0;
