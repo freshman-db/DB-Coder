@@ -252,7 +252,7 @@ test('processUserMessage creates one chat session when concurrent requests targe
   const draftLookup = createDeferred<{ project_path: string }>();
   const createSessionCalls: number[] = [];
   const getPlanDraftCalls: number[] = [];
-  const pushed: UserChannelMessage[] = [];
+  const sessionHistoryBySessionId = new Map<string, string[]>();
 
   const workflow = createWorkflow({
     getPlanDraft: async (draftId) => {
@@ -264,7 +264,9 @@ test('processUserMessage creates one chat session when concurrent requests targe
       return createMockSession({
         sessionId: 'session-21',
         onPush: (message) => {
-          pushed.push(message);
+          const history = sessionHistoryBySessionId.get(message.session_id) ?? [];
+          history.push(message.message.content);
+          sessionHistoryBySessionId.set(message.session_id, history);
         },
       });
     },
@@ -288,9 +290,9 @@ test('processUserMessage creates one chat session when concurrent requests targe
   assert.equal(getPlanDraftCalls.length, 1);
   assert.equal(createSessionCalls.length, 1);
   assert.equal(internals.sessionLocks.has(21), false);
+  assert.equal(internals.chatSessions.size, 1);
   assert.equal(internals.chatSessions.has(21), true);
-  assert.deepEqual(
-    pushed.map(message => message.message.content),
-    ['first', 'second'],
-  );
+  const activeSession = internals.chatSessions.get(21);
+  assert.ok(activeSession);
+  assert.deepEqual(sessionHistoryBySessionId.get(activeSession.sessionId), ['first', 'second']);
 });
