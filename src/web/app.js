@@ -270,7 +270,7 @@ function getPatrolStateDesc(patrolling, loopState, currentTaskId, scanInterval) 
     case 'planning':
       return { title: '规划中', color: 'blue', detail: '正在分析问题并生成任务...' };
     case 'executing':
-      return { title: '执行中', color: 'blue', detail: `正在执行任务 #${currentTaskId || ''}` };
+      return { title: '执行中', color: 'blue', detail: `正在执行任务 #${escapeHtml(String(currentTaskId || ''))}` };
     case 'reviewing':
       return { title: '审查中', color: 'orange', detail: 'Claude + Codex 双重代码审查' };
     case 'reflecting':
@@ -324,7 +324,7 @@ async function renderDashboard() {
       </div>
       <div class="card">
         <div class="card-label">当前任务</div>
-        <div class="card-value blue" style="font-size:16px;word-break:break-all;">${st.currentTaskId ? `<a href="#/tasks/${st.currentTaskId}">#${st.currentTaskId}</a>` : '空闲'}</div>
+        <div class="card-value blue" style="font-size:16px;word-break:break-all;">${st.currentTaskId ? `<a href="#/tasks/${escapeHtml(String(st.currentTaskId))}">#${escapeHtml(String(st.currentTaskId))}</a>` : '空闲'}</div>
         <div class="card-sub">${escapeHtml(currentTaskSubtitle)}</div>
       </div>
       <div class="card">
@@ -413,7 +413,7 @@ function renderTaskRow(t) {
   const pri = getPriorityStr(t.priority);
   const title = getTaskTitle(t);
   return `
-    <div class="list-item" onclick="location.hash='#/tasks/${t.id}'">
+    <div class="list-item" onclick="location.hash='#/tasks/${escapeHtml(String(t.id ?? ''))}'">
       <span class="status-icon" title="${st.label}">${st.icon}</span>
       <span class="list-item-title">${escapeHtml(title)}</span>
       <span class="badge badge-${pri}">${priorityLabels[pri] || pri}</span>
@@ -513,13 +513,13 @@ async function renderTaskDetail(id) {
       <a href="#/tasks" class="btn btn-sm btn-secondary">&larr; 返回</a>
       <h2>${escapeHtml(title)}</h2>
       <span class="badge badge-${st.badge}">${st.label}</span>
-      <button class="btn btn-sm btn-danger" onclick="deleteTask('${task.id}')">删除任务</button>
+      <button class="btn btn-sm btn-danger" onclick="deleteTask('${escapeHtml(String(task.id ?? ''))}')">删除任务</button>
     </div>
 
     <div class="detail-meta">
       <div class="meta-item">
         <div class="meta-label">任务 ID</div>
-        <div class="meta-value">${task.id}</div>
+        <div class="meta-value">${escapeHtml(String(task.id ?? ''))}</div>
       </div>
       <div class="meta-item">
         <div class="meta-label">优先级</div>
@@ -527,7 +527,7 @@ async function renderTaskDetail(id) {
       </div>
       <div class="meta-item">
         <div class="meta-label">Git 分支</div>
-        <div class="meta-value">${task.git_branch || '-'}</div>
+        <div class="meta-value">${escapeHtml(String(task.git_branch || '-'))}</div>
       </div>
       <div class="meta-item">
         <div class="meta-label">费用</div>
@@ -535,11 +535,11 @@ async function renderTaskDetail(id) {
       </div>
       <div class="meta-item">
         <div class="meta-label">创建时间</div>
-        <div class="meta-value">${task.created_at || '-'}</div>
+        <div class="meta-value">${escapeHtml(String(task.created_at || '-'))}</div>
       </div>
       <div class="meta-item">
         <div class="meta-label">阶段</div>
-        <div class="meta-value">${task.phase || '-'}</div>
+        <div class="meta-value">${escapeHtml(String(task.phase || '-'))}</div>
       </div>
     </div>
 
@@ -791,7 +791,7 @@ function renderMemory() {
         <div class="result-body">${escapeHtml(item.content || item.text || item.body || '')}</div>
         <div class="result-meta">
           ${item.score ? `相关度: ${(item.score * 100).toFixed(0)}%` : ''}
-          ${item.source ? ` | 来源: ${item.source}` : ''}
+          ${item.source ? ` | 来源: ${escapeHtml(String(item.source))}` : ''}
           ${item.updatedAt ? ` | 更新: ${timeAgo(item.updatedAt)}` : ''}
         </div>
       </div>
@@ -1183,7 +1183,7 @@ async function renderPlans() {
             ? (d.markdown || '').split('\\n')[0].slice(0, 80) || '对话 #' + d.id
             : (d.markdown || d.reasoning || '').split('\\n')[0].slice(0, 80) || '计划 #' + d.id;
           return `
-            <div class="list-item" onclick="location.hash='#/plans/${d.id}'">
+            <div class="list-item" onclick="location.hash='#/plans/${escapeHtml(String(d.id ?? ''))}'">
               <span class="badge badge-${st.badge}">${st.label}</span>
               <span class="list-item-title" style="flex:1;">${escapeHtml(title)}</span>
               ${taskCount > 0 ? `<span style="color:var(--text-muted);font-size:12px;">${taskCount} 任务</span>` : ''}
@@ -1283,7 +1283,7 @@ function renderPlanReviewView(id, draft) {
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
       <div>
         <a href="#/plans" style="font-size:12px;color:var(--text-muted);">&larr; 返回列表</a>
-        <h2 style="margin:4px 0 0;">计划 #${draft.id} <span class="badge badge-${st.badge}">${st.label}</span></h2>
+        <h2 style="margin:4px 0 0;">计划 #${escapeHtml(String(draft.id ?? ''))} <span class="badge badge-${st.badge}">${st.label}</span></h2>
       </div>
       <div style="display:flex;gap:8px;">
         ${draft.status === 'draft' ? `
