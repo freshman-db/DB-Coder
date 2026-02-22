@@ -10,6 +10,7 @@ import type { PlanWorkflow } from '../core/PlanWorkflow.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { CostTracker } from '../utils/cost.js';
+import { createSseStream } from './routes.js';
 import { Server } from './Server.js';
 
 type RequestListener = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
@@ -155,6 +156,13 @@ function createMockResponse(): {
   const response = {
     setHeader: (name: string, value: string): void => {
       state.headers[name.toLowerCase()] = value;
+    },
+    write: (chunk?: string | Buffer): boolean => {
+      if (chunk === undefined) {
+        return true;
+      }
+      state.body += Buffer.isBuffer(chunk) ? chunk.toString() : chunk;
+      return true;
     },
     writeHead: (statusCode: number, headers?: Record<string, string>): ServerResponse => {
       state.statusCode = statusCode;
@@ -434,6 +442,139 @@ test('GET /api/status returns health-style status fields', async () => {
   });
 });
 
+test('createSseStream writes SSE headers and event payloads', () => {
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token: 'token',
+  });
+  const { response, state } = createMockResponse();
+
+  const stream = createSseStream(req, response);
+  assert.equal(state.statusCode, 200);
+  assert.equal(state.headers['content-type'], 'text/event-stream');
+  assert.equal(state.headers['cache-control'], 'no-cache');
+  assert.equal(state.headers.connection, 'keep-alive');
+  assert.equal(state.headers['access-control-allow-origin'], '*');
+
+  const wroteEvent = stream.write('status', { ok: true });
+  assert.equal(wroteEvent, true);
+  assert.equal(state.body, 'event: status\ndata: {"ok":true}\n\n');
+
+  stream.cleanup();
+});
+
+test('createSseStream writes heartbeat comments on interval ticks', () => {
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token: 'token',
+  });
+  const { response, state } = createMockResponse();
+
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  let heartbeatTick: (() => void) | undefined;
+  let heartbeatDelayMs: number | undefined;
+  const timerHandle = { id: 'heartbeat-timer' } as unknown as ReturnType<typeof setInterval>;
+
+  globalThis.setInterval = ((callback: (...args: unknown[]) => void, delay?: number): ReturnType<typeof setInterval> => {
+    heartbeatDelayMs = delay;
+    heartbeatTick = () => callback();
+    return timerHandle;
+  }) as typeof setInterval;
+  globalThis.clearInterval = (() => {}) as typeof clearInterval;
+
+  try {
+    const stream = createSseStream(req, response);
+    assert.equal(heartbeatDelayMs, 15_000);
+    assert.equal(typeof heartbeatTick, 'function');
+
+    heartbeatTick?.();
+    assert.equal(state.body, ': heartbeat\n\n');
+
+    stream.cleanup();
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
+
+test('createSseStream cleanup prevents double-close and write after cleanup returns false', () => {
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token: 'token',
+  });
+  const { response } = createMockResponse();
+
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  const timerHandle = { id: 'cleanup-timer' } as unknown as ReturnType<typeof setInterval>;
+  let clearIntervalCalls = 0;
+
+  globalThis.setInterval = ((callback: (...args: unknown[]) => void): ReturnType<typeof setInterval> => {
+    void callback;
+    return timerHandle;
+  }) as typeof setInterval;
+  globalThis.clearInterval = ((timer: ReturnType<typeof setInterval> | undefined): void => {
+    if (timer === timerHandle) {
+      clearIntervalCalls += 1;
+    }
+  }) as typeof clearInterval;
+
+  try {
+    const stream = createSseStream(req, response);
+    assert.equal(req.listenerCount('close'), 1);
+
+    stream.cleanup();
+    stream.cleanup();
+    req.emit('close');
+    req.emit('close');
+
+    assert.equal(req.listenerCount('close'), 0);
+    assert.equal(clearIntervalCalls, 1);
+    assert.equal(stream.write('status', { ok: false }), false);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
+
+test('createSseStream keeps pre-serialized string payloads intact', () => {
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token: 'token',
+  });
+  const { response, state } = createMockResponse();
+
+  const stream = createSseStream(req, response);
+  const wroteEvent = stream.write('status', '{"ok":true}');
+  assert.equal(wroteEvent, true);
+  assert.equal(state.body, 'event: status\ndata: {"ok":true}\n\n');
+
+  stream.cleanup();
+});
+
+test('createSseStream validates nullish request and response inputs', () => {
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token: 'token',
+  });
+  const { response } = createMockResponse();
+
+  assert.throws(
+    () => createSseStream(undefined as unknown as IncomingMessage, response),
+    /IncomingMessage instance\./,
+  );
+  assert.throws(
+    () => createSseStream(req, undefined as unknown as ServerResponse),
+    /ServerResponse instance\./,
+  );
+});
+
 test('GET /api/logs returns SSE headers', async () => {
   const { server, token } = createServerFixture();
   const listener = getRequestListener(server);
@@ -454,14 +595,51 @@ test('GET /api/logs returns SSE headers', async () => {
   req.emit('close');
 });
 
+test('GET /api/status/stream returns SSE headers and cleans up status listeners', async () => {
+  let removeCalls = 0;
+  let statusListenerAttached = false;
+
+  const { server, token } = createServerFixture({
+    loop: {
+      addStatusListener: () => {
+        statusListenerAttached = true;
+        return () => {
+          removeCalls += 1;
+        };
+      },
+    },
+  });
+  const listener = getRequestListener(server);
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/status/stream',
+    token,
+  });
+  const { response, state } = createMockResponse();
+
+  await listener(req, response);
+
+  assert.equal(state.statusCode, 200);
+  assert.equal(state.headers['content-type'], 'text/event-stream');
+  assert.equal(state.headers['cache-control'], 'no-cache');
+  assert.equal(state.headers.connection, 'keep-alive');
+  assert.equal(statusListenerAttached, true);
+  assert.match(state.body, /event: status/);
+
+  req.emit('close');
+  assert.equal(removeCalls, 1);
+});
+
 test('GET /api/plans/:id/stream returns SSE headers', async () => {
   let draftId: number | null = null;
+  let emit: ((event: string, data: string) => void) | undefined;
   let cleanupCalls = 0;
 
   const { server, token } = createServerFixture({
     planWorkflow: {
-      addSSEListener: (id) => {
+      addSSEListener: (id, listener) => {
         draftId = id;
+        emit = listener;
         return () => {
           cleanupCalls += 1;
         };
@@ -483,6 +661,9 @@ test('GET /api/plans/:id/stream returns SSE headers', async () => {
   assert.equal(state.headers['cache-control'], 'no-cache');
   assert.equal(state.headers.connection, 'keep-alive');
   assert.equal(draftId, 42);
+
+  emit?.('status', '{"ready":true}');
+  assert.equal(state.body, 'event: status\ndata: {"ready":true}\n\n');
 
   req.emit('close');
   assert.equal(cleanupCalls, 1);

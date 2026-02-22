@@ -90,6 +90,69 @@ export function safeSseWrite(res: ServerResponse, data: string): boolean {
   }
 }
 
+interface SseStream {
+  write(event: string, data: unknown): boolean;
+  cleanup(): void;
+}
+
+const SSE_HEADERS: Record<string, string> = {
+  'Content-Type': 'text/event-stream',
+  'Cache-Control': 'no-cache',
+  'Connection': 'keep-alive',
+  'Access-Control-Allow-Origin': '*',
+};
+const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
+
+export function createSseStream(req: IncomingMessage, res: ServerResponse): SseStream {
+  if (!req) {
+    throw new TypeError('createSseStream requires an IncomingMessage instance.');
+  }
+  if (!res) {
+    throw new TypeError('createSseStream requires a ServerResponse instance.');
+  }
+
+  res.writeHead(200, SSE_HEADERS);
+
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let cleanedUp = false;
+  const cleanup = (): void => {
+    if (cleanedUp) {
+      return;
+    }
+    cleanedUp = true;
+    if (heartbeat !== undefined) {
+      clearInterval(heartbeat);
+      heartbeat = undefined;
+    }
+    req.off('close', cleanup);
+  };
+
+  const write = (event: string, data: unknown): boolean => {
+    if (cleanedUp) {
+      return false;
+    }
+
+    const eventName = typeof event === 'string' && event.trim().length > 0 ? event.trim() : 'message';
+    const serializedData = typeof data === 'string' ? data : JSON.stringify(data ?? null);
+    const payload = `event: ${eventName}\ndata: ${serializedData}\n\n`;
+    if (!safeSseWrite(res, payload)) {
+      cleanup();
+      return false;
+    }
+    return true;
+  };
+
+  heartbeat = setInterval(() => {
+    if (!safeSseWrite(res, ': heartbeat\n\n')) {
+      cleanup();
+    }
+  }, SSE_HEARTBEAT_INTERVAL_MS);
+
+  req.on('close', cleanup);
+
+  return { write, cleanup };
+}
+
 interface StatusSseSnapshot {
   state: ReturnType<MainLoop['getState']>;
   currentTaskId: string | null;
@@ -136,59 +199,41 @@ route('GET', '/api/status', async (_req, res, ctx) => {
 });
 
 route('GET', '/api/status/stream', async (req, res, ctx) => {
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
-  });
-
-  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  const stream = createSseStream(req, res);
   let removeListener = () => {};
-  let cleanedUp = false;
   const cleanup = (): void => {
-    if (cleanedUp) {
-      return;
-    }
-    cleanedUp = true;
-    if (heartbeat !== undefined) {
-      clearInterval(heartbeat);
-    }
+    req.off('close', cleanup);
+    stream.cleanup();
     removeListener();
+    removeListener = () => {};
   };
+  req.on('close', cleanup);
 
-  const pushStatus = async (snapshot: StatusSseSnapshot): Promise<void> => {
+  const pushStatus = async (snapshot: StatusSseSnapshot): Promise<boolean> => {
     const payload: StatusSsePayload = {
       ...snapshot,
       currentTaskTitle: await resolveCurrentTaskTitle(ctx.taskStore, snapshot.currentTaskId),
     };
-    if (!safeSseWrite(res, `event: status\ndata: ${JSON.stringify(payload)}\n\n`)) {
+    if (!stream.write('status', payload)) {
       cleanup();
+      return false;
     }
+    return true;
   };
 
-  heartbeat = setInterval(() => {
-    if (!safeSseWrite(res, ': heartbeat\n\n')) {
-      cleanup();
-    }
-  }, 15000);
-
-  await pushStatus({
+  const wroteInitialStatus = await pushStatus({
     state: ctx.loop.getState(),
     currentTaskId: ctx.loop.getCurrentTaskId(),
     patrolling: ctx.loop.isRunning(),
     paused: ctx.loop.isPaused(),
   });
-
-  if (cleanedUp) {
+  if (!wroteInitialStatus) {
     return;
   }
 
   removeListener = ctx.loop.addStatusListener((snapshot) => {
     void pushStatus(snapshot);
   });
-
-  req.on('close', cleanup);
 });
 
 // --- Tasks ---
@@ -262,41 +307,21 @@ route('GET', '/api/logs', async (req, res, ctx) => {
   const follow = followParam === null || followParam === 'true';
 
   if (follow) {
-    // SSE stream
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
-    });
-
-    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    const stream = createSseStream(req, res);
     let removeListener = () => {};
-    let cleanedUp = false;
     const cleanup = (): void => {
-      if (cleanedUp) {
-        return;
-      }
-      cleanedUp = true;
-      if (heartbeat !== undefined) {
-        clearInterval(heartbeat);
-      }
+      req.off('close', cleanup);
+      stream.cleanup();
       removeListener();
+      removeListener = () => {};
     };
-
-    heartbeat = setInterval(() => {
-      if (!safeSseWrite(res, ': heartbeat\n\n')) {
-        cleanup();
-      }
-    }, 15000);
+    req.on('close', cleanup);
 
     removeListener = log.addListener((entry: LogEntry) => {
-      if (!safeSseWrite(res, `data: ${JSON.stringify(entry)}\n\n`)) {
+      if (!stream.write('message', entry)) {
         cleanup();
       }
     });
-
-    req.on('close', cleanup);
   } else {
     // Return recent logs (read from file)
     json(res, { message: 'Use ?follow=true for SSE stream' });
@@ -526,39 +551,21 @@ route('GET', '/api/plans/:id/stream', async (req, res, ctx, params) => {
   const id = parseInt(params.id, 10);
   if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
 
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
-  });
-
-  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  const stream = createSseStream(req, res);
   let remove = () => {};
-  let cleanedUp = false;
   const cleanup = (): void => {
-    if (cleanedUp) {
-      return;
-    }
-    cleanedUp = true;
-    if (heartbeat !== undefined) {
-      clearInterval(heartbeat);
-    }
+    req.off('close', cleanup);
+    stream.cleanup();
     remove();
+    remove = () => {};
   };
-
-  heartbeat = setInterval(() => {
-    if (!safeSseWrite(res, ': heartbeat\n\n')) {
-      cleanup();
-    }
-  }, 15000);
+  req.on('close', cleanup);
 
   remove = ctx.planWorkflow.addSSEListener(id, (event, data) => {
-    if (!safeSseWrite(res, `event: ${event}\ndata: ${data}\n\n`)) {
+    if (!stream.write(event, data)) {
       cleanup();
     }
   });
-  req.on('close', cleanup);
 });
 
 route('POST', '/api/plans/:id/generate', async (req, res, ctx, params) => {
