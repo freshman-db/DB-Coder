@@ -35,7 +35,6 @@ type EvolutionEngineInternals = {
     parsed: ParsedMetaReflectOutput,
     projectPath: string,
     maxActive: number,
-    data: MetaReflectData,
   ): Promise<void>;
 };
 
@@ -60,14 +59,147 @@ function makeTask(index: number, cost: number): Task {
   };
 }
 
-function createEvolutionEngine(taskStore: Partial<TaskStore>, trendAnalyzer: Partial<TrendAnalyzer>): EvolutionEngine {
+function createEvolutionEngine(
+  taskStore: Partial<TaskStore>,
+  trendAnalyzer: Partial<TrendAnalyzer>,
+  configValues: Record<string, unknown> = {},
+): EvolutionEngine {
   return new EvolutionEngine(
     taskStore as TaskStore,
     {} as GlobalMemory,
-    { values: {} } as Config,
+    { values: configValues } as unknown as Config,
     trendAnalyzer as TrendAnalyzer,
   );
 }
+
+function makeMetaReflectData(overrides: Partial<MetaReflectData> = {}): MetaReflectData {
+  return {
+    reviewEvents: [],
+    recentTasks: [],
+    healthTrend: null,
+    activeVersions: [],
+    passRate: 1,
+    avgCost: 0,
+    issueCategories: [],
+    ...overrides,
+  };
+}
+
+describe('EvolutionEngine.metaReflect', () => {
+  test('orchestrates collect, prompt build, plan, parse, and storage in order', async () => {
+    const calls: string[] = [];
+    let billedCost = 0;
+
+    const taskStore: Partial<TaskStore> = {
+      addDailyCost: async (cost: number) => {
+        billedCost += cost;
+      },
+    };
+
+    const engine = createEvolutionEngine(taskStore, {});
+    const data = makeMetaReflectData();
+    const parsed: ParsedMetaReflectOutput = {
+      patches: [{
+        promptName: 'plan',
+        patches: [{ op: 'append', content: 'Strengthen checklist.', reason: 'Reduce misses.' }],
+        rationale: 'Improve planning quality',
+        confidence: 0.8,
+      }],
+      analysis: 'Plan checks are weak.',
+    };
+
+    (engine as any).collectMetaReflectData = async (projectPath: string) => {
+      assert.equal(projectPath, '/repo');
+      calls.push('collectData');
+      return data;
+    };
+    (engine as any).buildMetaReflectPrompt = (metaReflectData: MetaReflectData) => {
+      assert.equal(metaReflectData, data);
+      calls.push('buildPrompt');
+      return 'meta prompt';
+    };
+    (engine as any).parseMetaReflectOutput = (output: string) => {
+      assert.equal(output, '{"patches":[],"analysis":"ignored"}');
+      calls.push('parseOutput');
+      return parsed;
+    };
+    (engine as any).storeProposedPatches = async (
+      parsedOutput: ParsedMetaReflectOutput,
+      projectPath: string,
+      maxActive: number,
+    ) => {
+      assert.equal(parsedOutput, parsed);
+      assert.equal(projectPath, '/repo');
+      assert.equal(maxActive, 3);
+      calls.push('storePatches');
+    };
+
+    const claude = {
+      plan: async (prompt: string, cwd: string, options: { maxTurns: number }) => {
+        assert.equal(prompt, 'meta prompt');
+        assert.equal(cwd, '/repo');
+        assert.deepEqual(options, { maxTurns: 5 });
+        calls.push('claudePlan');
+        return {
+          success: true,
+          output: '{"patches":[],"analysis":"ignored"}',
+          cost_usd: 1.23,
+          duration_ms: 10,
+        };
+      },
+    };
+
+    await engine.metaReflect('/repo', claude as any);
+
+    assert.deepEqual(calls, ['collectData', 'buildPrompt', 'claudePlan', 'parseOutput', 'storePatches']);
+    assert.equal(billedCost, 1.23);
+  });
+
+  test('returns early when parsed output has no actionable patches', async () => {
+    const calls: string[] = [];
+    let billedCost = 0;
+
+    const taskStore: Partial<TaskStore> = {
+      addDailyCost: async (cost: number) => {
+        billedCost += cost;
+      },
+    };
+    const engine = createEvolutionEngine(taskStore, {});
+
+    (engine as any).collectMetaReflectData = async () => {
+      calls.push('collectData');
+      return makeMetaReflectData();
+    };
+    (engine as any).buildMetaReflectPrompt = () => {
+      calls.push('buildPrompt');
+      return 'meta prompt';
+    };
+    (engine as any).parseMetaReflectOutput = () => {
+      calls.push('parseOutput');
+      return null;
+    };
+    (engine as any).storeProposedPatches = async () => {
+      calls.push('storePatches');
+    };
+
+    const claude = {
+      plan: async () => {
+        calls.push('claudePlan');
+        return {
+          success: true,
+          output: '{}',
+          cost_usd: 0,
+          duration_ms: 5,
+        };
+      },
+    };
+
+    await engine.metaReflect('/repo', claude as any);
+
+    assert.deepEqual(calls, ['collectData', 'buildPrompt', 'claudePlan', 'parseOutput']);
+    assert.equal(billedCost, 0);
+  });
+});
 
 describe('EvolutionEngine.collectMetaReflectData', () => {
   test('collects review/task metrics and returns the composed payload', async () => {
@@ -290,6 +422,30 @@ describe('EvolutionEngine.buildMetaReflectPrompt', () => {
     assert.match(prompt, /Task task-123: must_fix=2, should_fix=1, categories=\["null-safety","types"\]/);
   });
 
+  test('uses safe defaults when fields are nullish or invalid', () => {
+    const data = {
+      reviewEvents: null,
+      recentTasks: undefined,
+      healthTrend: null,
+      activeVersions: undefined,
+      passRate: Number.NaN,
+      avgCost: Number.NaN,
+      issueCategories: null,
+    } as unknown as MetaReflectData;
+
+    const engine = createEvolutionEngine({}, {});
+    const internals = engine as unknown as EvolutionEngineInternals;
+    const prompt = internals.buildMetaReflectPrompt(data);
+
+    assert.match(prompt, /Review pass rate: 0\.0%/);
+    assert.match(prompt, /Average task cost: \$0\.0000/);
+    assert.match(prompt, /Health trend: unknown \(N\/A\/100\)/);
+    assert.match(prompt, /Recurring issue categories: none/);
+    assert.match(prompt, /Total completed tasks: 0/);
+    assert.match(prompt, /No active prompt patches\./);
+    assert.match(prompt, /## Recent Review Failures\nNone/);
+  });
+
   test('throws when data is nullish', () => {
     const engine = createEvolutionEngine({}, {});
     const internals = engine as unknown as EvolutionEngineInternals;
@@ -345,7 +501,56 @@ describe('EvolutionEngine.storeProposedPatches', () => {
     let promoteCalls = 0;
     let rollbackCalls = 0;
 
+    const reviewEvents: ReviewEvent[] = [
+      {
+        id: 1,
+        task_id: 'task-1',
+        attempt: 1,
+        passed: true,
+        must_fix_count: 0,
+        should_fix_count: 0,
+        issue_categories: [],
+        fix_agent: null,
+        duration_ms: 10,
+        cost_usd: 0.01,
+        created_at: new Date('2026-01-01T00:00:00.000Z'),
+      },
+      {
+        id: 2,
+        task_id: 'task-2',
+        attempt: 1,
+        passed: false,
+        must_fix_count: 1,
+        should_fix_count: 1,
+        issue_categories: ['null-safety'],
+        fix_agent: null,
+        duration_ms: 20,
+        cost_usd: 0.02,
+        created_at: new Date('2026-01-01T00:01:00.000Z'),
+      },
+    ];
+    const recentTasks = [makeTask(1, 0.4), makeTask(2, 0.5)];
+    const issueCategories: RecurringIssueCategory[] = [
+      { category: 'null-safety', count: 2 },
+      { category: 'type-error', count: 1 },
+    ];
+
     const taskStore: Partial<TaskStore> = {
+      getRecentReviewEvents: async (projectPath: string, limit = 20) => {
+        assert.equal(projectPath, '/repo');
+        assert.equal(limit, 20);
+        return reviewEvents;
+      },
+      listTasks: async (projectPath: string, status) => {
+        assert.equal(projectPath, '/repo');
+        assert.equal(status, 'done');
+        return recentTasks;
+      },
+      getRecurringIssueCategories: async (projectPath: string, limit = 10) => {
+        assert.equal(projectPath, '/repo');
+        assert.equal(limit, 10);
+        return issueCategories;
+      },
       getActivePromptVersions: async (projectPath: string) => {
         assert.equal(projectPath, '/repo');
         activeLookupCount += 1;
@@ -400,47 +605,8 @@ describe('EvolutionEngine.storeProposedPatches', () => {
       ],
       analysis: 'Plan prompt needs more rigor.',
     };
-    const data: MetaReflectData = {
-      reviewEvents: [
-        {
-          id: 1,
-          task_id: 'task-1',
-          attempt: 1,
-          passed: true,
-          must_fix_count: 0,
-          should_fix_count: 0,
-          issue_categories: [],
-          fix_agent: null,
-          duration_ms: 10,
-          cost_usd: 0.01,
-          created_at: new Date('2026-01-01T00:00:00.000Z'),
-        },
-        {
-          id: 2,
-          task_id: 'task-2',
-          attempt: 1,
-          passed: false,
-          must_fix_count: 1,
-          should_fix_count: 1,
-          issue_categories: ['null-safety'],
-          fix_agent: null,
-          duration_ms: 20,
-          cost_usd: 0.02,
-          created_at: new Date('2026-01-01T00:01:00.000Z'),
-        },
-      ],
-      recentTasks: [],
-      healthTrend: null,
-      activeVersions: [],
-      passRate: 0.5,
-      avgCost: 0.45,
-      issueCategories: [
-        { category: 'null-safety', count: 2 },
-        { category: 'type-error', count: 1 },
-      ],
-    };
 
-    await internals.storeProposedPatches(parsed, '/repo', 1, data);
+    await internals.storeProposedPatches(parsed, '/repo', 1);
 
     assert.equal(savedVersions.length, 1);
     assert.deepEqual(savedVersions[0], {
@@ -461,7 +627,7 @@ describe('EvolutionEngine.storeProposedPatches', () => {
     assert.equal(rollbackCalls, 1);
   });
 
-  test('throws when parsed/data are nullish or inputs are invalid', async () => {
+  test('throws when parsed is nullish or inputs are invalid', async () => {
     const engine = createEvolutionEngine({}, {});
     const internals = engine as unknown as EvolutionEngineInternals;
 
@@ -474,34 +640,20 @@ describe('EvolutionEngine.storeProposedPatches', () => {
       }],
       analysis: '',
     };
-    const validData: MetaReflectData = {
-      reviewEvents: [],
-      recentTasks: [],
-      healthTrend: null,
-      activeVersions: [],
-      passRate: 1,
-      avgCost: 0,
-      issueCategories: [],
-    };
 
     await assert.rejects(
-      internals.storeProposedPatches(undefined as unknown as ParsedMetaReflectOutput, '/repo', 1, validData),
+      internals.storeProposedPatches(undefined as unknown as ParsedMetaReflectOutput, '/repo', 1),
       /parsed meta-reflect output is required for prompt patch storage/,
     );
 
     await assert.rejects(
-      internals.storeProposedPatches(validParsed, '   ', 1, validData),
+      internals.storeProposedPatches(validParsed, '   ', 1),
       /projectPath is required for prompt patch storage/,
     );
 
     await assert.rejects(
-      internals.storeProposedPatches(validParsed, '/repo', 0, validData),
+      internals.storeProposedPatches(validParsed, '/repo', 0),
       /maxActive must be a positive number/,
-    );
-
-    await assert.rejects(
-      internals.storeProposedPatches(validParsed, '/repo', 1, null as unknown as MetaReflectData),
-      /meta-reflect data is required for patch storage/,
     );
   });
 });

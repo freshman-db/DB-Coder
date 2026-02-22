@@ -2,7 +2,7 @@ import type { TaskStore } from '../memory/TaskStore.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { Config } from '../config/Config.js';
 import type { TrendAnalyzer } from './TrendAnalyzer.js';
-import type { AdjustmentCategory, DynamicPromptContext, HealthTrend, PromptName, PromptPatch, PromptVersion } from './types.js';
+import type { AdjustmentCategory, DynamicPromptContext, HealthTrend, PromptMetrics, PromptName, PromptPatch, PromptVersion } from './types.js';
 import type { ProjectAnalysis, RecurringIssueCategory, ReviewEvent, Task } from '../memory/types.js';
 import type { ClaudeBridge } from '../bridges/ClaudeBridge.js';
 import { log } from '../utils/logger.js';
@@ -258,38 +258,67 @@ export class EvolutionEngine {
    */
   async metaReflect(projectPath: string, claude: ClaudeBridge): Promise<void> {
     log.info('Starting meta-reflect: analyzing prompt effectiveness...');
-
-    // 1. Collect data and compute metrics
-    const data = await this.collectMetaReflectData(projectPath);
-
-    // 2. Build meta-reflection prompt
-    const metaPrompt = this.buildMetaReflectPrompt(data);
-
     try {
+      const data = await this.collectMetaReflectData(projectPath);
+      const metaPrompt = this.buildMetaReflectPrompt(data);
       const result = await claude.plan(metaPrompt, projectPath, { maxTurns: 5 });
-      if (result.cost_usd > 0) await this.taskStore.addDailyCost(result.cost_usd);
-      const parsed = this.parseMetaReflectOutput(result.output);
+      const resultCost = Number(result?.cost_usd ?? 0);
+      if (resultCost > 0) {
+        await this.taskStore.addDailyCost(resultCost);
+      }
+
+      const parsed = this.parseMetaReflectOutput(result?.output ?? '');
       if (!parsed) {
         log.info('Meta-reflect: no actionable patches proposed');
         return;
       }
 
-      // 3. Store candidate prompt versions and run lifecycle actions
-      const configuredMaxActive = this.config.values.evolution?.maxActivePromptPatches;
-      const maxActive = typeof configuredMaxActive === 'number' && Number.isFinite(configuredMaxActive) && configuredMaxActive > 0
-        ? configuredMaxActive
-        : 3;
-      await this.storeProposedPatches(parsed, projectPath, maxActive, data);
+      const maxActive = this.resolveMaxActivePromptPatches();
+      await this.storeProposedPatches(parsed, projectPath, maxActive);
     } catch (err) {
       log.warn(`Meta-reflect failed: ${err}`);
     }
+  }
+
+  private resolveMaxActivePromptPatches(): number {
+    const configuredMaxActive = this.config.values.evolution?.maxActivePromptPatches;
+    return typeof configuredMaxActive === 'number' && Number.isFinite(configuredMaxActive) && configuredMaxActive > 0
+      ? configuredMaxActive
+      : 3;
+  }
+
+  private async collectPromptPatchBaselineMetrics(projectPath: string): Promise<PromptMetrics> {
+    const [reviewEventsResult, recentTasksResult, issueCategoriesResult] = await Promise.all([
+      this.taskStore.getRecentReviewEvents(projectPath, 20),
+      this.taskStore.listTasks(projectPath, 'done'),
+      this.taskStore.getRecurringIssueCategories(projectPath, 10),
+    ]);
+
+    const reviewEvents = reviewEventsResult ?? [];
+    const recentTasks = recentTasksResult ?? [];
+    const issueCategories = issueCategoriesResult ?? [];
+
+    const totalReviews = reviewEvents.length;
+    const passedReviews = reviewEvents.filter(event => event?.passed === true).length;
+    const passRate = totalReviews > 0 ? passedReviews / totalReviews : 1;
+
+    const costWindowSize = Math.min(recentTasks.length, 20);
+    const avgCostUsd = costWindowSize > 0
+      ? recentTasks
+        .slice(-costWindowSize)
+        .reduce((sum, task) => sum + Number(task?.total_cost_usd ?? 0), 0) / costWindowSize
+      : 0;
+
+    const issueCount = issueCategories.reduce((sum, category) => sum + Number(category?.count ?? 0), 0);
+    const tasksEvaluated = reviewEvents.length;
+
+    return { passRate, avgCostUsd, issueCount, tasksEvaluated };
   }
 
   private async storeProposedPatches(
     parsed: ParsedMetaReflectOutput,
     projectPath: string,
     maxActive: number,
-    data: MetaReflectData,
   ): Promise<void> {
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.patches)) {
       throw new Error('parsed meta-reflect output is required for prompt patch storage');
@@ -300,16 +329,8 @@ export class EvolutionEngine {
     if (!Number.isFinite(maxActive) || maxActive <= 0) {
       throw new Error('maxActive must be a positive number');
     }
-    if (!data || typeof data !== 'object') {
-      throw new Error('meta-reflect data is required for patch storage');
-    }
 
-    const issueCategories = Array.isArray(data.issueCategories) ? data.issueCategories : [];
-    const reviewEvents = Array.isArray(data.reviewEvents) ? data.reviewEvents : [];
-    const passRate = Number.isFinite(data.passRate) ? data.passRate : 0;
-    const avgCost = Number.isFinite(data.avgCost) ? data.avgCost : 0;
-    const issueCount = issueCategories.reduce((sum, category) => sum + Number(category?.count ?? 0), 0);
-    const tasksEvaluated = reviewEvents.length;
+    const baselineMetrics = await this.collectPromptPatchBaselineMetrics(projectPath);
 
     for (const proposal of parsed.patches.slice(0, 3)) {
       if (!proposal || typeof proposal.promptName !== 'string') {
@@ -333,12 +354,7 @@ export class EvolutionEngine {
         patches: Array.isArray(proposal.patches) ? proposal.patches : [],
         rationale: proposal.rationale ?? '',
         confidence: Number.isFinite(proposal.confidence) ? proposal.confidence : 0,
-        baseline_metrics: {
-          passRate,
-          avgCostUsd: avgCost,
-          issueCount,
-          tasksEvaluated,
-        },
+        baseline_metrics: baselineMetrics,
       });
       log.info(`Meta-reflect: stored candidate patch for "${proposal.promptName}" v${version} (confidence=${proposal.confidence})`);
     }
