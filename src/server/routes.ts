@@ -131,9 +131,10 @@ function reserveSseConnection(endpoint: string, res: ServerResponse): (() => voi
   }
 
   const connectionId = Symbol(endpointKey);
+  const previousConnections = connections.size;
   connections.add(connectionId);
   const activeConnections = connections.size;
-  if (activeConnections > SSE_WARN_CONNECTION_THRESHOLD) {
+  if (previousConnections <= SSE_WARN_CONNECTION_THRESHOLD && activeConnections > SSE_WARN_CONNECTION_THRESHOLD) {
     log.warn('SSE connection count is nearing endpoint limit.', {
       endpoint: endpointKey,
       activeConnections,
