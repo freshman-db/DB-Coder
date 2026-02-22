@@ -71,9 +71,8 @@
         <button class="menu-toggle" id="menuToggle">&#9776;</button>
         <div class="topbar-title" id="pageTitle">仪表盘</div>
         <div class="topbar-actions">
-          <button class="btn btn-sm btn-warning" id="btnPause" title="暂停/恢复">&#9208; 暂停</button>
-          <button class="btn btn-sm btn-primary" id="btnScan" title="触发扫描">&#8635; 扫描</button>
-          <button class="btn btn-sm btn-success" id="btnAddTask" title="新建任务">+ 新建任务</button>
+          <button class="btn btn-sm btn-warning" id="btnPatrol" title="启动/停止巡逻" onclick="togglePatrol()">&#9654; 巡逻</button>
+          <button class="btn btn-sm btn-primary" id="btnNewChat" title="新建计划对话" onclick="startNewChat()">+ 新建对话</button>
         </div>
       </header>
       <div class="content" id="content">

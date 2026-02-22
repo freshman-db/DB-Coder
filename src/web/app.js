@@ -263,7 +263,7 @@ async function renderDashboard() {
   const healthColor = healthScore >= 80 ? 'green' : healthScore >= 50 ? 'orange' : 'red';
 
   state.paused = !!st.paused;
-  updatePauseBtn();
+  updatePatrolBtn(patrolling);
 
   const patrolBtn = patrolling
     ? `<button class="btn btn-sm btn-warning" onclick="stopPatrol()">停止巡逻</button>`
@@ -337,7 +337,7 @@ async function renderDashboard() {
     const s = await api('/status');
     if (!s) return;
     state.paused = !!s.paused;
-    updatePauseBtn();
+    updatePatrolBtn(!!s.patrolling);
     updateConnection(true);
   }, 10000);
 }
@@ -347,7 +347,8 @@ async function startPatrol() {
   const result = await api('/patrol/start', { method: 'POST' });
   if (result?.ok) {
     toast('巡逻已启动');
-    renderDashboard();
+    updatePatrolBtn(true);
+    if (state.currentPage === 'dashboard') renderDashboard();
   }
 }
 
@@ -356,7 +357,8 @@ async function stopPatrol() {
   const result = await api('/patrol/stop', { method: 'POST' });
   if (result?.ok) {
     toast('巡逻已停止');
-    renderDashboard();
+    updatePatrolBtn(false);
+    if (state.currentPage === 'dashboard') renderDashboard();
   }
 }
 
@@ -1061,7 +1063,6 @@ async function togglePause() {
   const res = await api(endpoint, { method: 'POST' });
   if (res !== null) {
     state.paused = !state.paused;
-    updatePauseBtn();
     toast(state.paused ? '系统已暂停' : '系统已恢复');
   }
 }
@@ -1082,18 +1083,37 @@ async function deleteTask(id) {
 
 // 暴露到全局供 onclick 使用
 window.deleteTask = deleteTask;
+window.togglePatrol = togglePatrol;
+window.startNewChat = startNewChat;
+window.sendChatMessage = sendChatMessage;
+window.generatePlanFromChat = generatePlanFromChat;
+window.closeChatSession = closeChatSession;
+window.approvePlan = approvePlan;
+window.rejectPlan = rejectPlan;
+window.executePlan = executePlan;
+window.startPatrol = startPatrol;
+window.stopPatrol = stopPatrol;
 
-function updatePauseBtn() {
-  const btn = $('#btnPause');
+function updatePatrolBtn(patrolling) {
+  const btn = $('#btnPatrol');
   if (!btn) return;
-  if (state.paused) {
-    btn.textContent = '▶ 恢复';
-    btn.classList.remove('btn-warning');
-    btn.classList.add('btn-success');
-  } else {
-    btn.textContent = '⏸ 暂停';
-    btn.classList.remove('btn-success');
+  state.patrolling = !!patrolling;
+  if (patrolling) {
+    btn.innerHTML = '&#9632; 停止巡逻';
+    btn.classList.remove('btn-primary');
     btn.classList.add('btn-warning');
+  } else {
+    btn.innerHTML = '&#9654; 开始巡逻';
+    btn.classList.remove('btn-warning');
+    btn.classList.add('btn-primary');
+  }
+}
+
+async function togglePatrol() {
+  if (state.patrolling) {
+    await stopPatrol();
+  } else {
+    await startPatrol();
   }
 }
 
@@ -1648,10 +1668,9 @@ function init() {
   window.addEventListener('hashchange', navigate);
 
   // 按钮事件
-  $('#btnPause').addEventListener('click', togglePause);
-  $('#btnScan').addEventListener('click', triggerScan);
-  $('#btnAddTask').addEventListener('click', openModal);
   $('#menuToggle').addEventListener('click', toggleSidebar);
+  // Patrol button uses onclick in HTML; updatePatrolBtn sets initial state
+  updatePatrolBtn(false);
 
   // 模态框事件
   $('#modalClose').addEventListener('click', closeModal);
