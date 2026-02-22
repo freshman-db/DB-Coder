@@ -123,6 +123,35 @@ function getStatus(s) {
 
 const priorityLabels = { low: '低', medium: '中', high: '高', critical: '紧急' };
 
+// Map numeric priority (from DB) to string key for display
+// DB schema: 0=P0 urgent, 1=P1 high, 2=P2 medium, 3=P3 low
+const priorityNumToStr = { 0: 'critical', 1: 'high', 2: 'medium', 3: 'low' };
+const priorityStrToNum = { critical: 0, high: 1, medium: 2, low: 3 };
+
+function getPriorityStr(numOrStr) {
+  if (typeof numOrStr === 'number') return priorityNumToStr[numOrStr] || 'medium';
+  return numOrStr || 'medium';
+}
+
+// Extract a display title from task_description (first line, truncated)
+function getTaskTitle(task) {
+  const desc = task.task_description || task.description || '';
+  if (!desc) return `任务 #${task.id}`;
+  const firstLine = desc.split('\n')[0].trim();
+  return firstLine.slice(0, 80) || `任务 #${task.id}`;
+}
+
+// Get the full description body (everything after the first line)
+function getTaskBody(task) {
+  const desc = task.task_description || task.description || '';
+  const lines = desc.split('\n');
+  if (lines.length <= 1) return '';
+  // Skip first line (title) and any blank line after it
+  let start = 1;
+  while (start < lines.length && lines[start].trim() === '') start++;
+  return lines.slice(start).join('\n');
+}
+
 // ---- 路由 ----
 const routes = [
   { pattern: /^#\/$|^#?$/, page: 'dashboard', title: '仪表盘' },
@@ -275,14 +304,15 @@ async function renderDashboard() {
 
 function renderTaskRow(t) {
   const st = getStatus(t.status);
-  const pri = t.priority || 'medium';
+  const pri = getPriorityStr(t.priority);
+  const title = getTaskTitle(t);
   return `
     <div class="list-item" onclick="location.hash='#/tasks/${t.id}'">
       <span class="status-icon" title="${st.label}">${st.icon}</span>
-      <span class="list-item-title">${escapeHtml(t.title || t.description?.slice(0, 60) || `任务 #${t.id}`)}</span>
+      <span class="list-item-title">${escapeHtml(title)}</span>
       <span class="badge badge-${pri}">${priorityLabels[pri] || pri}</span>
       <span class="badge badge-${st.badge}">${st.label}</span>
-      <span style="color:var(--text-muted);font-size:12px;min-width:70px;text-align:right;">${timeAgo(t.createdAt || t.created_at)}</span>
+      <span style="color:var(--text-muted);font-size:12px;min-width:70px;text-align:right;">${timeAgo(t.created_at)}</span>
     </div>
   `;
 }
@@ -323,12 +353,15 @@ async function renderTaskDetail(id) {
   }
 
   const st = getStatus(task.status);
-  const pri = task.priority || 'medium';
+  const pri = getPriorityStr(task.priority);
+  const title = getTaskTitle(task);
+  const body = getTaskBody(task);
+  const fullDesc = task.task_description || task.description || '';
 
   content.innerHTML = `
     <div class="detail-header">
       <a href="#/tasks" class="btn btn-sm btn-secondary">&larr; 返回</a>
-      <h2>${escapeHtml(task.title || `任务 #${task.id}`)}</h2>
+      <h2>${escapeHtml(title)}</h2>
       <span class="badge badge-${st.badge}">${st.label}</span>
       <button class="btn btn-sm btn-danger" onclick="deleteTask('${task.id}')">删除任务</button>
     </div>
@@ -344,25 +377,25 @@ async function renderTaskDetail(id) {
       </div>
       <div class="meta-item">
         <div class="meta-label">Git 分支</div>
-        <div class="meta-value">${task.branch || task.gitBranch || '-'}</div>
+        <div class="meta-value">${task.git_branch || '-'}</div>
       </div>
       <div class="meta-item">
         <div class="meta-label">费用</div>
-        <div class="meta-value">$${(task.cost ?? 0).toFixed(4)}</div>
+        <div class="meta-value">$${(task.total_cost_usd ?? 0).toFixed(4)}</div>
       </div>
       <div class="meta-item">
         <div class="meta-label">创建时间</div>
-        <div class="meta-value">${task.createdAt || task.created_at || '-'}</div>
+        <div class="meta-value">${task.created_at || '-'}</div>
       </div>
       <div class="meta-item">
-        <div class="meta-label">仓库</div>
-        <div class="meta-value">${task.repo || task.repository || '-'}</div>
+        <div class="meta-label">阶段</div>
+        <div class="meta-value">${task.phase || '-'}</div>
       </div>
     </div>
 
     <h3 class="section-title">任务描述</h3>
     <div class="card" style="margin-bottom:20px;">
-      <div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:var(--text-secondary);">${escapeHtml(task.description || '无描述')}</div>
+      <div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:var(--text-secondary);">${escapeHtml(body || fullDesc || '无描述')}</div>
     </div>
 
     ${renderSubtasks(task.subtasks)}
@@ -896,7 +929,6 @@ function openModal() {
   $('#taskTitle').value = '';
   $('#taskDesc').value = '';
   $('#taskPriority').value = 'medium';
-  $('#taskRepo').value = '';
   setTimeout(() => $('#taskTitle').focus(), 100);
 }
 
@@ -906,21 +938,22 @@ function closeModal() {
 
 async function submitTask() {
   const title = $('#taskTitle').value.trim();
-  const description = $('#taskDesc').value.trim();
-  const priority = $('#taskPriority').value;
-  const repo = $('#taskRepo').value.trim();
+  const desc = $('#taskDesc').value.trim();
+  const priorityStr = $('#taskPriority').value;
 
   if (!title) {
     toast('请输入任务标题', 'error');
     return;
   }
 
-  const body = { title, description, priority };
-  if (repo) body.repo = repo;
+  // Combine title + description into a single description field
+  // First line = title, rest = body (backend only has task_description)
+  const description = desc ? `${title}\n\n${desc}` : title;
+  const priority = priorityStrToNum[priorityStr] ?? 2;
 
   const res = await api('/tasks', {
     method: 'POST',
-    body: JSON.stringify(body),
+    body: JSON.stringify({ description, priority }),
   });
 
   if (res !== null) {
