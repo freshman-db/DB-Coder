@@ -34,21 +34,233 @@ type MainLoopInternals = {
   setRunning(running: boolean): void;
 };
 
-function createMainLoop(): MainLoop {
-  const config = {
+type CycleConfigOverrides = {
+  projectPath?: string;
+  values?: {
+    brain?: { scanInterval?: number };
+    autonomy?: {
+      maxRetries?: number;
+      retryBaseDelayMs?: number;
+      subtaskTimeout?: number;
+    };
+    git?: { branchPrefix?: string };
+    evolution?: { metaReflectInterval?: number };
+  };
+};
+
+type MainLoopCycleOverrides = {
+  config?: CycleConfigOverrides;
+  brain?: Partial<Brain>;
+  taskQueue?: Partial<TaskQueue>;
+  claude?: Partial<ClaudeBridge>;
+  codex?: Partial<CodexBridge>;
+  taskStore?: Partial<TaskStore>;
+  globalMemory?: Partial<GlobalMemory>;
+  costTracker?: Partial<CostTracker>;
+};
+
+type MainLoopCycleFixture = {
+  loop: MainLoop;
+  deps: {
+    config: Config;
+    brain: Brain;
+    taskQueue: TaskQueue;
+    claude: ClaudeBridge;
+    codex: CodexBridge;
+    taskStore: TaskStore;
+    globalMemory: GlobalMemory;
+    costTracker: CostTracker;
+  };
+};
+
+function createMainLoopForCycle(overrides: MainLoopCycleOverrides = {}): MainLoopCycleFixture {
+  const baseConfig = {
     projectPath: '/tmp/db-coder-main-loop-test',
+    values: {
+      brain: { scanInterval: 1 },
+      autonomy: { maxRetries: 3, retryBaseDelayMs: 1, subtaskTimeout: 60 },
+      git: { branchPrefix: 'db-coder/' },
+      evolution: { metaReflectInterval: 5 },
+    },
+  };
+  const config = {
+    ...baseConfig,
+    ...overrides.config,
+    values: {
+      ...baseConfig.values,
+      ...overrides.config?.values,
+      brain: {
+        ...baseConfig.values.brain,
+        ...(overrides.config?.values?.brain ?? {}),
+      },
+      autonomy: {
+        ...baseConfig.values.autonomy,
+        ...(overrides.config?.values?.autonomy ?? {}),
+      },
+      git: {
+        ...baseConfig.values.git,
+        ...(overrides.config?.values?.git ?? {}),
+      },
+      evolution: {
+        ...baseConfig.values.evolution,
+        ...(overrides.config?.values?.evolution ?? {}),
+      },
+    },
   } as unknown as Config;
 
-  return new MainLoop(
+  const brain = {
+    hasChanges: async () => false,
+    scanProject: async () => ({
+      analysis: { issues: [], opportunities: [], projectHealth: 100, summary: 'No changes' },
+      cost: 0,
+    }),
+    createPlan: async () => ({ plan: { tasks: [], reasoning: 'No tasks' }, cost: 0 }),
+    reflect: async () => ({
+      reflection: {
+        experiences: [],
+        taskSummary: 'No reflection',
+        adjustments: [],
+      },
+      cost: 0,
+    }),
+    ...overrides.brain,
+  } as unknown as Brain;
+
+  const taskQueue = {
+    enqueue: async () => [],
+    getQueued: async () => [],
+    getNext: async () => null,
+    ...overrides.taskQueue,
+  } as unknown as TaskQueue;
+
+  const claude = {
+    plan: async () => ({
+      success: true,
+      output: JSON.stringify({
+        problemLegitimacy: 1,
+        solutionProportionality: 1,
+        expectedComplexity: 1,
+        historicalSuccess: 1,
+        reasoning: 'Default pass',
+      }),
+      cost_usd: 0,
+      duration_ms: 0,
+    }),
+    execute: async () => ({
+      success: true,
+      output: 'ok',
+      cost_usd: 0,
+      duration_ms: 0,
+    }),
+    review: async () => ({
+      passed: true,
+      issues: [],
+      summary: 'No review issues',
+      cost_usd: 0,
+    }),
+    getMcpServerNames: () => [],
+    getLoadedPluginIds: () => [],
+    ...overrides.claude,
+  } as unknown as ClaudeBridge;
+
+  const codex = {
+    plan: async () => ({
+      success: true,
+      output: 'No-op plan',
+      cost_usd: 0,
+      duration_ms: 0,
+    }),
+    execute: async () => ({
+      success: true,
+      output: 'ok',
+      cost_usd: 0,
+      duration_ms: 0,
+    }),
+    review: async () => ({
+      passed: true,
+      issues: [],
+      summary: 'No review issues',
+      cost_usd: 0,
+    }),
+    ...overrides.codex,
+  } as unknown as CodexBridge;
+
+  const taskStore = {
+    addDailyCost: async () => {},
+    getLastScan: async () => null,
+    saveEvaluationEvent: async () => {},
+    updateTask: async () => {},
+    addLog: async () => {},
+    saveReviewEvent: async () => {},
+    getActivePromptVersions: async () => [],
+    updatePromptVersionEffectiveness: async () => {},
+    listTasks: async () => [],
+    recoverActiveTasks: async () => 0,
+    ...overrides.taskStore,
+  } as unknown as TaskStore;
+
+  const globalMemory = {
+    getRelevant: async () => '',
+    search: async () => [],
+    add: async () => ({
+      id: 1,
+      category: 'experience',
+      title: 'noop',
+      content: 'noop',
+      tags: [],
+      source_project: null,
+      confidence: 0.5,
+      created_at: new Date(),
+      updated_at: new Date(),
+    }),
+    updateConfidence: async () => {},
+    ...overrides.globalMemory,
+  } as unknown as GlobalMemory;
+
+  const costTracker = {
+    addCost: async () => {},
+    checkBudget: async () => ({ allowed: true }),
+    getDailySummary: async () => [],
+    getSessionCost: () => 0,
+    ...overrides.costTracker,
+  } as unknown as CostTracker;
+
+  const loop = new MainLoop(
     config,
-    {} as unknown as Brain,
-    {} as unknown as TaskQueue,
-    {} as unknown as ClaudeBridge,
-    {} as unknown as CodexBridge,
-    {} as unknown as TaskStore,
-    {} as unknown as GlobalMemory,
-    {} as unknown as CostTracker,
+    brain,
+    taskQueue,
+    claude,
+    codex,
+    taskStore,
+    globalMemory,
+    costTracker,
   );
+
+  return {
+    loop,
+    deps: {
+      config,
+      brain,
+      taskQueue,
+      claude,
+      codex,
+      taskStore,
+      globalMemory,
+      costTracker,
+    },
+  };
+}
+
+function createMainLoop(): MainLoop {
+  return createMainLoopForCycle().loop;
+}
+
+function collectStates(loop: MainLoop): { states: StatusSnapshot[]; remove: () => void } {
+  const states: StatusSnapshot[] = [];
+  const remove = loop.addStatusListener(snapshot => {
+    states.push(snapshot);
+  });
+  return { states, remove };
 }
 
 function getMainLoopInternals(loop: MainLoop): MainLoopInternals {
@@ -192,36 +404,28 @@ describe('MainLoop status listeners', () => {
   test('registers and removes listeners', () => {
     const loop = createMainLoop();
     const internals = getMainLoopInternals(loop);
-    const snapshots: StatusSnapshot[] = [];
-
-    const remove = loop.addStatusListener(snapshot => {
-      snapshots.push(snapshot);
-    });
+    const { states, remove } = collectStates(loop);
 
     internals.setState('scanning');
-    assert.equal(snapshots.length, 1);
-    assert.equal(snapshots[0]?.state, 'scanning');
+    assert.equal(states.length, 1);
+    assert.equal(states[0]?.state, 'scanning');
 
     remove();
     internals.setState('planning');
-    assert.equal(snapshots.length, 1);
+    assert.equal(states.length, 1);
   });
 
   test('broadcasts latest state fields to listeners', () => {
     const loop = createMainLoop();
     const internals = getMainLoopInternals(loop);
-    const snapshots: StatusSnapshot[] = [];
-
-    loop.addStatusListener(snapshot => {
-      snapshots.push(snapshot);
-    });
+    const { states } = collectStates(loop);
 
     internals.setRunning(true);
     internals.setState('executing');
     internals.setCurrentTaskId('task-123');
     internals.setPaused(true);
 
-    assert.deepEqual(snapshots.at(-1), {
+    assert.deepEqual(states.at(-1), {
       state: 'executing',
       currentTaskId: 'task-123',
       patrolling: true,
