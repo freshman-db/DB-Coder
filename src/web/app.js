@@ -314,8 +314,8 @@ async function renderDashboard() {
   const currentTaskSubtitle = getCurrentTaskSubtitle(st);
 
   const patrolBtn = patrolling
-    ? `<button class="btn btn-sm btn-warning" onclick="stopPatrol()">停止巡逻</button>`
-    : `<button class="btn btn-sm btn-primary" onclick="startPatrol()">开始巡逻</button>`;
+    ? `<button class="btn btn-sm btn-warning" data-action="stopPatrol">停止巡逻</button>`
+    : `<button class="btn btn-sm btn-primary" data-action="startPatrol">开始巡逻</button>`;
 
   content.innerHTML = `
     <div class="cards-grid">
@@ -415,7 +415,7 @@ function renderTaskRow(t) {
   const pri = getPriorityStr(t.priority);
   const title = getTaskTitle(t);
   return `
-    <div class="list-item" onclick="location.hash='#/tasks/${escapeHtml(String(t.id ?? ''))}'">
+    <div class="list-item" data-action="navigate" data-id="#/tasks/${escapeHtml(String(t.id ?? ''))}">
       <span class="status-icon" title="${st.label}">${st.icon}</span>
       <span class="list-item-title">${escapeHtml(title)}</span>
       <span class="badge badge-${pri}">${priorityLabels[pri] || pri}</span>
@@ -515,7 +515,7 @@ async function renderTaskDetail(id) {
       <a href="#/tasks" class="btn btn-sm btn-secondary">&larr; 返回</a>
       <h2>${escapeHtml(title)}</h2>
       <span class="badge badge-${st.badge}">${st.label}</span>
-      <button class="btn btn-sm btn-danger" onclick="deleteTask('${escapeHtml(String(task.id ?? ''))}')">删除任务</button>
+      <button class="btn btn-sm btn-danger" data-action="deleteTask" data-id="${escapeHtml(String(task.id ?? ''))}">删除任务</button>
     </div>
 
     <div class="detail-meta">
@@ -827,13 +827,13 @@ async function renderPlugins() {
 
     const actions = [];
     if (!p.installed) {
-      actions.push(`<button class="btn btn-sm btn-primary" onclick="pluginAction('${escapeHtml(p.name)}','install')">安装</button>`);
+      actions.push(`<button class="btn btn-sm btn-primary" data-action="pluginAction" data-id="${escapeHtml(p.name)}" data-arg="install">安装</button>`);
     } else {
-      if (p.hasUpdate) actions.push(`<button class="btn btn-sm btn-warning" onclick="pluginAction('${escapeHtml(p.name)}','update')">更新</button>`);
+      if (p.hasUpdate) actions.push(`<button class="btn btn-sm btn-warning" data-action="pluginAction" data-id="${escapeHtml(p.name)}" data-arg="update">更新</button>`);
       if (p.enabled) {
-        actions.push(`<button class="btn btn-sm btn-secondary" onclick="pluginAction('${escapeHtml(p.name)}','disable')">禁用</button>`);
+        actions.push(`<button class="btn btn-sm btn-secondary" data-action="pluginAction" data-id="${escapeHtml(p.name)}" data-arg="disable">禁用</button>`);
       } else {
-        actions.push(`<button class="btn btn-sm btn-success" onclick="pluginAction('${escapeHtml(p.name)}','enable')">启用</button>`);
+        actions.push(`<button class="btn btn-sm btn-success" data-action="pluginAction" data-id="${escapeHtml(p.name)}" data-arg="enable">启用</button>`);
       }
     }
 
@@ -887,7 +887,7 @@ async function pluginAction(name, action) {
     toast(`操作失败: ${res?.error || '未知错误'}`, 'error');
   }
 }
-window.pluginAction = pluginAction;
+// pluginAction called via data-action="pluginAction" delegation, no window global needed.
 
 // ---- 进化分析 ----
 async function renderEvolution() {
@@ -1058,18 +1058,8 @@ async function deleteTask(id) {
   }
 }
 
-// 暴露到全局供 onclick 使用
-window.deleteTask = deleteTask;
-window.togglePatrol = togglePatrol;
-window.startNewChat = startNewChat;
-window.sendChatMessage = sendChatMessage;
-window.generatePlanFromChat = generatePlanFromChat;
-window.closeChatSession = closeChatSession;
-window.approvePlan = approvePlan;
-window.rejectPlan = rejectPlan;
-window.executePlan = executePlan;
-window.startPatrol = startPatrol;
-window.stopPatrol = stopPatrol;
+// Legacy window globals removed — all interactive elements now use data-action
+// delegation (setupActionDelegation) or direct addEventListener in init().
 
 function updatePatrolBtn(patrolling) {
   const btn = $('#btnPatrol');
@@ -1172,7 +1162,7 @@ async function renderPlans() {
   content.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
       <h2 style="margin:0;">计划对话</h2>
-      <button class="btn btn-primary" onclick="startNewChat()">+ 开始新对话</button>
+      <button class="btn btn-primary" data-action="startNewChat">+ 开始新对话</button>
     </div>
     <div class="list-container" id="planList">
       ${!drafts || drafts.length === 0 ? '<div class="empty-state"><p>暂无计划会话，点击上方按钮开始</p></div>' :
@@ -1185,7 +1175,7 @@ async function renderPlans() {
             ? (d.markdown || '').split('\\n')[0].slice(0, 80) || '对话 #' + d.id
             : (d.markdown || d.reasoning || '').split('\\n')[0].slice(0, 80) || '计划 #' + d.id;
           return `
-            <div class="list-item" onclick="location.hash='#/plans/${escapeHtml(String(d.id ?? ''))}'">
+            <div class="list-item" data-action="navigate" data-id="#/plans/${escapeHtml(String(d.id ?? ''))}">
               <span class="badge badge-${st.badge}">${st.label}</span>
               <span class="list-item-title" style="flex:1;">${escapeHtml(title)}</span>
               ${taskCount > 0 ? `<span style="color:var(--text-muted);font-size:12px;">${taskCount} 任务</span>` : ''}
@@ -1235,15 +1225,15 @@ async function renderChatView(id, draft) {
         <a href="#/plans" style="font-size:12px;color:var(--text-muted);text-decoration:none;">&larr; 返回列表</a>
         <span style="flex:1;"></span>
         <span class="badge badge-${chatSt.badge}" id="chatStatusBadge">${chatSt.label}</span>
-        ${isClosed ? '' : `<button class="btn btn-sm btn-success" id="btnGeneratePlan" style="display:none;" onclick="generatePlanFromChat(${id})">生成计划</button>
-        <button class="btn btn-sm btn-secondary" onclick="closeChatSession(${id})">关闭会话</button>`}
+        ${isClosed ? '' : `<button class="btn btn-sm btn-success" id="btnGeneratePlan" style="display:none;" data-action="generatePlanFromChat" data-id="${id}">生成计划</button>
+        <button class="btn btn-sm btn-secondary" data-action="closeChatSession" data-id="${id}">关闭会话</button>`}
       </div>
       <div class="chat-messages" id="chatMessages"></div>
       ${isClosed
-        ? `<div style="padding:12px;text-align:center;color:var(--text-muted);font-size:13px;">会话已结束 <button class="btn btn-sm btn-primary" onclick="resumeChatSession(${id})" style="margin-left:8px;">恢复对话</button></div>`
+        ? `<div style="padding:12px;text-align:center;color:var(--text-muted);font-size:13px;">会话已结束 <button class="btn btn-sm btn-primary" data-action="resumeChatSession" data-id="${id}" style="margin-left:8px;">恢复对话</button></div>`
         : `<div class="chat-input-area">
         <textarea class="chat-input" id="chatInput" placeholder="描述你的需求，或继续对话..." rows="2"></textarea>
-        <button class="btn btn-primary chat-send-btn" id="chatSendBtn" onclick="sendChatMessage(${id})">发送</button>
+        <button class="btn btn-primary chat-send-btn" id="chatSendBtn" data-action="sendChatMessage" data-id="${id}">发送</button>
       </div>`}
     </div>
   `;
@@ -1289,11 +1279,11 @@ function renderPlanReviewView(id, draft) {
       </div>
       <div style="display:flex;gap:8px;">
         ${draft.status === 'draft' ? `
-          <button class="btn btn-success" onclick="approvePlan(${draft.id})">批准</button>
-          <button class="btn btn-warning" onclick="rejectPlan(${draft.id})">拒绝</button>
+          <button class="btn btn-success" data-action="approvePlan" data-id="${draft.id}">批准</button>
+          <button class="btn btn-warning" data-action="rejectPlan" data-id="${draft.id}">拒绝</button>
         ` : ''}
         ${draft.status === 'approved' ? `
-          <button class="btn btn-primary" onclick="executePlan(${draft.id})">执行计划</button>
+          <button class="btn btn-primary" data-action="executePlan" data-id="${draft.id}">执行计划</button>
         ` : ''}
       </div>
     </div>
@@ -1579,8 +1569,44 @@ function setupAuthListeners() {
   });
 }
 
+// ---- 事件委托 (CSP-friendly: 替代 inline onclick) ----
+// Scoped to #content — all dynamically rendered data-action buttons live inside it.
+// Static elements (sidebar, topbar, modals) use direct addEventListener in init().
+function setupActionDelegation() {
+  const contentEl = document.getElementById('content');
+  if (!contentEl) return;
+
+  contentEl.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-action]');
+    if (!el) return;
+
+    const action = el.dataset.action;
+    const id = el.dataset.id;
+    const arg = el.dataset.arg;
+
+    switch (action) {
+      case 'startPatrol': startPatrol(); break;
+      case 'stopPatrol': stopPatrol(); break;
+      case 'deleteTask': deleteTask(id); break;
+      case 'pluginAction': pluginAction(id, arg); break;
+      case 'startNewChat': startNewChat(); break;
+      case 'generatePlanFromChat': generatePlanFromChat(id); break;
+      case 'closeChatSession': closeChatSession(id); break;
+      case 'resumeChatSession': resumeChatSession(id); break;
+      case 'sendChatMessage': sendChatMessage(id); break;
+      case 'approvePlan': approvePlan(id); break;
+      case 'rejectPlan': rejectPlan(id); break;
+      case 'executePlan': executePlan(id); break;
+      case 'navigate': location.hash = id; break;
+    }
+  });
+}
+
 // ---- 初始化 ----
 function init() {
+  // 事件委托 (替代 inline onclick，CSP 安全)
+  setupActionDelegation();
+
   // 认证界面事件
   setupAuthListeners();
 
@@ -1589,7 +1615,9 @@ function init() {
 
   // 按钮事件
   $('#menuToggle').addEventListener('click', toggleSidebar);
-  // Patrol button uses onclick in HTML; updatePatrolBtn sets initial state
+  // Topbar buttons (no inline onclick — CSP-friendly)
+  $('#btnPatrol').addEventListener('click', togglePatrol);
+  $('#btnNewChat').addEventListener('click', startNewChat);
   updatePatrolBtn(false);
 
   // 模态框事件
