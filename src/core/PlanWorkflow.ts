@@ -16,6 +16,7 @@ type SSEListener = (event: string, data: string) => void;
 
 export class PlanWorkflow {
   private chatSessions = new Map<number, ChatSession>();
+  private sessionLocks = new Map<number, Promise<void>>();
   private sseListeners = new Map<number, Set<SSEListener>>();
   private streamingText = new Map<number, string>();
 
@@ -137,13 +138,29 @@ export class PlanWorkflow {
     await this.taskStore.addChatMessage(draftId, 'user', userMessage);
     this.emit(draftId, 'message', { role: 'user', content: userMessage });
 
+    const existingLock = this.sessionLocks.get(draftId);
+    if (existingLock) {
+      await existingLock;
+    }
+
     // Get or start ChatSession
     let session = this.chatSessions.get(draftId);
     if (!session) {
-      const draft = await this.taskStore.getPlanDraft(draftId);
-      if (!draft) throw new Error(`Plan draft #${draftId} not found`);
-      this.startSession(draftId, draft.project_path);
-      session = this.chatSessions.get(draftId)!;
+      let releaseLock: (() => void) | undefined;
+      const lock = new Promise<void>((resolve) => {
+        releaseLock = resolve;
+      });
+      this.sessionLocks.set(draftId, lock);
+
+      try {
+        const draft = await this.taskStore.getPlanDraft(draftId);
+        if (!draft) throw new Error(`Plan draft #${draftId} not found`);
+        this.startSession(draftId, draft.project_path);
+        session = this.chatSessions.get(draftId)!;
+      } finally {
+        releaseLock?.();
+        this.sessionLocks.delete(draftId);
+      }
     }
 
     // Update status
