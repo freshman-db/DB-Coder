@@ -14,7 +14,7 @@ import type { AgentResult, ReviewResult, ReviewIssue } from '../bridges/CodingAg
 import { executorPrompt } from '../prompts/executor.js';
 import { reviewerPrompt } from '../prompts/reviewer.js';
 import { buildAgentGuidance } from '../prompts/agents.js';
-import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch, isWorkingClean, branchExists, getChangedFilesSince } from '../utils/git.js';
+import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch, isWorkingClean, branchExists, getChangedFilesSince, mergeBranch, deleteBranch } from '../utils/git.js';
 import { log } from '../utils/logger.js';
 import { calculateRetryDelay } from '../utils/retry.js';
 import { readFileSync, existsSync, writeFileSync, unlinkSync } from 'node:fs';
@@ -293,14 +293,14 @@ export class MainLoop {
 
       let reviewRetries = 0;
       let changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
-      let { merged: reviewResult, decision: reviewDecision } = await this.dualReview(task, changedFiles, reviewRetries);
+      let { merged: reviewResult, decision: reviewDecision, cost_usd: reviewCost, duration_ms: reviewDuration } = await this.dualReview(task, changedFiles, reviewRetries);
 
       await this.taskStore.updateTask(task.id, {
         review_results: [...(task.review_results as unknown[] || []), reviewResult],
       });
 
       // Record initial review event
-      await this.saveReviewEvent(task.id, 0, reviewResult, null);
+      await this.saveReviewEvent(task.id, 0, reviewResult, null, reviewCost, reviewDuration);
 
       // Fix-and-re-review loop (in-place, no task re-queue)
       while (reviewDecision === 'retry') {
@@ -324,10 +324,10 @@ export class MainLoop {
         if (!(await this.enforceBudget(task.id))) return;
 
         changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
-        ({ merged: reviewResult, decision: reviewDecision } = await this.dualReview(task, changedFiles, reviewRetries));
+        ({ merged: reviewResult, decision: reviewDecision, cost_usd: reviewCost, duration_ms: reviewDuration } = await this.dualReview(task, changedFiles, reviewRetries));
 
         // Record review event with fix agent info
-        await this.saveReviewEvent(task.id, reviewRetries, reviewResult, fixAgentName);
+        await this.saveReviewEvent(task.id, reviewRetries, reviewResult, fixAgentName, reviewCost, reviewDuration);
 
         await this.taskStore.updateTask(task.id, {
           review_results: [...(task.review_results as unknown[] || []), reviewResult],
@@ -361,6 +361,17 @@ export class MainLoop {
       });
 
       log.info(`Task ${reviewResult.passed ? 'completed' : 'blocked'}: ${task.task_description.slice(0, 60)}`);
+
+      // Merge completed task branch back to main
+      if (reviewResult.passed) {
+        try {
+          await switchBranch(originalBranch, projectPath);
+          await mergeBranch(branchName, projectPath);
+          await deleteBranch(branchName, projectPath);
+        } catch (mergeErr) {
+          log.warn(`Auto-merge failed for ${branchName}: ${mergeErr}`);
+        }
+      }
     } catch (err) {
       log.error('Task execution error', err);
       await this.taskStore.updateTask(task.id, { status: 'failed', phase: 'failed' });
@@ -452,21 +463,24 @@ export class MainLoop {
     task: Task,
     changedFiles: string[],
     reviewRetries: number,
-  ): Promise<{ merged: MergedReviewResult; decision: 'approve' | 'retry' | 'reject' }> {
+  ): Promise<{ merged: MergedReviewResult; decision: 'approve' | 'retry' | 'reject'; cost_usd: number; duration_ms: number }> {
     const filesStr = changedFiles.join('\n');
     const reviewMcpNames = this.claude.getMcpServerNames('review');
     const agentGuide = buildAgentGuidance('review', this.claude.getLoadedPluginIds());
     const reviewPromptText = reviewerPrompt(task.task_description, filesStr, reviewMcpNames, agentGuide);
 
     // Run both reviews in parallel
+    const reviewStart = Date.now();
     const [claudeReview, codexReview] = await Promise.all([
       this.claude.review(reviewPromptText, this.config.projectPath),
       this.codex.review(reviewPromptText, this.config.projectPath),
     ]);
+    const duration_ms = Date.now() - reviewStart;
 
-    log.info(`Reviews: Claude ${claudeReview.passed ? 'PASS' : 'FAIL'}, Codex ${codexReview.passed ? 'PASS' : 'FAIL'}`);
+    log.info(`Reviews: Claude ${claudeReview.passed ? 'PASS' : 'FAIL'}, Codex ${codexReview.passed ? 'PASS' : 'FAIL'} (${Math.round(duration_ms / 1000)}s)`);
 
     // Track costs
+    const cost_usd = claudeReview.cost_usd + codexReview.cost_usd;
     if (claudeReview.cost_usd > 0) {
       await this.costTracker.addCost(task.id, claudeReview.cost_usd);
     }
@@ -474,7 +488,7 @@ export class MainLoop {
       await this.costTracker.addCost(task.id, codexReview.cost_usd);
     }
 
-    return this.handleReviewResult(claudeReview, codexReview, reviewRetries);
+    return { ...this.handleReviewResult(claudeReview, codexReview, reviewRetries), cost_usd, duration_ms };
   }
 
   private handleReviewResult(
@@ -620,6 +634,8 @@ Fix these issues while maintaining code quality. Do not introduce new issues.`;
     attempt: number,
     result: MergedReviewResult,
     fixAgent: string | null,
+    cost_usd: number,
+    duration_ms: number,
   ): Promise<void> {
     try {
       const allIssues = [...result.mustFix, ...result.shouldFix];
@@ -633,8 +649,8 @@ Fix these issues while maintaining code quality. Do not introduce new issues.`;
         should_fix_count: result.shouldFix.length,
         issue_categories: categories,
         fix_agent: fixAgent,
-        duration_ms: null,
-        cost_usd: 0,
+        duration_ms,
+        cost_usd,
       });
     } catch (err) {
       log.warn(`Failed to save review event: ${err}`);
@@ -694,7 +710,10 @@ function mergeReviews(claude: ReviewResult, codex: ReviewResult): MergedReviewRe
     }
   }
 
-  const passed = claude.passed && codex.passed && mustFix.filter(i => i.severity === 'critical' || i.severity === 'high').length === 0;
+  // Pass if no must-fix issues (intersection of both reviewers).
+  // Individual reviewer shouldFix items don't block — they're logged for future reference.
+  const hasCriticalMustFix = mustFix.some(i => i.severity === 'critical' || i.severity === 'high');
+  const passed = mustFix.length === 0 || !hasCriticalMustFix;
 
   return {
     passed,

@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   total_cost_usd NUMERIC(10,4) DEFAULT 0,
   git_branch TEXT,
   start_commit TEXT,
+  depends_on UUID[] DEFAULT '{}',
   status TEXT DEFAULT 'queued',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -101,6 +102,8 @@ CREATE TABLE IF NOT EXISTS review_events (
   cost_usd NUMERIC(10,4) DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS depends_on UUID[] DEFAULT '{}';
 `;
 
 type TaskUpdateInput = Partial<Pick<Task, 'phase' | 'status' | 'plan' | 'subtasks' | 'review_results' | 'iteration' | 'total_cost_usd' | 'git_branch' | 'start_commit'>>;
@@ -141,11 +144,11 @@ export class TaskStore {
 
   // --- Tasks ---
 
-  async createTask(projectPath: string, description: string, priority = 2): Promise<Task> {
+  async createTask(projectPath: string, description: string, priority = 2, dependsOn: string[] = []): Promise<Task> {
     const sql = this.getSql();
     const [row] = await sql<Task[]>`
-      INSERT INTO tasks (project_path, task_description, priority)
-      VALUES (${projectPath}, ${description}, ${priority})
+      INSERT INTO tasks (project_path, task_description, priority, depends_on)
+      VALUES (${projectPath}, ${description}, ${priority}, ${dependsOn})
       RETURNING *
     `;
     return row;
@@ -235,7 +238,14 @@ export class TaskStore {
     const sql = this.getSql();
     const [row] = await sql<Task[]>`
       SELECT * FROM tasks
-      WHERE project_path = ${projectPath} AND status = 'queued'
+      WHERE project_path = ${projectPath}
+        AND status = 'queued'
+        AND NOT EXISTS (
+          SELECT 1 FROM unnest(depends_on) AS dep_id
+          WHERE dep_id NOT IN (
+            SELECT id FROM tasks WHERE status = 'done'
+          )
+        )
       ORDER BY priority ASC, created_at ASC
       LIMIT 1
     `;

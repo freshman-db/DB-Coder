@@ -28,6 +28,7 @@ export interface Task {
   total_cost_usd: number;
   git_branch: string | null;
   start_commit: string | null;
+  depends_on: string[];
   status: TaskStatus;
   created_at: Date;
   updated_at: Date;

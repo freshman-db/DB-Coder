@@ -12,19 +12,30 @@ export class TaskQueue {
     // Sort by priority (P0 first) then by dependency order
     const sorted = topologicalSort(plan.tasks);
 
+    // Map plan IDs (e.g. "T001") to database UUIDs for dependency tracking
+    const planIdToDbId = new Map<string, string>();
+
     for (const planTask of sorted) {
       // Dedup: skip if a similar task already exists
       const similar = await this.store.findSimilarTask(projectPath, planTask.description);
       if (similar) {
         log.info(`Skipping duplicate task: "${planTask.description.slice(0, 60)}" (similar to "${similar.task_description.slice(0, 40)}" [${similar.status}])`);
+        planIdToDbId.set(planTask.id, similar.id);
         continue;
       }
+
+      // Resolve dependency plan IDs to database UUIDs
+      const dependsOn = planTask.dependsOn
+        .map(depId => planIdToDbId.get(depId))
+        .filter((id): id is string => id !== undefined);
 
       const task = await this.store.createTask(
         projectPath,
         planTask.description,
         planTask.priority,
+        dependsOn,
       );
+      planIdToDbId.set(planTask.id, task.id);
       taskIds.push(task.id);
 
       // Store subtasks in the task record

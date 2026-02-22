@@ -66,6 +66,15 @@ export async function getRecentLog(cwd: string, n = 20): Promise<string> {
   return r.stdout;
 }
 
+export async function mergeBranch(branch: string, cwd: string): Promise<void> {
+  await git(['merge', '--no-ff', branch, '-m', `Merge branch '${branch}'`], cwd);
+  log.info(`Merged branch: ${branch}`);
+}
+
+export async function deleteBranch(branch: string, cwd: string): Promise<void> {
+  await git(['branch', '-d', branch], cwd);
+}
+
 export async function isGitRepo(cwd: string): Promise<boolean> {
   const r = await git(['rev-parse', '--git-dir'], cwd);
   return r.exitCode === 0;
