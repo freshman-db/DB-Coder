@@ -154,6 +154,19 @@ export async function deleteBranch(branch: string, cwd: string): Promise<void> {
   await git(['branch', '-d', branch], cwd);
 }
 
+export async function listBranches(prefix: string, cwd: string): Promise<string[]> {
+  const r = await git(['branch', '--list', `${prefix}*`], cwd);
+  return r.stdout
+    .split('\n')
+    .map(line => line.replace(/^\*?\s+/, '').trim())
+    .filter(Boolean);
+}
+
+export async function forceDeleteBranch(branch: string, cwd: string): Promise<void> {
+  await git(['branch', '-D', branch], cwd);
+  log.info(`Force-deleted branch: ${branch}`);
+}
+
 export async function isGitRepo(cwd: string): Promise<boolean> {
   const r = await git(['rev-parse', '--git-dir'], cwd);
   return r.exitCode === 0;

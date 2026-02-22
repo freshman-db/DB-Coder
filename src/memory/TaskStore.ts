@@ -320,12 +320,27 @@ export class TaskStore {
       SELECT *, similarity(task_description, ${description}) AS sim
       FROM tasks
       WHERE project_path = ${projectPath}
-        AND status IN ('queued', 'active', 'done', 'blocked')
+        AND status IN ('queued', 'active', 'done', 'blocked', 'failed')
         AND similarity(task_description, ${description}) > 0.4
       ORDER BY sim DESC
       LIMIT 1
     `;
     return row ?? null;
+  }
+
+  /** Check if a similar task has recently failed/blocked (cooldown period) */
+  async hasRecentlyFailedSimilar(projectPath: string, description: string, cooldownHours = 24): Promise<boolean> {
+    const sql = this.getSql();
+    const [row] = await sql<[{ found: boolean }]>`
+      SELECT EXISTS(
+        SELECT 1 FROM tasks
+        WHERE project_path = ${projectPath}
+          AND status IN ('failed', 'blocked')
+          AND updated_at > NOW() - INTERVAL '1 hour' * ${cooldownHours}
+          AND similarity(task_description, ${description}) > 0.4
+      ) AS found
+    `;
+    return row.found;
   }
 
   // --- Logs ---

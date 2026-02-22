@@ -67,7 +67,15 @@ export class Brain implements QuestionHandler {
       : undefined;
     const pluginIds = this.claude.getLoadedPluginIds();
     const agentGuide = buildAgentGuidance('scan', pluginIds);
-    const basePrompt = scanPrompt(projectPath, depth, recentChanges, allMemories, mcpGuidance, goalsSection, dynamicContext, agentGuide);
+
+    // Pass in-progress tasks so scanner knows what's already being worked on
+    const [queuedTasks, activeTasks] = await Promise.all([
+      this.taskStore.listTasks(projectPath, 'queued'),
+      this.taskStore.listTasks(projectPath, 'active'),
+    ]);
+    const inProgressTasks = [...queuedTasks, ...activeTasks].map(t => t.task_description);
+
+    const basePrompt = scanPrompt(projectPath, depth, recentChanges, allMemories, mcpGuidance, goalsSection, dynamicContext, agentGuide, inProgressTasks);
     const prompt = this.promptRegistry ? await this.promptRegistry.resolve('scan', basePrompt) : basePrompt;
     const baseSystem = BRAIN_SYSTEM_PROMPT;
     const systemPrompt = this.promptRegistry ? await this.promptRegistry.resolve('brain_system', baseSystem) : baseSystem;
@@ -101,16 +109,18 @@ export class Brain implements QuestionHandler {
 
     const memories = await this.globalMemory.getRelevant('task planning prioritization');
 
-    // Include all task statuses so LLM knows what's been done/failed
-    const [queued, done, blocked] = await Promise.all([
+    // Include all task statuses so LLM knows what's been done/failed/blocked
+    const [queued, done, blocked, failed] = await Promise.all([
       this.taskStore.listTasks(projectPath, 'queued'),
       this.taskStore.listTasks(projectPath, 'done'),
       this.taskStore.listTasks(projectPath, 'blocked'),
+      this.taskStore.listTasks(projectPath, 'failed'),
     ]);
     const allTasks = [
       ...queued.map(t => `- [P${t.priority}] [queued] ${t.task_description}`),
       ...done.map(t => `- [P${t.priority}] [done] ${t.task_description}`),
       ...blocked.map(t => `- [P${t.priority}] [blocked] ${t.task_description}`),
+      ...failed.map(t => `- [P${t.priority}] [failed] ${t.task_description}`),
     ].join('\n');
 
     // Build goals section

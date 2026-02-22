@@ -50,7 +50,10 @@ export function brainMcpGuidance(serverNames: string[]): string {
   return tips.length > 0 ? `\n## Available MCP Tools\n${tips.join('\n')}` : '';
 }
 
-export function scanPrompt(projectPath: string, depth: string, recentChanges: string, memories: string, mcpGuidance: string = '', goalsSection: string = '', dynamicContext?: DynamicPromptContext, agentGuidance: string = ''): string {
+export function scanPrompt(projectPath: string, depth: string, recentChanges: string, memories: string, mcpGuidance: string = '', goalsSection: string = '', dynamicContext?: DynamicPromptContext, agentGuidance: string = '', inProgressTasks: string[] = []): string {
+  const inProgressSection = inProgressTasks.length > 0
+    ? `\nTasks already in progress (DO NOT report these as new issues):\n${inProgressTasks.map(t => `- ${t}`).join('\n')}\n`
+    : '';
   return `Scan the project at ${projectPath}.
 Scan depth: ${depth}
 
@@ -62,6 +65,7 @@ ${memories || 'No relevant memories yet.'}
 ${mcpGuidance}
 ${agentGuidance}
 ${goalsSection}
+${inProgressSection}
 ${formatDynamicContext(dynamicContext)}
 Analyze the project by:
 1. Reading key files (package.json, README, config files, main source files)
@@ -97,7 +101,7 @@ ${analysis}
 Relevant memories:
 ${memories || 'None'}
 
-Existing tasks (queued, completed, and blocked — DO NOT create duplicates):
+Existing tasks (queued, completed, blocked, and failed — DO NOT create duplicates):
 ${existingTasks || 'None'}
 ${goalsSection}
 ${agentGuidance}
@@ -113,7 +117,10 @@ Classify each task with a type:
 
 Simplification philosophy: Prefer removing complexity over adding it. If a task can be solved by deleting code, simplifying abstractions, or consolidating duplicates, that is always better than adding new code.
 
-IMPORTANT: Do NOT create tasks that duplicate or closely resemble existing tasks listed above (regardless of their status). If a task was already done or blocked, do not retry it unless you have a fundamentally different approach.
+IMPORTANT deduplication rules:
+- Do NOT create tasks that duplicate or closely resemble existing tasks listed above (regardless of their status).
+- If a task was already done or blocked, do not retry it unless you have a fundamentally different approach.
+- Tasks marked [failed] should NOT be retried within 24 hours. They failed for a reason — only create a new task for the same area if you have a fundamentally different approach AND sufficient time has passed.
 
 Route each task:
 - Frontend tasks (UI, components, styles, pages) → executor: "claude"

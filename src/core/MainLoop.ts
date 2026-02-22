@@ -15,7 +15,7 @@ import type { AgentResult, ReviewResult, ReviewIssue } from '../bridges/CodingAg
 import { executorPrompt } from '../prompts/executor.js';
 import { reviewerPrompt } from '../prompts/reviewer.js';
 import { buildAgentGuidance } from '../prompts/agents.js';
-import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch, isWorkingClean, branchExists, getChangedFilesSince, getModifiedAndAddedFiles, mergeBranch, deleteBranch } from '../utils/git.js';
+import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch, isWorkingClean, branchExists, getChangedFilesSince, getModifiedAndAddedFiles, mergeBranch, deleteBranch, listBranches, forceDeleteBranch } from '../utils/git.js';
 import { log } from '../utils/logger.js';
 import { calculateRetryDelay } from '../utils/retry.js';
 import { readFileSync, existsSync, writeFileSync, unlinkSync } from 'node:fs';
@@ -85,6 +85,13 @@ export class MainLoop {
       }
     } catch (err) {
       log.warn(`Failed to recover active tasks: ${err}`);
+    }
+
+    // Clean up orphaned branches from previous runs
+    try {
+      await this.cleanupOrphanedBranches();
+    } catch (err) {
+      log.warn(`Failed to cleanup orphaned branches: ${err}`);
     }
 
     try {
@@ -239,6 +246,14 @@ export class MainLoop {
         } catch (mergeErr) {
           log.warn(`Auto-merge failed for ${branchName}: ${mergeErr}`);
         }
+      } else {
+        // Review failed — clean up task branch
+        try {
+          await switchBranch(originalBranch, projectPath);
+          await forceDeleteBranch(branchName, projectPath);
+        } catch (cleanupErr) {
+          log.warn(`Failed to cleanup branch ${branchName}: ${cleanupErr}`);
+        }
       }
 
       // PROMPT EVOLUTION: update effectiveness of active prompt versions
@@ -258,6 +273,13 @@ export class MainLoop {
     } catch (err) {
       log.error('Task execution error', err);
       await this.taskStore.updateTask(task.id, { status: 'failed', phase: 'failed' });
+      // Clean up task branch after crash
+      try {
+        await switchBranch(originalBranch, projectPath);
+        await forceDeleteBranch(branchName, projectPath);
+      } catch (cleanupErr) {
+        log.warn(`Failed to cleanup branch ${branchName} after error: ${cleanupErr}`);
+      }
       // Reflect on failure to extract lessons
       try {
         const { reflection } = await this.brain.reflect(
@@ -744,6 +766,39 @@ Fix these issues while maintaining code quality. Do not introduce new issues.`;
 
   private releaseLock(): void {
     try { unlinkSync(this.lockFile); } catch { /* ignore */ }
+  }
+
+  /** Remove branches matching the prefix that don't belong to any queued/active task */
+  private async cleanupOrphanedBranches(): Promise<void> {
+    const projectPath = this.config.projectPath;
+    const prefix = this.config.values.git.branchPrefix;
+    const branches = await listBranches(prefix, projectPath);
+    if (branches.length === 0) return;
+
+    // Gather task IDs that are still in progress
+    const [queued, active] = await Promise.all([
+      this.taskStore.listTasks(projectPath, 'queued'),
+      this.taskStore.listTasks(projectPath, 'active'),
+    ]);
+    const activeBranches = new Set(
+      [...queued, ...active]
+        .map(t => t.git_branch)
+        .filter(Boolean),
+    );
+
+    let cleaned = 0;
+    for (const branch of branches) {
+      if (activeBranches.has(branch)) continue;
+      try {
+        await forceDeleteBranch(branch, projectPath);
+        cleaned++;
+      } catch (err) {
+        log.warn(`Failed to delete orphaned branch ${branch}: ${err}`);
+      }
+    }
+    if (cleaned > 0) {
+      log.info(`Cleaned up ${cleaned} orphaned branch(es)`);
+    }
   }
 
   private async enforceBudget(taskId: string): Promise<boolean> {

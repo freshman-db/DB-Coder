@@ -16,6 +16,13 @@ export class TaskQueue {
     const planIdToDbId = new Map<string, string>();
 
     for (const planTask of sorted) {
+      // Cooldown: skip if a similar task recently failed/blocked
+      const recentlyFailed = await this.store.hasRecentlyFailedSimilar(projectPath, planTask.description);
+      if (recentlyFailed) {
+        log.info(`Skipping task (cooldown): "${planTask.description.slice(0, 60)}" — similar task recently failed`);
+        continue;
+      }
+
       // Dedup: skip if a similar task already exists
       const similar = await this.store.findSimilarTask(projectPath, planTask.description);
       if (similar) {
