@@ -887,7 +887,7 @@ async function pluginAction(name, action) {
     toast(`操作失败: ${res?.error || '未知错误'}`, 'error');
   }
 }
-window.pluginAction = pluginAction;
+// pluginAction called via data-action="pluginAction" delegation, no window global needed.
 
 // ---- 进化分析 ----
 async function renderEvolution() {
@@ -1058,18 +1058,8 @@ async function deleteTask(id) {
   }
 }
 
-// 暴露到全局供 onclick 使用
-window.deleteTask = deleteTask;
-window.togglePatrol = togglePatrol;
-window.startNewChat = startNewChat;
-window.sendChatMessage = sendChatMessage;
-window.generatePlanFromChat = generatePlanFromChat;
-window.closeChatSession = closeChatSession;
-window.approvePlan = approvePlan;
-window.rejectPlan = rejectPlan;
-window.executePlan = executePlan;
-window.startPatrol = startPatrol;
-window.stopPatrol = stopPatrol;
+// Legacy window globals removed — all interactive elements now use data-action
+// delegation (setupActionDelegation) or direct addEventListener in init().
 
 function updatePatrolBtn(patrolling) {
   const btn = $('#btnPatrol');
@@ -1580,8 +1570,13 @@ function setupAuthListeners() {
 }
 
 // ---- 事件委托 (CSP-friendly: 替代 inline onclick) ----
+// Scoped to #content — all dynamically rendered data-action buttons live inside it.
+// Static elements (sidebar, topbar, modals) use direct addEventListener in init().
 function setupActionDelegation() {
-  document.addEventListener('click', (e) => {
+  const contentEl = document.getElementById('content');
+  if (!contentEl) return;
+
+  contentEl.addEventListener('click', (e) => {
     const el = e.target.closest('[data-action]');
     if (!el) return;
 

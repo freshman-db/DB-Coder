@@ -7,7 +7,7 @@ import type { MainLoop } from '../core/MainLoop.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { CostTracker } from '../utils/cost.js';
-import { Server } from './Server.js';
+import { CSP_DIRECTIVES, Server } from './Server.js';
 
 const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 type RequestListener = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
@@ -104,6 +104,7 @@ function createMockResponse(): { response: ServerResponse & { getHeader: (name: 
 function assertSecurityHeaders(state: MockResponseState): void {
   assert.equal(state.headers['x-content-type-options'], 'nosniff');
   assert.equal(state.headers['x-frame-options'], 'SAMEORIGIN');
+  assert.equal(state.headers['content-security-policy'], CSP_DIRECTIVES.join('; '));
 }
 
 test('auth middleware requires bearer token on /api routes', () => {
@@ -215,4 +216,24 @@ test('security headers are included on API preflight responses', async () => {
 
   assert.equal(state.statusCode, 204);
   assertSecurityHeaders(state);
+});
+
+// ---- CSP directive content tests ----
+
+test('CSP allows scripts only from self and cdn.jsdelivr.net', () => {
+  const policy = CSP_DIRECTIVES.join('; ');
+  assert.ok(policy.includes("script-src 'self' https://cdn.jsdelivr.net"));
+  // Must NOT permit unsafe-inline or unsafe-eval for scripts
+  const scriptDirective = CSP_DIRECTIVES.find(d => d.startsWith('script-src'));
+  assert.ok(scriptDirective, 'script-src directive must exist');
+  assert.ok(!scriptDirective!.includes('unsafe-inline'), 'script-src must not have unsafe-inline');
+  assert.ok(!scriptDirective!.includes('unsafe-eval'), 'script-src must not have unsafe-eval');
+});
+
+test('CSP permits inline styles but defaults everything else to self', () => {
+  const policy = CSP_DIRECTIVES.join('; ');
+  assert.ok(policy.includes("default-src 'self'"), 'default-src should be self');
+  assert.ok(policy.includes("style-src 'self' 'unsafe-inline'"), 'style-src should allow unsafe-inline');
+  assert.ok(policy.includes("img-src 'self' data:"), 'img-src should allow data: URIs');
+  assert.ok(policy.includes("connect-src 'self'"), 'connect-src should be self');
 });

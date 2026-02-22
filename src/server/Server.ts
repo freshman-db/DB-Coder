@@ -27,6 +27,23 @@ const MIME_TYPES: Record<string, string> = {
 const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 const BODY_LIMIT_METHODS = new Set(['POST', 'PUT', 'PATCH']);
 
+/**
+ * Content-Security-Policy directives.
+ *
+ * - default-src 'self'         — fallback for everything
+ * - script-src                 — self + CDN for marked.js & DOMPurify
+ * - style-src 'unsafe-inline'  — inline style= attributes in app.js
+ * - img-src data:              — data: URI SVG favicon
+ * - connect-src                — fetch / SSE connections
+ */
+export const CSP_DIRECTIVES: readonly string[] = [
+  "default-src 'self'",
+  "script-src 'self' https://cdn.jsdelivr.net",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "connect-src 'self'",
+] as const;
+
 export class Server {
   private server: HttpServer;
   private webDir: string;
@@ -88,9 +105,11 @@ export class Server {
     });
   }
 
+  /** Security headers applied to every response. */
   private setSecurityHeaders(res: ServerResponse): void {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Content-Security-Policy', CSP_DIRECTIVES.join('; '));
   }
 
   private isApiRequest(req: IncomingMessage): boolean {
