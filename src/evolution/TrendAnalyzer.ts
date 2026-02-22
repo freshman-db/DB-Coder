@@ -75,7 +75,7 @@ export class TrendAnalyzer {
     const result = scan.result;
     if (!result || typeof result !== 'object') return counts;
 
-    const issues: AnalysisItem[] = (result as any).issues ?? [];
+    const issues: AnalysisItem[] = result.issues ?? [];
     for (const issue of issues) {
       const type = issue.type ?? 'unknown';
       counts[type] = (counts[type] ?? 0) + 1;
