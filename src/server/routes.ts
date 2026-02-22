@@ -501,8 +501,7 @@ route('GET', '/api/evolution/proposals', async (_req, res, ctx) => {
 });
 
 route('POST', '/api/evolution/proposals/:id/apply', async (_req, res, ctx, params) => {
-  const id = parseInt(params.id, 10);
-  if (isNaN(id)) { json(res, { error: 'Invalid proposal ID' }, 400); return; }
+  const id = parseRouteId(params, 'id', 'proposal ID');
   await ctx.taskStore.updateProposalStatus(id, 'applied');
   json(res, { ok: true, status: 'applied' });
 });
@@ -515,8 +514,7 @@ route('GET', '/api/evolution/review-patterns', async (_req, res, ctx) => {
 });
 
 route('POST', '/api/evolution/proposals/:id/reject', async (_req, res, ctx, params) => {
-  const id = parseInt(params.id, 10);
-  if (isNaN(id)) { json(res, { error: 'Invalid proposal ID' }, 400); return; }
+  const id = parseRouteId(params, 'id', 'proposal ID');
   await ctx.taskStore.updateProposalStatus(id, 'rejected');
   json(res, { ok: true, status: 'rejected' });
 });
@@ -537,8 +535,7 @@ route('GET', '/api/evolution/prompt-versions/:name', async (_req, res, ctx, para
 });
 
 route('POST', '/api/evolution/prompt-versions/:id/activate', async (_req, res, ctx, params) => {
-  const id = parseInt(params.id, 10);
-  if (isNaN(id)) { json(res, { error: 'Invalid version ID' }, 400); return; }
+  const id = parseRouteId(params, 'id', 'version ID');
   const version = await ctx.taskStore.getPromptVersion(id);
   if (!version) { json(res, { error: 'Version not found' }, 404); return; }
   await ctx.taskStore.supersedeActivePromptVersion(ctx.config.projectPath, version.prompt_name);
@@ -547,8 +544,7 @@ route('POST', '/api/evolution/prompt-versions/:id/activate', async (_req, res, c
 });
 
 route('POST', '/api/evolution/prompt-versions/:id/rollback', async (_req, res, ctx, params) => {
-  const id = parseInt(params.id, 10);
-  if (isNaN(id)) { json(res, { error: 'Invalid version ID' }, 400); return; }
+  const id = parseRouteId(params, 'id', 'version ID');
   await ctx.taskStore.updatePromptVersionStatus(id, 'rolled_back');
   json(res, { ok: true, status: 'rolled_back' });
 });
@@ -622,8 +618,7 @@ route('POST', '/api/plans/chat', async (_req, res, ctx) => {
 
 async function handlePlanChatMessage(req: IncomingMessage, res: ServerResponse, ctx: RouteContext, params: Record<string, string>, successStatus: number): Promise<void> {
   if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
-  const id = parseInt(params.id, 10);
-  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  const id = parseRouteId(params, 'id', 'plan ID');
   const body = await readBody(req);
   const message = isRecord(body) ? body.message : undefined;
   if (typeof message !== 'string' || message.trim().length === 0) {
@@ -644,16 +639,14 @@ route('POST', '/api/plans/:id/chat', async (req, res, ctx, params) => {
 });
 
 route('GET', '/api/plans/:id/messages', async (_req, res, ctx, params) => {
-  const id = parseInt(params.id, 10);
-  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  const id = parseRouteId(params, 'id', 'plan ID');
   const messages = await ctx.taskStore.getChatMessages(id);
   json(res, messages);
 });
 
 route('GET', '/api/plans/:id/stream', async (req, res, ctx, params) => {
   if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
-  const id = parseInt(params.id, 10);
-  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  const id = parseRouteId(params, 'id', 'plan ID');
 
   const releaseConnection = reserveSseConnection('/api/plans/:id/stream', res);
   if (!releaseConnection) {
@@ -678,8 +671,7 @@ route('GET', '/api/plans/:id/stream', async (req, res, ctx, params) => {
 
 route('POST', '/api/plans/:id/generate', async (req, res, ctx, params) => {
   if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
-  const id = parseInt(params.id, 10);
-  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  const id = parseRouteId(params, 'id', 'plan ID');
   ctx.planWorkflow.generatePlan(id, ctx.config.projectPath)
     .catch(err => log.error(`Plan generation failed for #${id}`, err));
   json(res, { ok: true, message: 'Plan generation started' }, 202);
@@ -687,16 +679,14 @@ route('POST', '/api/plans/:id/generate', async (req, res, ctx, params) => {
 
 route('POST', '/api/plans/:id/close', async (_req, res, ctx, params) => {
   if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
-  const id = parseInt(params.id, 10);
-  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  const id = parseRouteId(params, 'id', 'plan ID');
   await ctx.planWorkflow.closeSession(id);
   json(res, { ok: true });
 });
 
 route('POST', '/api/plans/:id/resume', async (_req, res, ctx, params) => {
   if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
-  const id = parseInt(params.id, 10);
-  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  const id = parseRouteId(params, 'id', 'plan ID');
   try {
     await ctx.planWorkflow.resumeSession(id);
     json(res, { ok: true });
@@ -714,16 +704,14 @@ route('GET', '/api/plans', async (req, res, ctx) => {
 });
 
 route('GET', '/api/plans/:id', async (_req, res, ctx, params) => {
-  const id = parseInt(params.id, 10);
-  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  const id = parseRouteId(params, 'id', 'plan ID');
   const draft = await ctx.taskStore.getPlanDraft(id);
   if (!draft) { json(res, { error: 'not found' }, 404); return; }
   json(res, draft);
 });
 
 route('POST', '/api/plans/:id/approve', async (req, res, ctx, params) => {
-  const id = parseInt(params.id, 10);
-  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  const id = parseRouteId(params, 'id', 'plan ID');
   const body = await readBody(req) as Record<string, unknown>;
   const annotations = Array.isArray(body.annotations) ? body.annotations : undefined;
   await ctx.taskStore.updatePlanDraftStatus(id, 'approved', annotations);
@@ -731,16 +719,14 @@ route('POST', '/api/plans/:id/approve', async (req, res, ctx, params) => {
 });
 
 route('POST', '/api/plans/:id/reject', async (_req, res, ctx, params) => {
-  const id = parseInt(params.id, 10);
-  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  const id = parseRouteId(params, 'id', 'plan ID');
   await ctx.taskStore.updatePlanDraftStatus(id, 'rejected');
   json(res, { ok: true, status: 'rejected' });
 });
 
 route('POST', '/api/plans/:id/revise', async (_req, res, ctx, params) => {
   if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
-  const id = parseInt(params.id, 10);
-  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  const id = parseRouteId(params, 'id', 'plan ID');
   const revisePromise = ctx.planWorkflow.revisePlan(id);
   json(res, { ok: true, message: 'Plan revision started' }, 202);
   revisePromise.catch(err => log.error('Plan revision failed', err));
@@ -748,8 +734,7 @@ route('POST', '/api/plans/:id/revise', async (_req, res, ctx, params) => {
 
 route('POST', '/api/plans/:id/execute', async (_req, res, ctx, params) => {
   if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
-  const id = parseInt(params.id, 10);
-  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  const id = parseRouteId(params, 'id', 'plan ID');
   try {
     await ctx.planWorkflow.executeApprovedPlan(id);
     json(res, { ok: true, message: 'Plan tasks enqueued' });
@@ -827,6 +812,15 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   } catch {
     throw new HttpError(400, 'Invalid JSON');
   }
+}
+
+function parseRouteId(params: Record<string, string>, field = 'id', label = `${field} ID`): number {
+  const rawId = params[field];
+  const id = parseInt(rawId ?? '', 10);
+  if (isNaN(id)) {
+    throw new HttpError(400, `Invalid ${label}`);
+  }
+  return id;
 }
 
 function validateCreateTaskBody(body: unknown): ValidationResult<CreateTaskRequest> {

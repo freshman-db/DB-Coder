@@ -315,6 +315,93 @@ test('POST /api/tasks with invalid body returns 400', async () => {
   assert.equal(createCalls, 0);
 });
 
+test('POST /api/evolution/proposals/:id/apply parses proposal ID and updates status', async () => {
+  let updateArgs:
+    | {
+      id: number;
+      status: string;
+    }
+    | undefined;
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      updateProposalStatus: async (id, status) => {
+        updateArgs = { id, status };
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: 'POST',
+    url: '/api/evolution/proposals/12/apply',
+    token,
+  });
+
+  assert.equal(state.statusCode, 200);
+  assert.deepEqual(parseJson<{ ok: boolean; status: string }>(state), {
+    ok: true,
+    status: 'applied',
+  });
+  assert.deepEqual(updateArgs, {
+    id: 12,
+    status: 'applied',
+  });
+});
+
+test('POST /api/evolution/proposals/:id/apply returns 400 for invalid proposal ID', async () => {
+  let updateCalls = 0;
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      updateProposalStatus: async () => {
+        updateCalls += 1;
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: 'POST',
+    url: '/api/evolution/proposals/not-a-number/apply',
+    token,
+  });
+
+  assert.equal(state.statusCode, 400);
+  assert.deepEqual(parseJson<{ error: string }>(state), {
+    error: 'Invalid proposal ID',
+  });
+  assert.equal(updateCalls, 0);
+});
+
+test('POST /api/evolution/prompt-versions/:id/activate returns 400 for invalid version ID', async () => {
+  const { server, token } = createServerFixture();
+
+  const state = await dispatch(server, {
+    method: 'POST',
+    url: '/api/evolution/prompt-versions/not-a-number/activate',
+    token,
+  });
+
+  assert.equal(state.statusCode, 400);
+  assert.deepEqual(parseJson<{ error: string }>(state), {
+    error: 'Invalid version ID',
+  });
+});
+
+test('GET /api/plans/:id/messages returns 400 for invalid plan ID', async () => {
+  const { server, token } = createServerFixture();
+
+  const state = await dispatch(server, {
+    method: 'GET',
+    url: '/api/plans/not-a-number/messages',
+    token,
+  });
+
+  assert.equal(state.statusCode, 400);
+  assert.deepEqual(parseJson<{ error: string }>(state), {
+    error: 'Invalid plan ID',
+  });
+});
+
 test('POST /api/patrol/start returns 200 and calls mode manager startPatrol', async () => {
   let startCalls = 0;
 
