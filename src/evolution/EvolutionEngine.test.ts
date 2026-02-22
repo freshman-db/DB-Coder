@@ -3,7 +3,7 @@ import test, { describe } from 'node:test';
 import type { Config } from '../config/Config.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
-import type { RecurringIssueCategory, ReviewEvent, Task } from '../memory/types.js';
+import type { ProjectAnalysis, RecurringIssueCategory, ReviewEvent, Task } from '../memory/types.js';
 import type { HealthTrend, PromptPatch, PromptVersion } from './types.js';
 import type { TrendAnalyzer } from './TrendAnalyzer.js';
 import { EvolutionEngine } from './EvolutionEngine.js';
@@ -56,6 +56,13 @@ function makeTask(index: number, cost: number): Task {
     status: 'done',
     created_at: new Date('2026-01-01T00:00:00.000Z'),
     updated_at: new Date('2026-01-01T00:00:00.000Z'),
+  };
+}
+
+function makeDoneTask(index: number, description: string): Task {
+  return {
+    ...makeTask(index, 0),
+    task_description: description,
   };
 }
 
@@ -655,5 +662,108 @@ describe('EvolutionEngine.storeProposedPatches', () => {
       internals.storeProposedPatches(validParsed, '/repo', 0),
       /maxActive must be a positive number/,
     );
+  });
+});
+
+describe('EvolutionEngine.assessGoalProgress', () => {
+  test('matches Chinese default goals to keyword-related completed tasks', async () => {
+    const goals = [
+      { description: '提升代码质量：修复类型错误，统一编码规范', priority: 1, status: 'active' as const },
+      { description: '减少代码重复：识别和整合重复模式', priority: 2, status: 'active' as const },
+      { description: '简化复杂代码：缩短函数长度，降低嵌套深度', priority: 2, status: 'active' as const },
+      { description: '提高测试覆盖：为关键路径添加测试', priority: 2, status: 'active' as const },
+      { description: '主动开发功能：识别架构的自然延伸并实现', priority: 3, status: 'active' as const },
+    ];
+
+    const completedTasks = [
+      makeDoneTask(1, 'Fix type mismatch and lint violations in auth module'),
+      makeDoneTask(2, 'Extract duplicate helper logic for dedup cleanup'),
+      makeDoneTask(3, 'Refactor nested branching to simplify control flow'),
+      makeDoneTask(4, 'Improve test coverage for payment API'),
+      makeDoneTask(5, 'Implement feature preview panel for reports'),
+    ];
+
+    const savedProgress: Array<{ goal_index: number; progress_pct: number; evidence: string }> = [];
+    const taskStore: Partial<TaskStore> = {
+      listTasks: async (projectPath: string, status) => {
+        assert.equal(projectPath, '/repo');
+        assert.equal(status, 'done');
+        return completedTasks;
+      },
+      saveGoalProgress: async (gp) => {
+        savedProgress.push({
+          goal_index: gp.goal_index,
+          progress_pct: gp.progress_pct,
+          evidence: gp.evidence,
+        });
+        return {
+          id: savedProgress.length,
+          project_path: gp.project_path,
+          goal_index: gp.goal_index,
+          progress_pct: gp.progress_pct,
+          evidence: gp.evidence,
+          scan_id: gp.scan_id,
+          created_at: new Date('2026-01-01T00:00:00.000Z'),
+        };
+      },
+      getGoalProgressHistory: async () => [],
+    };
+
+    const analysis: ProjectAnalysis = {
+      issues: [],
+      opportunities: [],
+      projectHealth: 50,
+      summary: 'Stable',
+    };
+
+    const engine = createEvolutionEngine(taskStore, {}, { evolution: { goals } });
+    await engine.assessGoalProgress('/repo', analysis, 9);
+
+    assert.equal(savedProgress.length, goals.length);
+    assert.deepEqual(savedProgress.map(g => g.progress_pct), [26, 26, 26, 26, 26]);
+    assert.deepEqual(savedProgress.map(g => g.evidence), [
+      '1 related tasks done, health=50',
+      '1 related tasks done, health=50',
+      '1 related tasks done, health=50',
+      '1 related tasks done, health=50',
+      '1 related tasks done, health=50',
+    ]);
+  });
+
+  test('extracts fallback Chinese keywords from punctuation-separated goal text', async () => {
+    const goals = [
+      { description: '重构目标：消除重复逻辑，提升可读性', priority: 2, status: 'active' as const },
+    ];
+
+    const capturedProgress: { value?: { progress_pct: number; evidence: string } } = {};
+    const taskStore: Partial<TaskStore> = {
+      listTasks: async () => [makeDoneTask(1, '清理重复分支逻辑并抽离公共函数')],
+      saveGoalProgress: async (gp) => {
+        capturedProgress.value = { progress_pct: gp.progress_pct, evidence: gp.evidence };
+        return {
+          id: 1,
+          project_path: gp.project_path,
+          goal_index: gp.goal_index,
+          progress_pct: gp.progress_pct,
+          evidence: gp.evidence,
+          scan_id: gp.scan_id,
+          created_at: new Date('2026-01-01T00:00:00.000Z'),
+        };
+      },
+      getGoalProgressHistory: async () => [],
+    };
+
+    const analysis: ProjectAnalysis = {
+      issues: [],
+      opportunities: [],
+      projectHealth: 40,
+      summary: 'Needs cleanup',
+    };
+
+    const engine = createEvolutionEngine(taskStore, {}, { evolution: { goals } });
+    await engine.assessGoalProgress('/repo', analysis, null);
+
+    assert.equal(capturedProgress.value?.progress_pct, 23);
+    assert.equal(capturedProgress.value?.evidence, '1 related tasks done, health=40');
   });
 });
