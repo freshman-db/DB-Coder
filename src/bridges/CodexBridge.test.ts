@@ -203,3 +203,82 @@ test('execute kills codex process on timeout', async () => {
     assert.equal(child.killSignals[0], 'SIGTERM');
   });
 });
+
+test('review parses valid review JSON and tags issues as codex-sourced', async () => {
+  await withMockedSpawn((call) => {
+    const child = new FakeChildProcess();
+    const outFile = getOutputFilePath(call.args);
+
+    setImmediate(() => {
+      writeFileSync(outFile, JSON.stringify({
+        passed: false,
+        issues: [
+          {
+            severity: 'high',
+            description: 'Potential SQL injection in raw query',
+            file: 'src/db/query.ts',
+            line: 42,
+            suggestion: 'Use parameterized placeholders',
+          },
+        ],
+        summary: 'Found one high severity issue',
+      }));
+      child.stdout.write(`${JSON.stringify({ type: 'turn.completed', total_cost_usd: 0.09 })}\n`);
+      child.stdout.end();
+      child.emit('close', 0);
+    });
+
+    return child as unknown as ChildProcess;
+  }, async (calls) => {
+    const bridge = new CodexBridge(createCodexConfig());
+    const result = await bridge.review('Review the pending DB migration', process.cwd());
+
+    assert.equal(calls.length, 1);
+    const call = calls[0];
+    assert.equal(call.command, 'codex');
+    assert.deepEqual(call.args.slice(0, 4), ['exec', '--sandbox', 'read-only', '--json']);
+    assert.match(call.args[call.args.length - 1] ?? '', /Review the pending DB migration/);
+
+    assert.equal(result.passed, false);
+    assert.equal(result.summary, 'Found one high severity issue');
+    assert.equal(result.cost_usd, 0.09);
+    assert.deepEqual(result.issues, [
+      {
+        severity: 'high',
+        description: 'Potential SQL injection in raw query',
+        file: 'src/db/query.ts',
+        line: 42,
+        suggestion: 'Use parameterized placeholders',
+        source: 'codex',
+      },
+    ]);
+  });
+});
+
+for (const costCase of [
+  { name: 'Cost: $0.0123', content: 'Cost: $0.0123', expectedCost: 0.0123 },
+  { name: 'total_cost: 0.05', content: 'total_cost: 0.05', expectedCost: 0.05 },
+  { name: 'missing cost falls back to zero', content: 'No cost provided', expectedCost: 0 },
+]) {
+  test(`execute extracts cost from text format (${costCase.name})`, async () => {
+    await withMockedSpawn((call) => {
+      const child = new FakeChildProcess();
+      const outFile = getOutputFilePath(call.args);
+
+      setImmediate(() => {
+        writeFileSync(outFile, JSON.stringify({ output: 'done' }));
+        child.stdout.write(`${JSON.stringify({ type: 'message', content: costCase.content })}\n`);
+        child.stdout.end();
+        child.emit('close', 0);
+      });
+
+      return child as unknown as ChildProcess;
+    }, async () => {
+      const bridge = new CodexBridge(createCodexConfig());
+      const result = await bridge.execute('Implement endpoint', process.cwd());
+
+      assert.equal(result.success, true);
+      assert.ok(Math.abs(result.cost_usd - costCase.expectedCost) < 1e-9);
+    });
+  });
+}
