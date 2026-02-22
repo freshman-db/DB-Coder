@@ -15,6 +15,20 @@ export type { PlanRequest };
 
 type SSEListener = (event: string, data: string) => void;
 
+type ResultMessageContentBlock = {
+  type?: unknown;
+  text?: unknown;
+};
+
+type ResultMessageItem = {
+  role?: unknown;
+  content?: unknown;
+};
+
+type AgentResultMessageWithMessages = AgentResultMessage & {
+  messages?: unknown;
+};
+
 export class PlanWorkflow {
   private chatSessions = new Map<number, ChatSession>();
   private sessionLocks = new Map<number, Promise<void>>();
@@ -109,7 +123,7 @@ export class PlanWorkflow {
     if (msg.type === 'result') {
       this.streamingText.delete(draftId);
       const resultMessage: AgentResultMessage = msg;
-      const text = resultMessage.result ?? '';
+      const text = this.extractAssistantText(resultMessage);
       const cost = resultMessage.total_cost_usd ?? 0;
 
       // Save assistant message to DB
@@ -134,6 +148,34 @@ export class PlanWorkflow {
         this.emit(draftId, 'status', { status: 'chatting' });
       }
     }
+  }
+
+  private extractAssistantText(msg: AgentResultMessage): string {
+    if (msg.result) return msg.result;
+
+    const messages = (msg as AgentResultMessageWithMessages).messages;
+    if (!Array.isArray(messages)) return '';
+
+    return messages
+      .filter((message): message is ResultMessageItem & { role: 'assistant' } => (
+        typeof message === 'object'
+        && message !== null
+        && (message as ResultMessageItem).role === 'assistant'
+      ))
+      .map((message) => {
+        if (typeof message.content === 'string') return message.content;
+        if (!Array.isArray(message.content)) return '';
+        return message.content
+          .filter((block): block is ResultMessageContentBlock & { type: 'text' } => (
+            typeof block === 'object'
+            && block !== null
+            && (block as ResultMessageContentBlock).type === 'text'
+          ))
+          .map((block) => typeof block.text === 'string' ? block.text : '')
+          .join('');
+      })
+      .filter(Boolean)
+      .join('\n');
   }
 
   async processUserMessage(draftId: number, userMessage: string): Promise<void> {
@@ -261,8 +303,7 @@ export class PlanWorkflow {
     const draft = await this.taskStore.getPlanDraft(draftId);
     if (!draft) throw new Error(`Plan draft #${draftId} not found`);
 
-    const annotations = draft.annotations;
-    const feedback = annotations
+    const feedback = (draft.annotations ?? [])
       .map(a => `Task #${a.task_index}: ${a.action}${a.comment ? ` — ${a.comment}` : ''}${a.modified_description ? ` → "${a.modified_description}"` : ''}`)
       .join('\n');
 
