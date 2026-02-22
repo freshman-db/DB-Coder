@@ -2,8 +2,8 @@ import type { TaskStore } from '../memory/TaskStore.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { Config } from '../config/Config.js';
 import type { TrendAnalyzer } from './TrendAnalyzer.js';
-import type { AdjustmentCategory, DynamicPromptContext, PromptName, PromptPatch } from './types.js';
-import type { ProjectAnalysis } from '../memory/types.js';
+import type { AdjustmentCategory, DynamicPromptContext, HealthTrend, PromptMetrics, PromptName, PromptPatch, PromptVersion } from './types.js';
+import type { ProjectAnalysis, RecurringIssueCategory, ReviewEvent, Task } from '../memory/types.js';
 import type { ClaudeBridge } from '../bridges/ClaudeBridge.js';
 import { log } from '../utils/logger.js';
 
@@ -19,6 +19,26 @@ const CATEGORY_KEYWORDS: Record<AdjustmentCategory, string[]> = {
 
 // Config fields safe for auto-update
 const SAFE_CONFIG_FIELDS = new Set(['brain.scanInterval', 'autonomy.subtaskTimeout']);
+
+interface MetaReflectData {
+  reviewEvents: ReviewEvent[];
+  recentTasks: Task[];
+  healthTrend: HealthTrend | null;
+  activeVersions: PromptVersion[];
+  passRate: number;
+  avgCost: number;
+  issueCategories: RecurringIssueCategory[];
+}
+
+interface ParsedMetaReflectOutput {
+  patches: Array<{
+    promptName: string;
+    patches: PromptPatch[];
+    rationale: string;
+    confidence: number;
+  }>;
+  analysis: string;
+}
 
 export class EvolutionEngine {
   constructor(
@@ -238,43 +258,201 @@ export class EvolutionEngine {
    */
   async metaReflect(projectPath: string, claude: ClaudeBridge): Promise<void> {
     log.info('Starting meta-reflect: analyzing prompt effectiveness...');
+    try {
+      const data = await this.collectMetaReflectData(projectPath);
+      const metaPrompt = this.buildMetaReflectPrompt(data);
+      const result = await claude.plan(metaPrompt, projectPath, { maxTurns: 5 });
+      const resultCost = Number(result?.cost_usd ?? 0);
+      if (resultCost > 0) {
+        await this.taskStore.addDailyCost(resultCost);
+      }
 
-    // 1. Collect data
-    const [reviewEvents, recentTasks, healthTrend, activeVersions] = await Promise.all([
+      const parsed = this.parseMetaReflectOutput(result?.output ?? '');
+      if (!parsed) {
+        log.info('Meta-reflect: no actionable patches proposed');
+        return;
+      }
+
+      const maxActive = this.resolveMaxActivePromptPatches();
+      await this.storeProposedPatches(parsed, projectPath, maxActive);
+    } catch (err) {
+      log.warn(`Meta-reflect failed: ${err}`);
+    }
+  }
+
+  private resolveMaxActivePromptPatches(): number {
+    const configuredMaxActive = this.config.values.evolution?.maxActivePromptPatches;
+    return typeof configuredMaxActive === 'number' && Number.isFinite(configuredMaxActive) && configuredMaxActive > 0
+      ? configuredMaxActive
+      : 3;
+  }
+
+  private async collectPromptPatchBaselineMetrics(projectPath: string): Promise<PromptMetrics> {
+    const [reviewEventsResult, recentTasksResult, issueCategoriesResult] = await Promise.all([
+      this.taskStore.getRecentReviewEvents(projectPath, 20),
+      this.taskStore.listTasks(projectPath, 'done'),
+      this.taskStore.getRecurringIssueCategories(projectPath, 10),
+    ]);
+
+    const reviewEvents = reviewEventsResult ?? [];
+    const recentTasks = recentTasksResult ?? [];
+    const issueCategories = issueCategoriesResult ?? [];
+
+    const totalReviews = reviewEvents.length;
+    const passedReviews = reviewEvents.filter(event => event?.passed === true).length;
+    const passRate = totalReviews > 0 ? passedReviews / totalReviews : 1;
+
+    const costWindowSize = Math.min(recentTasks.length, 20);
+    const avgCostUsd = costWindowSize > 0
+      ? recentTasks
+        .slice(-costWindowSize)
+        .reduce((sum, task) => sum + Number(task?.total_cost_usd ?? 0), 0) / costWindowSize
+      : 0;
+
+    const issueCount = issueCategories.reduce((sum, category) => sum + Number(category?.count ?? 0), 0);
+    const tasksEvaluated = reviewEvents.length;
+
+    return { passRate, avgCostUsd, issueCount, tasksEvaluated };
+  }
+
+  private async storeProposedPatches(
+    parsed: ParsedMetaReflectOutput,
+    projectPath: string,
+    maxActive: number,
+  ): Promise<void> {
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.patches)) {
+      throw new Error('parsed meta-reflect output is required for prompt patch storage');
+    }
+    if (typeof projectPath !== 'string' || projectPath.trim().length === 0) {
+      throw new Error('projectPath is required for prompt patch storage');
+    }
+    if (!Number.isFinite(maxActive) || maxActive <= 0) {
+      throw new Error('maxActive must be a positive number');
+    }
+
+    const baselineMetrics = await this.collectPromptPatchBaselineMetrics(projectPath);
+
+    for (const proposal of parsed.patches.slice(0, 3)) {
+      if (!proposal || typeof proposal.promptName !== 'string') {
+        continue;
+      }
+
+      const activeVersions = await this.taskStore.getActivePromptVersions(projectPath);
+      const activeCount = (activeVersions ?? [])
+        .filter(version => version?.prompt_name === proposal.promptName).length;
+      if (activeCount >= maxActive) {
+        log.info(`Skipping ${proposal.promptName} patch: max active patches reached (${maxActive})`);
+        continue;
+      }
+
+      const promptName = proposal.promptName as PromptName;
+      const version = await this.taskStore.getNextPromptVersion(projectPath, promptName);
+      await this.taskStore.savePromptVersion({
+        project_path: projectPath,
+        prompt_name: promptName,
+        version,
+        patches: Array.isArray(proposal.patches) ? proposal.patches : [],
+        rationale: proposal.rationale ?? '',
+        confidence: Number.isFinite(proposal.confidence) ? proposal.confidence : 0,
+        baseline_metrics: baselineMetrics,
+      });
+      log.info(`Meta-reflect: stored candidate patch for "${proposal.promptName}" v${version} (confidence=${proposal.confidence})`);
+    }
+
+    await this.promoteReadyCandidates(projectPath);
+    await this.rollbackDegradedVersions(projectPath);
+  }
+
+  private async collectMetaReflectData(projectPath: string): Promise<MetaReflectData> {
+    if (typeof projectPath !== 'string' || projectPath.trim().length === 0) {
+      throw new Error('projectPath is required for meta-reflection');
+    }
+
+    const [reviewEventsResult, recentTasksResult, healthTrendResult, activeVersionsResult, issueCategoriesResult] = await Promise.all([
       this.taskStore.getRecentReviewEvents(projectPath, 20),
       this.taskStore.listTasks(projectPath, 'done'),
       this.trendAnalyzer.getHealthTrend(projectPath),
       this.taskStore.getActivePromptVersions(projectPath),
+      this.taskStore.getRecurringIssueCategories(projectPath, 10),
     ]);
 
-    // 2. Compute per-stage metrics
-    const totalReviews = reviewEvents.length;
-    const passedReviews = reviewEvents.filter(e => e.passed).length;
-    const passRate = totalReviews > 0 ? passedReviews / totalReviews : 1;
-    const avgCost = recentTasks.length > 0
-      ? recentTasks.slice(-20).reduce((sum, t) => sum + Number(t.total_cost_usd || 0), 0) / Math.min(recentTasks.length, 20)
-      : 0;
-    const issueCategories = await this.taskStore.getRecurringIssueCategories(projectPath, 10);
+    const reviewEvents = reviewEventsResult ?? [];
+    const recentTasks = recentTasksResult ?? [];
+    const healthTrend = healthTrendResult ?? null;
+    const activeVersions = activeVersionsResult ?? [];
+    const issueCategories = issueCategoriesResult ?? [];
 
-    // 3. Build meta-reflection prompt
+    const totalReviews = reviewEvents.length;
+    const passedReviews = reviewEvents.filter(event => event?.passed === true).length;
+    const passRate = totalReviews > 0 ? passedReviews / totalReviews : 1;
+
+    const costWindowSize = Math.min(recentTasks.length, 20);
+    const avgCost = costWindowSize > 0
+      ? recentTasks
+        .slice(-costWindowSize)
+        .reduce((sum, task) => sum + Number(task?.total_cost_usd ?? 0), 0) / costWindowSize
+      : 0;
+
+    return {
+      reviewEvents,
+      recentTasks,
+      healthTrend,
+      activeVersions,
+      passRate,
+      avgCost,
+      issueCategories,
+    };
+  }
+
+  private buildMetaReflectPrompt(data: MetaReflectData): string {
+    if (!data || typeof data !== 'object') {
+      throw new Error('meta-reflect data is required to build prompt');
+    }
+
+    const reviewEvents = Array.isArray(data.reviewEvents) ? data.reviewEvents : [];
+    const recentTasks = Array.isArray(data.recentTasks) ? data.recentTasks : [];
+    const healthTrend = data.healthTrend ?? null;
+    const activeVersions = Array.isArray(data.activeVersions) ? data.activeVersions : [];
+    const passRate = Number.isFinite(data.passRate) ? data.passRate : 0;
+    const avgCost = Number.isFinite(data.avgCost) ? data.avgCost : 0;
+    const issueCategories = Array.isArray(data.issueCategories) ? data.issueCategories : [];
+
     const activeVersionsSummary = activeVersions.length > 0
-      ? activeVersions.map(v => `- ${v.prompt_name} v${v.version}: effectiveness=${v.effectiveness.toFixed(2)}, tasks=${v.tasks_evaluated}`).join('\n')
+      ? activeVersions
+        .map(version => `- ${version.prompt_name} v${version.version}: effectiveness=${Number(version.effectiveness ?? 0).toFixed(2)}, tasks=${version.tasks_evaluated ?? 0}`)
+        .join('\n')
       : 'No active prompt patches.';
 
-    const metaPrompt = `You are analyzing the effectiveness of an AI coding agent's prompt templates.
+    const issueCategorySummary = issueCategories
+      .map(category => `${category?.category ?? 'unknown'}(${Number(category?.count ?? 0)})`)
+      .join(', ') || 'none';
+
+    const failureSummary = reviewEvents
+      .filter(event => event?.passed === false)
+      .slice(0, 5)
+      .map((event) => {
+        const taskId = typeof event?.task_id === 'string' ? event.task_id.slice(0, 8) : 'unknown';
+        const mustFixCount = Number(event?.must_fix_count ?? 0);
+        const shouldFixCount = Number(event?.should_fix_count ?? 0);
+        const issueList = JSON.stringify(event?.issue_categories ?? []);
+        return `- Task ${taskId}: must_fix=${mustFixCount}, should_fix=${shouldFixCount}, categories=${issueList}`;
+      })
+      .join('\n') || 'None';
+
+    return `You are analyzing the effectiveness of an AI coding agent's prompt templates.
 
 ## Current Performance Metrics
 - Review pass rate: ${(passRate * 100).toFixed(1)}%
 - Average task cost: $${avgCost.toFixed(4)}
 - Health trend: ${healthTrend?.direction ?? 'unknown'} (${healthTrend?.current ?? 'N/A'}/100)
-- Recurring issue categories: ${issueCategories.map(c => `${c.category}(${c.count})`).join(', ') || 'none'}
+- Recurring issue categories: ${issueCategorySummary}
 - Total completed tasks: ${recentTasks.length}
 
 ## Active Prompt Patches
 ${activeVersionsSummary}
 
 ## Recent Review Failures
-${reviewEvents.filter(e => !e.passed).slice(0, 5).map(e => `- Task ${e.task_id.slice(0, 8)}: must_fix=${e.must_fix_count}, should_fix=${e.should_fix_count}, categories=${JSON.stringify(e.issue_categories)}`).join('\n') || 'None'}
+${failureSummary}
 
 ## Available Prompt Names
 brain_system, scan, plan, reflect, executor, reviewer
@@ -300,45 +478,6 @@ Output as JSON:
   }],
   "analysis": string
 }`;
-
-    try {
-      const result = await claude.plan(metaPrompt, projectPath, { maxTurns: 5 });
-      if (result.cost_usd > 0) await this.taskStore.addDailyCost(result.cost_usd);
-      const parsed = this.parseMetaReflectOutput(result.output);
-      if (!parsed) {
-        log.info('Meta-reflect: no actionable patches proposed');
-        return;
-      }
-
-      // 4. Store as candidate prompt versions
-      const maxActive = this.config.values.evolution?.maxActivePromptPatches ?? 3;
-      for (const proposal of parsed.patches.slice(0, 3)) {
-        const activeCount = (await this.taskStore.getActivePromptVersions(projectPath))
-          .filter(v => v.prompt_name === proposal.promptName).length;
-        if (activeCount >= maxActive) {
-          log.info(`Skipping ${proposal.promptName} patch: max active patches reached (${maxActive})`);
-          continue;
-        }
-
-        const version = await this.taskStore.getNextPromptVersion(projectPath, proposal.promptName as PromptName);
-        await this.taskStore.savePromptVersion({
-          project_path: projectPath,
-          prompt_name: proposal.promptName as PromptName,
-          version,
-          patches: proposal.patches,
-          rationale: proposal.rationale,
-          confidence: proposal.confidence,
-          baseline_metrics: { passRate, avgCostUsd: avgCost, issueCount: issueCategories.reduce((s, c) => s + c.count, 0), tasksEvaluated: totalReviews },
-        });
-        log.info(`Meta-reflect: stored candidate patch for "${proposal.promptName}" v${version} (confidence=${proposal.confidence})`);
-      }
-
-      // 5. Promote and rollback
-      await this.promoteReadyCandidates(projectPath);
-      await this.rollbackDegradedVersions(projectPath);
-    } catch (err) {
-      log.warn(`Meta-reflect failed: ${err}`);
-    }
   }
 
   /**
@@ -402,7 +541,7 @@ Output as JSON:
     return rolledBack;
   }
 
-  private parseMetaReflectOutput(output: string): { patches: Array<{ promptName: string; patches: PromptPatch[]; rationale: string; confidence: number }>; analysis: string } | null {
+  private parseMetaReflectOutput(output: string): ParsedMetaReflectOutput | null {
     try {
       // Find JSON in output
       const jsonMatch = output.match(/\{[\s\S]*"patches"[\s\S]*\}/);
