@@ -44,10 +44,10 @@ const MAX_MEMORY_TAG_LENGTH = 64;
 const MAX_MEMORY_TAG_COUNT = 20;
 const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 
-class PayloadTooLargeError extends Error {
-  constructor(limitBytes: number) {
-    super(`Request body exceeds ${limitBytes} bytes.`);
-    this.name = 'PayloadTooLargeError';
+class HttpError extends Error {
+  constructor(public readonly statusCode: number, message: string) {
+    super(message);
+    this.name = 'HttpError';
   }
 }
 
@@ -84,7 +84,7 @@ route('GET', '/api/status', async (_req, res, ctx) => {
   const patrolling = ctx.loop.isRunning();
   const daily = await ctx.costTracker.getDailySummary();
   const scanInterval = ctx.config.values.brain.scanInterval;
-  json(res, { state, currentTaskId: taskId, paused, patrolling, scanInterval, dailyCosts: daily });
+  json(res, { state, currentTaskId: taskId, paused, patrolling, scanInterval, projectPath: ctx.config.projectPath, dailyCosts: daily });
 });
 
 // --- Tasks ---
@@ -501,8 +501,8 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse, c
     try {
       await route.handler(req, res, ctx, params);
     } catch (err) {
-      if (err instanceof PayloadTooLargeError) {
-        json(res, { error: err.message }, 413);
+      if (err instanceof HttpError) {
+        json(res, { error: err.message }, err.statusCode);
         return true;
       }
       log.error(`Route error: ${method} ${pathname}`, err);
@@ -520,63 +520,32 @@ function json(res: ServerResponse, data: unknown, status = 200): void {
 }
 
 async function readBody(req: IncomingMessage): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    let bytes = 0;
-    let settled = false;
-
-    const cleanup = (): void => {
-      req.off('data', onData);
-      req.off('end', onEnd);
-      req.off('error', onError);
-    };
-
-    const settleResolve = (value: unknown): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve(value);
-    };
-
-    const settleReject = (error: Error): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(error);
-    };
-
-    const onData = (chunk: Buffer): void => {
-      bytes += chunk.length;
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  try {
+    for await (const chunk of req) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += buffer.length;
       if (bytes > MAX_REQUEST_BODY_BYTES) {
-        req.resume();
-        settleReject(new PayloadTooLargeError(MAX_REQUEST_BODY_BYTES));
-        return;
+        throw new HttpError(413, `Request body exceeds ${MAX_REQUEST_BODY_BYTES} bytes.`);
       }
-      body += chunk.toString();
-    };
+      chunks.push(buffer);
+    }
+  } catch (error) {
+    if (error instanceof HttpError) {
+      throw error;
+    }
+    throw new HttpError(500, 'Failed to read request body.');
+  }
 
-    const onEnd = (): void => {
-      if (body.length === 0) {
-        settleResolve({});
-        return;
-      }
-      try {
-        settleResolve(JSON.parse(body));
-      } catch (err) {
-        log.warn('Invalid JSON request body; defaulting to empty object', err);
-        settleResolve({});
-      }
-    };
+  const raw = Buffer.concat(chunks).toString();
+  if (!raw) return {};
 
-    const onError = (err: Error): void => {
-      log.warn('Error while reading request body; defaulting to empty object', err);
-      settleResolve({});
-    };
-
-    req.on('data', onData);
-    req.on('end', onEnd);
-    req.on('error', onError);
-  });
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new HttpError(400, 'Invalid JSON');
+  }
 }
 
 function validateCreateTaskBody(body: unknown): ValidationResult<CreateTaskRequest> {

@@ -971,6 +971,7 @@ async function renderSettings() {
   content.innerHTML = `
     <div class="config-block">
       <h3>运行状态</h3>
+      ${configRow('当前项目', config.projectPath ? config.projectPath.split('/').pop() : '未知', config.projectPath)}
       ${configRow('系统状态', getStatus(config.state).label)}
       ${configRow('是否暂停', config.paused ? '是' : '否')}
       ${configRow('当前任务', config.currentTaskId || '无')}
@@ -991,12 +992,13 @@ async function renderSettings() {
   `;
 }
 
-function configRow(key, val) {
-  return `<div class="config-row"><span class="config-key">${escapeHtml(String(key))}</span><span class="config-val">${escapeHtml(String(val))}</span></div>`;
+function configRow(key, val, title) {
+  const titleAttr = title ? ` title="${escapeHtml(String(title))}"` : '';
+  return `<div class="config-row"><span class="config-key">${escapeHtml(String(key))}</span><span class="config-val"${titleAttr}>${escapeHtml(String(val))}</span></div>`;
 }
 
 function renderConfigEntries(obj, prefix = '') {
-  const skip = new Set(['state', 'paused', 'currentTaskId', 'dailyCosts', 'config']);
+  const skip = new Set(['state', 'paused', 'currentTaskId', 'dailyCosts', 'config', 'projectPath']);
   return Object.entries(obj)
     .filter(([k]) => !skip.has(k))
     .map(([k, v]) => {

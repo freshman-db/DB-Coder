@@ -80,7 +80,17 @@ ${goalsSection ? '8. Evaluating progress toward evolution goals' : ''}
 If specialized agents are available (listed above), spawn them via the Task tool for deeper analysis.
 Launch agents in parallel for efficiency. Synthesize their reports into your analysis.
 
-Output your analysis as JSON with this exact structure:
+IMPORTANT: Be proactive. Even if there are no bugs or critical issues, look for improvement opportunities:
+- Code that could be simplified or made more readable
+- Missing error handling, edge cases, or input validation
+- Functions that are too long (>50 lines) or do too much
+- Missing or outdated tests
+- Performance improvements (unnecessary allocations, N+1 queries, etc.)
+- Documentation gaps for public APIs
+- Dependency updates or security advisories
+If the project health is below 80, you MUST report at least one issue or opportunity.
+
+Your response MUST end with a JSON object (no markdown code fences). Output this exact structure:
 {
   "issues": [{ "type": string, "severity": "critical"|"high"|"medium"|"low", "description": string, "file": string, "suggestion": string }],
   "opportunities": [{ "type": string, "severity": "medium"|"low", "description": string, "suggestion": string }],
@@ -89,7 +99,9 @@ Output your analysis as JSON with this exact structure:
   "featureGaps": [{ "area": string, "description": string, "suggestion": string }],
   "projectHealth": number (0-100),
   "summary": string
-}`;
+}
+
+Do NOT wrap the JSON in markdown code fences. Output the raw JSON object directly.`;
 }
 
 export function planPrompt(analysis: string, memories: string, existingTasks: string, goalsSection: string = '', dynamicContext?: DynamicPromptContext, agentGuidance: string = ''): string {
