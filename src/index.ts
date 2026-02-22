@@ -16,15 +16,14 @@ import { CostTracker } from './utils/cost.js';
 import { Server } from './server/Server.js';
 import { PlanWorkflow } from './core/PlanWorkflow.js';
 import { PatrolManager } from './core/ModeManager.js';
-import { GracefulShutdown } from './core/Shutdown.js';
 import { McpDiscovery } from './mcp/McpDiscovery.js';
 import { TrendAnalyzer } from './evolution/TrendAnalyzer.js';
 import { EvolutionEngine } from './evolution/EvolutionEngine.js';
 import { PromptRegistry } from './prompts/PromptRegistry.js';
 import { PluginMonitor } from './plugins/PluginMonitor.js';
-import { emitSseEvent } from './server/routes.js';
 import { log, type LogEntry } from './utils/logger.js';
 import { validateConfigForStartup } from './startup/configValidation.js';
+import { wireGracefulShutdown } from './startup/gracefulShutdown.js';
 
 const program = new Command()
   .name('db-coder')
@@ -96,26 +95,12 @@ program
     process.on('unhandledRejection', (err) => { log.error('Unhandled rejection', err); });
     process.on('uncaughtException', (err) => { log.error('Uncaught exception', err); });
 
-    const shutdown = new GracefulShutdown({
+    wireGracefulShutdown({
       mainLoop,
-      server: {
-        close: async () => {
-          await server.stop();
-        },
-      },
+      server,
       taskStore,
-      emitShutdownEvent: (payload) => {
-        emitSseEvent('shutdown', payload);
-      },
-      closeDbPool: async () => {
-        await globalMemory.close();
-        await taskStore.close();
-      },
-      onShutdownComplete: async () => {
-        await log.shutdown();
-      },
+      globalMemory,
     });
-    shutdown.register();
 
     // Start server only — default to idle mode, user selects mode via API/UI
     await server.start();
