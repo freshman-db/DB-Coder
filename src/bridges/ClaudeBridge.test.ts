@@ -93,6 +93,27 @@ test('createChatSession merges discovered and internal MCP servers before query 
   assert.equal(querySpy.closeCalls, 1);
 });
 
+test('createChatSession keeps discovered MCP servers when no internal map is provided', () => {
+  const discoveredServers: Record<string, McpServerConfig> = {
+    external_a: { command: 'external-a' },
+    external_b: { command: 'external-b', args: ['--stdio'] },
+  };
+  const querySpy = createQueryRunnerSpy();
+  const bridge = new ClaudeBridge(
+    createClaudeConfig(),
+    createDiscovery(discoveredServers),
+    querySpy.queryRunner,
+  );
+
+  const session = bridge.createChatSession('/workspace/project', () => {});
+
+  assert.equal(querySpy.calls.length, 1);
+  assert.deepEqual(querySpy.calls[0].options?.mcpServers, discoveredServers);
+
+  session.close();
+  assert.equal(querySpy.closeCalls, 1);
+});
+
 test('createChatSession supports internal MCP servers when discovery is unavailable', () => {
   const internalServers: Record<string, McpServerConfig> = {
     db_coder_internal: { command: 'internal-only-command' },

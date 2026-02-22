@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createInternalMcpServer, type InternalMcpDeps } from './InternalMcpServer.js';
-import type { Memory, Task, TaskStatus } from '../memory/types.js';
+import { createInternalMcpServer, type InternalMcpDeps } from '../InternalMcpServer.js';
+import type { Memory, Task, TaskStatus } from '../../memory/types.js';
 
 type ToolResult = {
   content: Array<{ type: string; text: string }>;
@@ -133,6 +133,10 @@ function createServer(overrides: {
 
 test('createInternalMcpServer registers all expected tools', () => {
   const { server } = createServer();
+  assert.equal(server.type, 'sdk');
+  assert.equal(server.name, 'db-coder-internal');
+  assert.ok(server.instance);
+
   const runtime = server as InternalMcpRuntimeServer;
   const toolNames = Object.keys(runtime.instance._registeredTools).sort();
   assert.deepEqual(toolNames, ['add_task', 'get_status', 'list_tasks', 'search_memory']);
@@ -151,6 +155,19 @@ test('add_task creates a task with trimmed description and boundary priority', a
   assert.equal(payload.task.priority, 0);
 });
 
+test('add_task uses default priority and returns tool error for empty description', async () => {
+  const { server, calls } = createServer();
+  const handler = getToolHandler(server, 'add_task');
+
+  const created = await handler({ description: '  Add docs  ' }, {});
+  assert.equal(created.isError, undefined);
+  assert.deepEqual(calls.createTask, [{ projectPath: '/repo', description: 'Add docs', priority: 2 }]);
+
+  const emptyDescription = await handler({ description: '   ' }, {});
+  assert.equal(emptyDescription.isError, true);
+  assert.match(readText(emptyDescription), /add_task failed: description cannot be empty/);
+});
+
 test('add_task returns tool error when task creation fails', async () => {
   const { server } = createServer({
     createTask: async () => {
@@ -164,21 +181,42 @@ test('add_task returns tool error when task creation fails', async () => {
   assert.match(readText(result), /add_task failed: database unavailable/);
 });
 
-test('list_tasks passes optional status filter to TaskStore', async () => {
+test('list_tasks forwards optional status filter and maps response payload', async () => {
   const { server, calls } = createServer({
     listTasks: async (_projectPath, status) => [
-      createTaskRecord({ id: 'task-queued', status: status ?? 'queued' }),
+      createTaskRecord({ id: 'task-filtered', status: status ?? 'queued' }),
     ],
   });
   const handler = getToolHandler(server, 'list_tasks');
 
-  const result = await handler({}, {});
+  const result = await handler({ status: 'active' }, {});
   assert.equal(result.isError, undefined);
-  assert.deepEqual(calls.listTasks, [{ projectPath: '/repo', status: undefined }]);
+  assert.deepEqual(calls.listTasks, [{ projectPath: '/repo', status: 'active' }]);
 
-  const payload = result.structuredContent as { count: number; status: string | null };
+  const payload = result.structuredContent as {
+    count: number;
+    status: string | null;
+    tasks: Array<{ id: string; status: string; createdAt: string | null; updatedAt: string | null }>;
+  };
   assert.equal(payload.count, 1);
-  assert.equal(payload.status, null);
+  assert.equal(payload.status, 'active');
+  assert.equal(payload.tasks[0]?.id, 'task-filtered');
+  assert.equal(payload.tasks[0]?.status, 'active');
+  assert.equal(payload.tasks[0]?.createdAt, '2026-02-01T00:00:00.000Z');
+  assert.equal(payload.tasks[0]?.updatedAt, '2026-02-01T00:00:00.000Z');
+});
+
+test('list_tasks returns tool error when TaskStore throws', async () => {
+  const { server } = createServer({
+    listTasks: async () => {
+      throw new Error('cannot list tasks');
+    },
+  });
+  const handler = getToolHandler(server, 'list_tasks');
+
+  const result = await handler({}, {});
+  assert.equal(result.isError, true);
+  assert.match(readText(result), /list_tasks failed: cannot list tasks/);
 });
 
 test('search_memory returns results and normalizes whitespace in query', async () => {
@@ -192,6 +230,43 @@ test('search_memory returns results and normalizes whitespace in query', async (
   const payload = result.structuredContent as { query: string; count: number };
   assert.equal(payload.query, 'retry strategy');
   assert.equal(payload.count, 1);
+});
+
+test('search_memory maps memory payload fields and handles backend errors', async () => {
+  const { server } = createServer({
+    searchMemory: async (query, _limit) => [
+      createMemoryRecord({
+        id: 99,
+        title: `Result for ${query}`,
+        source_project: null,
+        created_at: new Date('2026-01-16T01:02:03.000Z'),
+        updated_at: new Date('2026-01-17T04:05:06.000Z'),
+      }),
+    ],
+  });
+  const handler = getToolHandler(server, 'search_memory');
+
+  const successResult = await handler({ query: 'memory query' }, {});
+  assert.equal(successResult.isError, undefined);
+
+  const successPayload = successResult.structuredContent as {
+    memories: Array<{ id: number; title: string; sourceProject: string | null; createdAt: string | null; updatedAt: string | null }>;
+  };
+  assert.equal(successPayload.memories[0]?.id, 99);
+  assert.equal(successPayload.memories[0]?.title, 'Result for memory query');
+  assert.equal(successPayload.memories[0]?.sourceProject, null);
+  assert.equal(successPayload.memories[0]?.createdAt, '2026-01-16T01:02:03.000Z');
+  assert.equal(successPayload.memories[0]?.updatedAt, '2026-01-17T04:05:06.000Z');
+
+  const { server: failingServer } = createServer({
+    searchMemory: async () => {
+      throw new Error('memory index unavailable');
+    },
+  });
+  const failingHandler = getToolHandler(failingServer, 'search_memory');
+  const failedResult = await failingHandler({ query: 'memory query' }, {});
+  assert.equal(failedResult.isError, true);
+  assert.match(readText(failedResult), /search_memory failed: memory index unavailable/);
 });
 
 test('search_memory returns tool error for empty query after trimming', async () => {
