@@ -2,8 +2,8 @@ import type { TaskStore } from '../memory/TaskStore.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { Config } from '../config/Config.js';
 import type { TrendAnalyzer } from './TrendAnalyzer.js';
-import type { AdjustmentCategory, DynamicPromptContext, PromptName, PromptPatch } from './types.js';
-import type { ProjectAnalysis } from '../memory/types.js';
+import type { AdjustmentCategory, DynamicPromptContext, HealthTrend, PromptName, PromptPatch, PromptVersion } from './types.js';
+import type { ProjectAnalysis, RecurringIssueCategory, ReviewEvent, Task } from '../memory/types.js';
 import type { ClaudeBridge } from '../bridges/ClaudeBridge.js';
 import { log } from '../utils/logger.js';
 
@@ -19,6 +19,16 @@ const CATEGORY_KEYWORDS: Record<AdjustmentCategory, string[]> = {
 
 // Config fields safe for auto-update
 const SAFE_CONFIG_FIELDS = new Set(['brain.scanInterval', 'autonomy.subtaskTimeout']);
+
+interface MetaReflectData {
+  reviewEvents: ReviewEvent[];
+  recentTasks: Task[];
+  healthTrend: HealthTrend | null;
+  activeVersions: PromptVersion[];
+  passRate: number;
+  avgCost: number;
+  issueCategories: RecurringIssueCategory[];
+}
 
 export class EvolutionEngine {
   constructor(
@@ -239,24 +249,19 @@ export class EvolutionEngine {
   async metaReflect(projectPath: string, claude: ClaudeBridge): Promise<void> {
     log.info('Starting meta-reflect: analyzing prompt effectiveness...');
 
-    // 1. Collect data
-    const [reviewEvents, recentTasks, healthTrend, activeVersions] = await Promise.all([
-      this.taskStore.getRecentReviewEvents(projectPath, 20),
-      this.taskStore.listTasks(projectPath, 'done'),
-      this.trendAnalyzer.getHealthTrend(projectPath),
-      this.taskStore.getActivePromptVersions(projectPath),
-    ]);
-
-    // 2. Compute per-stage metrics
+    // 1. Collect data and compute metrics
+    const {
+      reviewEvents,
+      recentTasks,
+      healthTrend,
+      activeVersions,
+      passRate,
+      avgCost,
+      issueCategories,
+    } = await this.collectMetaReflectData(projectPath);
     const totalReviews = reviewEvents.length;
-    const passedReviews = reviewEvents.filter(e => e.passed).length;
-    const passRate = totalReviews > 0 ? passedReviews / totalReviews : 1;
-    const avgCost = recentTasks.length > 0
-      ? recentTasks.slice(-20).reduce((sum, t) => sum + Number(t.total_cost_usd || 0), 0) / Math.min(recentTasks.length, 20)
-      : 0;
-    const issueCategories = await this.taskStore.getRecurringIssueCategories(projectPath, 10);
 
-    // 3. Build meta-reflection prompt
+    // 2. Build meta-reflection prompt
     const activeVersionsSummary = activeVersions.length > 0
       ? activeVersions.map(v => `- ${v.prompt_name} v${v.version}: effectiveness=${v.effectiveness.toFixed(2)}, tasks=${v.tasks_evaluated}`).join('\n')
       : 'No active prompt patches.';
@@ -310,7 +315,7 @@ Output as JSON:
         return;
       }
 
-      // 4. Store as candidate prompt versions
+      // 3. Store as candidate prompt versions
       const maxActive = this.config.values.evolution?.maxActivePromptPatches ?? 3;
       for (const proposal of parsed.patches.slice(0, 3)) {
         const activeCount = (await this.taskStore.getActivePromptVersions(projectPath))
@@ -333,12 +338,53 @@ Output as JSON:
         log.info(`Meta-reflect: stored candidate patch for "${proposal.promptName}" v${version} (confidence=${proposal.confidence})`);
       }
 
-      // 5. Promote and rollback
+      // 4. Promote and rollback
       await this.promoteReadyCandidates(projectPath);
       await this.rollbackDegradedVersions(projectPath);
     } catch (err) {
       log.warn(`Meta-reflect failed: ${err}`);
     }
+  }
+
+  private async collectMetaReflectData(projectPath: string): Promise<MetaReflectData> {
+    if (typeof projectPath !== 'string' || projectPath.trim().length === 0) {
+      throw new Error('projectPath is required for meta-reflection');
+    }
+
+    const [reviewEventsResult, recentTasksResult, healthTrendResult, activeVersionsResult, issueCategoriesResult] = await Promise.all([
+      this.taskStore.getRecentReviewEvents(projectPath, 20),
+      this.taskStore.listTasks(projectPath, 'done'),
+      this.trendAnalyzer.getHealthTrend(projectPath),
+      this.taskStore.getActivePromptVersions(projectPath),
+      this.taskStore.getRecurringIssueCategories(projectPath, 10),
+    ]);
+
+    const reviewEvents = reviewEventsResult ?? [];
+    const recentTasks = recentTasksResult ?? [];
+    const healthTrend = healthTrendResult ?? null;
+    const activeVersions = activeVersionsResult ?? [];
+    const issueCategories = issueCategoriesResult ?? [];
+
+    const totalReviews = reviewEvents.length;
+    const passedReviews = reviewEvents.filter(event => event?.passed === true).length;
+    const passRate = totalReviews > 0 ? passedReviews / totalReviews : 1;
+
+    const costWindowSize = Math.min(recentTasks.length, 20);
+    const avgCost = costWindowSize > 0
+      ? recentTasks
+        .slice(-costWindowSize)
+        .reduce((sum, task) => sum + Number(task?.total_cost_usd ?? 0), 0) / costWindowSize
+      : 0;
+
+    return {
+      reviewEvents,
+      recentTasks,
+      healthTrend,
+      activeVersions,
+      passRate,
+      avgCost,
+      issueCategories,
+    };
   }
 
   /**
