@@ -33,7 +33,7 @@ function buildParameterizedText(strings: readonly string[], valueCount: number):
   return normalizeSql(text);
 }
 
-function createSqlMock(): {
+function createSqlMock(responder?: (call: TaggedCall) => unknown[]): {
   sql: SqlMock;
   taggedCalls: TaggedCall[];
   unsafeCalls: UnsafeCall[];
@@ -44,11 +44,12 @@ function createSqlMock(): {
   const jsonCalls: unknown[] = [];
 
   const sql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
-    taggedCalls.push({
+    const call = {
       text: buildParameterizedText(strings, values.length),
       values: [...values],
-    });
-    return [];
+    };
+    taggedCalls.push(call);
+    return responder ? responder(call) : [];
   }) as unknown as SqlMock;
 
   sql.unsafe = async (query: string, values: unknown[] = []) => {
@@ -262,6 +263,102 @@ describe('TaskStore.listTasks (getTasksByStatus query construction)', () => {
       'SELECT * FROM tasks WHERE project_path = $1 ORDER BY priority ASC, created_at ASC',
     );
     assert.deepEqual(taggedCalls[0].values, ['/repo']);
+  });
+});
+
+describe('TaskStore.getOperationalMetrics', () => {
+  test('aggregates metrics from parallel SQL queries and helper methods', async () => {
+    const { sql, taggedCalls } = createSqlMock(call => {
+      if (call.text.includes('AS cycle_count')) {
+        return [{ cycle_count: '4', avg_cycle_duration_ms: '1250.5' }];
+      }
+      if (call.text.includes('AS done_count')) {
+        return [{ done_count: 8, failed_count: 2 }];
+      }
+      if (call.text.includes('AS queue_depth')) {
+        return [{ queue_depth: '3' }];
+      }
+      if (call.text.startsWith('SELECT status, COUNT(*)::int AS count')) {
+        return [
+          { status: 'done', count: '8' },
+          { status: 'failed', count: 2 },
+          { status: 'queued', count: '3' },
+        ];
+      }
+      return [];
+    });
+    const store = createTaskStore(sql);
+
+    let dailyCostCalls = 0;
+    store.getDailyCost = async () => {
+      dailyCostCalls += 1;
+      return { total_cost_usd: 4.75, task_count: 2 };
+    };
+
+    const recentScansArgs: Array<string | number> = [];
+    store.getRecentScans = async (projectPath: string, limit = 10) => {
+      recentScansArgs.push(projectPath, limit);
+      return [
+        { health_score: 95 },
+        { health_score: null },
+        { health_score: 88 },
+      ] as any;
+    };
+
+    const metrics = await store.getOperationalMetrics('/repo');
+
+    assert.equal(dailyCostCalls, 1);
+    assert.deepEqual(recentScansArgs, ['/repo', 10]);
+    assert.equal(taggedCalls.length, 4);
+    assert.equal(
+      taggedCalls[0].text,
+      "SELECT COUNT(*)::int AS cycle_count, COALESCE(AVG(cycle_duration_ms), 0) AS avg_cycle_duration_ms FROM ( SELECT t.id, COALESCE(EXTRACT(EPOCH FROM (MAX(tl.created_at) - MIN(tl.created_at))) * 1000, 0) AS cycle_duration_ms FROM tasks t LEFT JOIN task_logs tl ON tl.task_id = t.id WHERE t.project_path = $1 AND t.status = 'done' GROUP BY t.id ) AS completed_cycles",
+    );
+    assert.equal(
+      taggedCalls[1].text,
+      "SELECT COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0)::int AS done_count, COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0)::int AS failed_count FROM tasks WHERE project_path = $1 AND status IN ('done', 'failed')",
+    );
+    assert.equal(
+      taggedCalls[2].text,
+      "SELECT COUNT(*)::int AS queue_depth FROM tasks WHERE project_path = $1 AND status = 'queued'",
+    );
+    assert.equal(
+      taggedCalls[3].text,
+      'SELECT status, COUNT(*)::int AS count FROM tasks WHERE project_path = $1 GROUP BY status',
+    );
+    assert.deepEqual(taggedCalls.map(call => call.values), [['/repo'], ['/repo'], ['/repo'], ['/repo']]);
+    assert.deepEqual(metrics, {
+      cycleCount: 4,
+      avgCycleDurationMs: 1250.5,
+      taskPassRate: 0.8,
+      dailyCostUsd: 4.75,
+      queueDepth: 3,
+      tasksByStatus: {
+        done: 8,
+        failed: 2,
+        queued: 3,
+      },
+      recentHealthScores: [95, 88],
+    });
+  });
+
+  test('returns zero-safe defaults when aggregation queries and helper methods return no data', async () => {
+    const { sql, taggedCalls } = createSqlMock(() => []);
+    const store = createTaskStore(sql);
+
+    store.getDailyCost = async () => ({ total_cost_usd: 0, task_count: 0 });
+    store.getRecentScans = async () => [];
+
+    const metrics = await store.getOperationalMetrics('/repo');
+
+    assert.equal(taggedCalls.length, 4);
+    assert.equal(metrics.cycleCount, 0);
+    assert.equal(metrics.avgCycleDurationMs, 0);
+    assert.equal(metrics.taskPassRate, 0);
+    assert.equal(metrics.dailyCostUsd, 0);
+    assert.equal(metrics.queueDepth, 0);
+    assert.deepEqual(metrics.tasksByStatus, {});
+    assert.deepEqual(metrics.recentHealthScores, []);
   });
 });
 
