@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { ChatSession } from '../bridges/ClaudeBridge.js';
-import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { McpServerConfig, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { PlanDraft, PlanReviewStatus } from '../memory/types.js';
 import type { PlanRequest } from '../prompts/brain.js';
 import { PlanWorkflow } from './PlanWorkflow.js';
@@ -28,6 +28,22 @@ type PlanWorkflowEmitter = {
 
 type PlanWorkflowHandler = {
   handleSDKMessage: (draftId: number, msg: SDKMessage) => Promise<void>;
+};
+
+type ToolResult = {
+  content: Array<{ type: string; text: string }>;
+  isError?: boolean;
+  structuredContent?: unknown;
+};
+
+type RegisteredTool = {
+  handler: (args: Record<string, unknown>, extra: unknown) => Promise<ToolResult>;
+};
+
+type InternalMcpRuntimeServer = McpServerConfig & {
+  instance?: {
+    _registeredTools?: Record<string, RegisteredTool>;
+  };
 };
 
 function getInternals(workflow: PlanWorkflow): PlanWorkflowInternals {
@@ -64,7 +80,22 @@ function createWorkflow(overrides: {
   getPlanDraft?: (draftId: number) => Promise<unknown | null>;
   updateChatStatus?: (draftId: number, status: string) => Promise<void>;
   updatePlanDraftStatus?: (draftId: number, status: PlanReviewStatus) => Promise<void>;
-  createChatSession?: () => ChatSession;
+  createTask?: (projectPath: string, description: string, priority?: number) => Promise<unknown>;
+  listTasks?: (projectPath: string, status?: string) => Promise<unknown[]>;
+  searchMemory?: (query: string, limit?: number) => Promise<unknown[]>;
+  createPlanChatSession?: (projectPath: string) => Promise<{ id: number }>;
+  createChatSession?: (
+    projectPath: string,
+    onMessage: (msg: SDKMessage) => void,
+    options?: {
+      systemPrompt?: {
+        type?: string;
+        preset?: string;
+        append?: string;
+      };
+      internalMcpServers?: Record<string, McpServerConfig>;
+    },
+  ) => ChatSession;
 } = {}): PlanWorkflow {
   const taskStore = {
     addChatMessage: overrides.addChatMessage ?? (async () => ({})),
@@ -73,6 +104,9 @@ function createWorkflow(overrides: {
     getPlanDraft: overrides.getPlanDraft ?? (async () => ({ project_path: '/tmp/project' })),
     updateChatStatus: overrides.updateChatStatus ?? (async () => {}),
     updatePlanDraftStatus: overrides.updatePlanDraftStatus ?? (async () => {}),
+    createTask: overrides.createTask ?? (async () => ({})),
+    listTasks: overrides.listTasks ?? (async () => []),
+    createChatSession: overrides.createPlanChatSession ?? (async () => ({ id: 1 })),
   };
 
   const claude = {
@@ -86,7 +120,9 @@ function createWorkflow(overrides: {
     taskStore as unknown as ConstructorParameters<typeof PlanWorkflow>[3],
     {} as ConstructorParameters<typeof PlanWorkflow>[4],
     {} as ConstructorParameters<typeof PlanWorkflow>[5],
-    {} as ConstructorParameters<typeof PlanWorkflow>[6],
+    {
+      search: overrides.searchMemory ?? (async () => []),
+    } as unknown as ConstructorParameters<typeof PlanWorkflow>[6],
   );
 }
 
@@ -225,6 +261,79 @@ test('closeSession removes SSE listener map entries and prevents callbacks after
   );
 
   assert.deepEqual(receivedEvents, []);
+});
+
+test('createChatSession wires db-coder-tools MCP server and planning prompt guidance', async () => {
+  const chatSessionCalls: Array<{
+    projectPath: string;
+    options?: {
+      systemPrompt?: {
+        type?: string;
+        preset?: string;
+        append?: string;
+      };
+      internalMcpServers?: Record<string, McpServerConfig>;
+    };
+  }> = [];
+
+  const workflow = createWorkflow({
+    createPlanChatSession: async () => ({ id: 52 }),
+    createChatSession: (projectPath, _onMessage, options) => {
+      chatSessionCalls.push({ projectPath, options });
+      return createMockSession({ sessionId: 'session-52' });
+    },
+  });
+
+  const draftId = await workflow.createChatSession('/tmp/project-with-tools');
+
+  assert.equal(draftId, 52);
+  assert.equal(chatSessionCalls.length, 1);
+  assert.equal(chatSessionCalls[0]?.projectPath, '/tmp/project-with-tools');
+
+  const options = chatSessionCalls[0]?.options;
+  const internalServer = options?.internalMcpServers?.['db-coder-tools'] as { type?: string; name?: string } | undefined;
+  assert.ok(internalServer);
+  assert.equal(internalServer.type, 'sdk');
+  assert.equal(internalServer.name, 'db-coder-internal');
+
+  const prompt = options?.systemPrompt;
+  assert.equal(prompt?.type, 'preset');
+  assert.equal(prompt?.preset, 'claude_code');
+  const promptAppend = prompt?.append ?? '';
+  assert.match(promptAppend, /db-coder-tools/);
+  assert.match(promptAppend, /add_task\(description, priority\)/);
+  assert.match(promptAppend, /list_tasks\(status\?\)/);
+  assert.match(promptAppend, /search_memory\(query\)/);
+  assert.match(promptAppend, /get_status\(\)/);
+});
+
+test('createChatSession binds db-coder-tools handlers to the draft project path and zero-task boundary', async () => {
+  const listTasksCalls: Array<{ projectPath: string; status: string | undefined }> = [];
+  let internalServer: InternalMcpRuntimeServer | undefined;
+
+  const workflow = createWorkflow({
+    createPlanChatSession: async () => ({ id: 53 }),
+    listTasks: async (projectPath, status) => {
+      listTasksCalls.push({ projectPath, status });
+      return [];
+    },
+    createChatSession: (_projectPath, _onMessage, options) => {
+      internalServer = options?.internalMcpServers?.['db-coder-tools'] as InternalMcpRuntimeServer | undefined;
+      return createMockSession({ sessionId: 'session-53' });
+    },
+  });
+
+  await workflow.createChatSession('/tmp/project-zero-tasks');
+
+  const listTasksHandler = internalServer?.instance?._registeredTools?.list_tasks?.handler;
+  assert.ok(listTasksHandler);
+
+  const result = await listTasksHandler({}, {});
+  assert.equal(result.isError, undefined);
+  const payload = result.structuredContent as { count: number; tasks: unknown[] };
+  assert.equal(payload.count, 0);
+  assert.deepEqual(payload.tasks, []);
+  assert.deepEqual(listTasksCalls, [{ projectPath: '/tmp/project-zero-tasks', status: undefined }]);
 });
 
 test('processUserMessage sends user message through existing chat session', async () => {

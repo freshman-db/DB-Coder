@@ -1,5 +1,5 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { McpServerConfig, Query, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { CodingAgent, AgentResult, ReviewResult } from './CodingAgent.js';
 import type { ClaudeConfig } from '../config/types.js';
 import type { McpDiscovery, Phase } from '../mcp/McpDiscovery.js';
@@ -15,6 +15,8 @@ export interface ChatSession {
   readonly channel: AsyncChannel<SDKUserMessage>;
   close(): void;
 }
+
+type QueryRunner = typeof query;
 
 // Tools to remove from env to avoid nesting conflicts
 const CLAUDE_ENV_VARS = [
@@ -37,6 +39,7 @@ export class ClaudeBridge implements CodingAgent {
   constructor(
     private config: ClaudeConfig,
     private mcpDiscovery?: McpDiscovery,
+    private queryRunner: QueryRunner = query,
   ) {}
 
   /** Set the handler for auto-answering AskUserQuestion (called after Brain is constructed) */
@@ -71,7 +74,7 @@ export class ClaudeBridge implements CodingAgent {
         ? buildCanUseTool(this.questionHandler, prompt)
         : undefined;
 
-      for await (const message of query({
+      for await (const message of this.queryRunner({
         prompt,
         options: {
           cwd,
@@ -120,7 +123,7 @@ export class ClaudeBridge implements CodingAgent {
     try {
       const mcpServers = this.mcpDiscovery?.getServersForPhase('plan') ?? {};
       const plugins = this.mcpDiscovery?.getPluginsForPhase('plan') ?? [];
-      for await (const message of query({
+      for await (const message of this.queryRunner({
         prompt,
         options: {
           cwd,
@@ -171,7 +174,7 @@ export class ClaudeBridge implements CodingAgent {
         ? buildCanUseTool(this.questionHandler, prompt)
         : undefined;
 
-      for await (const message of query({
+      for await (const message of this.queryRunner({
         prompt,
         options: {
           cwd,
@@ -220,13 +223,20 @@ Output your review as JSON: { "passed": boolean, "issues": [{ "severity": "criti
   createChatSession(
     cwd: string,
     onMessage: (msg: SDKMessage) => void,
-    options?: { systemPrompt?: AgentSystemPrompt },
+    options?: {
+      systemPrompt?: AgentSystemPrompt;
+      internalMcpServers?: Record<string, McpServerConfig>;
+    },
   ): ChatSession {
     const channel = new AsyncChannel<SDKUserMessage>();
-    const mcpServers = this.mcpDiscovery?.getServersForPhase('plan') ?? {};
+    const discoveredMcpServers = this.mcpDiscovery?.getServersForPhase('plan') ?? {};
+    const mcpServers: Record<string, McpServerConfig> = {
+      ...(discoveredMcpServers as Record<string, McpServerConfig>),
+      ...(options?.internalMcpServers ?? {}),
+    };
     const plugins = this.mcpDiscovery?.getPluginsForPhase('plan') ?? [];
 
-    const q = query({
+    const q = this.queryRunner({
       prompt: channel,
       options: {
         cwd,
