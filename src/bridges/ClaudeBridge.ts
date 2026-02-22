@@ -231,7 +231,7 @@ Output your review as JSON: { "passed": boolean, "issues": [{ "severity": "criti
     const channel = new AsyncChannel<SDKUserMessage>();
     const discoveredMcpServers = this.mcpDiscovery?.getServersForPhase('plan') ?? {};
     const mcpServers: Record<string, McpServerConfig> = {
-      ...discoveredMcpServers as Record<string, McpServerConfig>,
+      ...(discoveredMcpServers as Record<string, McpServerConfig>),
       ...(options?.internalMcpServers ?? {}),
     };
     const plugins = this.mcpDiscovery?.getPluginsForPhase('plan') ?? [];
