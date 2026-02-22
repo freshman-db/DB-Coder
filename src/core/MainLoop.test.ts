@@ -7,7 +7,7 @@ import type { Config } from '../config/Config.js';
 import type { ClaudeBridge } from '../bridges/ClaudeBridge.js';
 import type { CodexBridge } from '../bridges/CodexBridge.js';
 import type { TaskStore } from '../memory/TaskStore.js';
-import type { Task } from '../memory/types.js';
+import type { ProjectAnalysis, Task } from '../memory/types.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { CostTracker } from '../utils/cost.js';
 import type { Brain } from './Brain.js';
@@ -599,6 +599,159 @@ describe('MainLoop runCycle integration', () => {
     assert.equal(executeSubtasksCalls, 1);
     assert.equal(runReviewCycleCalls, 1);
     assert.equal(reflectOnTaskCalls, 1);
+  });
+
+  test('evolution engine assessment error — caught and continues', async () => {
+    let assessGoalProgressCalls = 0;
+    let applyPendingProposalsCalls = 0;
+    let getNextCalls = 0;
+    let prepareTaskBranchCalls = 0;
+    let executeSubtasksCalls = 0;
+    let runReviewCycleCalls = 0;
+    let reflectOnTaskCalls = 0;
+    const logs: LogEntry[] = [];
+
+    const now = new Date();
+    const scanAnalysis = {
+      issues: [{ type: 'bugfix', severity: 'medium' as const, description: 'Fix stale cached query results' }],
+      opportunities: [],
+      projectHealth: 82,
+      summary: 'One stale-cache issue found',
+    };
+    const plan = {
+      tasks: [{
+        id: 'T-EVO-1',
+        description: 'Fix stale cached query results',
+        priority: 1,
+        executor: 'codex' as const,
+        subtasks: [{ id: 'S1', description: 'Adjust cache invalidation', executor: 'codex' as const }],
+        dependsOn: [],
+        estimatedComplexity: 'low' as const,
+      }],
+      reasoning: 'Address stale cache behavior',
+    };
+    const mockTask: Task = {
+      id: 'task-evo-error-1',
+      project_path: '/tmp/db-coder-main-loop-test',
+      task_description: 'Fix stale cached query results',
+      phase: 'init',
+      priority: 1,
+      plan: plan.tasks[0],
+      subtasks: [{ id: 'S1', description: 'Adjust cache invalidation', executor: 'codex', status: 'pending' }],
+      review_results: [],
+      iteration: 0,
+      total_cost_usd: 0,
+      git_branch: null,
+      start_commit: null,
+      depends_on: [],
+      status: 'queued',
+      created_at: now,
+      updated_at: now,
+    };
+
+    const { loop } = createMainLoopForCycle({
+      brain: {
+        hasChanges: async () => true,
+        scanProject: async () => ({ analysis: scanAnalysis, cost: 0 }),
+        createPlan: async () => ({ plan, cost: 0 }),
+      },
+      taskQueue: {
+        enqueue: async () => [],
+        getNext: async () => {
+          getNextCalls++;
+          return getNextCalls === 1 ? mockTask : null;
+        },
+      },
+      taskStore: {
+        getLastScan: async projectPath => {
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return {
+            id: 17,
+            project_path: projectPath,
+            commit_hash: 'abc123',
+            depth: 'normal',
+            result: scanAnalysis,
+            health_score: 82,
+            cost_usd: 0,
+            created_at: now,
+          };
+        },
+      },
+    });
+
+    loop.setEvolutionEngine({
+      assessGoalProgress: async (projectPath: string, analysis: ProjectAnalysis, scanId: number | null) => {
+        assessGoalProgressCalls++;
+        assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+        assert.equal(analysis, scanAnalysis);
+        assert.equal(scanId, 17);
+        throw new Error('db fail');
+      },
+      applyPendingProposals: async () => {
+        applyPendingProposalsCalls++;
+      },
+    } as unknown as EvolutionEngine);
+
+    const internals = getMainLoopInternals(loop);
+    const executionInternals = getMainLoopExecutionInternals(loop);
+    const originalPrepareTaskBranch = executionInternals.prepareTaskBranch;
+    const originalExecuteSubtasks = executionInternals.executeSubtasks;
+    const originalRunReviewCycle = executionInternals.runReviewCycle;
+    const originalReflectOnTask = executionInternals.reflectOnTask;
+
+    executionInternals.prepareTaskBranch = async () => {
+      prepareTaskBranchCalls++;
+      return { originalBranch: 'main', startCommit: '' };
+    };
+    executionInternals.executeSubtasks = async task => {
+      executeSubtasksCalls++;
+      return { subtasks: task.subtasks, stuckAdjustments: [], aborted: false };
+    };
+    executionInternals.runReviewCycle = async () => {
+      runReviewCycleCalls++;
+      return {
+        aborted: false,
+        reviewResult: { passed: false, mustFix: [], shouldFix: [], summary: 'Mock review outcome' },
+        reviewRetries: 0,
+      };
+    };
+    executionInternals.reflectOnTask = async () => {
+      reflectOnTaskCalls++;
+    };
+
+    const removeLogListener = log.addListener(entry => {
+      logs.push(entry);
+    });
+    internals.setRunning(true);
+    const { states, remove } = collectStates(loop);
+    try {
+      await assert.doesNotReject(loop.runCycle());
+    } finally {
+      removeLogListener();
+      remove();
+      internals.setRunning(false);
+      executionInternals.prepareTaskBranch = originalPrepareTaskBranch;
+      executionInternals.executeSubtasks = originalExecuteSubtasks;
+      executionInternals.runReviewCycle = originalRunReviewCycle;
+      executionInternals.reflectOnTask = originalReflectOnTask;
+    }
+
+    const transitions = states
+      .map(snapshot => snapshot.state)
+      .filter((state, index, all) => index === 0 || all[index - 1] !== state);
+
+    assert.equal(assessGoalProgressCalls, 1);
+    assert.equal(applyPendingProposalsCalls, 0);
+    assert.equal(getNextCalls, 2);
+    assert.equal(prepareTaskBranchCalls, 1);
+    assert.equal(executeSubtasksCalls, 1);
+    assert.equal(runReviewCycleCalls, 1);
+    assert.equal(reflectOnTaskCalls, 1);
+    assert.deepEqual(transitions, ['scanning', 'planning', 'evaluating', 'executing', 'idle']);
+    assert.ok(
+      logs.some(entry => entry.level === 'warn' && entry.message.includes('Evolution goal assessment failed: Error: db fail')),
+      'Expected warning log for evolution assessment failure',
+    );
   });
 
   test('scan finds no actionable items — planning skipped', async () => {
