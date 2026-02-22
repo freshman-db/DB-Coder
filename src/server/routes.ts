@@ -46,7 +46,7 @@ const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 const VALID_DEPTHS = ['quick', 'normal', 'deep'] as const;
 type ScanDepth = (typeof VALID_DEPTHS)[number];
 
-class HttpError extends Error {
+export class HttpError extends Error {
   constructor(public readonly statusCode: number, message: string) {
     super(message);
     this.name = 'HttpError';
@@ -814,7 +814,7 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   }
 }
 
-function parseRouteId(params: Record<string, string>, field = 'id', label?: string): number {
+export function parseRouteId(params: Record<string, string>, field = 'id', label?: string): number {
   const rawId = params[field];
   const id = parseInt(rawId ?? '', 10);
   const resolvedLabel = label ?? `${field} ID`;

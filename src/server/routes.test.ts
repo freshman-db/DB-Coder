@@ -11,7 +11,7 @@ import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { CostTracker } from '../utils/cost.js';
 import { log } from '../utils/logger.js';
-import { createSseStream, emitSseEvent } from './routes.js';
+import { createSseStream, emitSseEvent, HttpError, parseRouteId } from './routes.js';
 import { Server } from './Server.js';
 
 type RequestListener = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
@@ -193,6 +193,33 @@ async function dispatch(server: Server, options: RequestOptions): Promise<MockRe
 function parseJson<T>(state: MockResponseState): T {
   return JSON.parse(state.body) as T;
 }
+
+test('parseRouteId returns parsed number for a valid id parameter', () => {
+  assert.equal(parseRouteId({ id: '42' }), 42);
+});
+
+test('parseRouteId throws HttpError with status 400 for a non-numeric id', () => {
+  assert.throws(
+    () => parseRouteId({ id: 'abc' }),
+    (error: unknown) => {
+      assert.equal(error instanceof HttpError, true);
+      assert.equal((error as HttpError).statusCode, 400);
+      return true;
+    },
+  );
+});
+
+test('parseRouteId includes custom label in HttpError message when id is missing', () => {
+  assert.throws(
+    () => parseRouteId({}, 'id', 'plan ID'),
+    (error: unknown) => {
+      assert.equal(error instanceof HttpError, true);
+      assert.equal((error as HttpError).statusCode, 400);
+      assert.equal((error as HttpError).message.includes('plan ID'), true);
+      return true;
+    },
+  );
+});
 
 test('GET /api/tasks returns paginated task list JSON', async () => {
   let listArgs:
