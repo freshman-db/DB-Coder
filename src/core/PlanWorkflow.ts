@@ -129,30 +129,38 @@ export class PlanWorkflow {
   }
 
   async processUserMessage(draftId: number, userMessage: string): Promise<void> {
-    // Save user message to DB
-    await this.taskStore.addChatMessage(draftId, 'user', userMessage);
-    this.emit(draftId, 'message', { role: 'user', content: userMessage });
+    try {
+      // Save user message to DB
+      await this.taskStore.addChatMessage(draftId, 'user', userMessage);
+      this.emit(draftId, 'message', { role: 'user', content: userMessage });
 
-    // Get or start ChatSession
-    let session = this.chatSessions.get(draftId);
-    if (!session) {
-      const draft = await this.taskStore.getPlanDraft(draftId);
-      if (!draft) throw new Error(`Plan draft #${draftId} not found`);
-      this.startSession(draftId, draft.project_path);
-      session = this.chatSessions.get(draftId)!;
+      // Get or start ChatSession
+      let session = this.chatSessions.get(draftId);
+      if (!session) {
+        const draft = await this.taskStore.getPlanDraft(draftId);
+        if (!draft) throw new Error(`Plan draft #${draftId} not found`);
+        this.startSession(draftId, draft.project_path);
+        session = this.chatSessions.get(draftId)!;
+      }
+
+      // Update status
+      await this.taskStore.updateChatStatus(draftId, 'researching');
+      this.emit(draftId, 'status', { status: 'researching' });
+
+      // Push message to channel — Claude processes it automatically
+      session.channel.push({
+        type: 'user',
+        message: { role: 'user', content: userMessage },
+        parent_tool_use_id: null,
+        session_id: session.sessionId || '',
+      });
+    } catch (err) {
+      // No active chat process means listeners cannot be naturally released.
+      if (!this.chatSessions.has(draftId)) {
+        this.sseListeners.delete(draftId);
+      }
+      throw err;
     }
-
-    // Update status
-    await this.taskStore.updateChatStatus(draftId, 'researching');
-    this.emit(draftId, 'status', { status: 'researching' });
-
-    // Push message to channel — Claude processes it automatically
-    session.channel.push({
-      type: 'user',
-      message: { role: 'user', content: userMessage },
-      parent_tool_use_id: null,
-      session_id: session.sessionId || '',
-    });
   }
 
   async generatePlan(draftId: number, projectPath: string): Promise<void> {
@@ -259,6 +267,7 @@ export class PlanWorkflow {
   closeSession(draftId: number): void {
     this.chatSessions.get(draftId)?.close();
     this.chatSessions.delete(draftId);
+    this.sseListeners.delete(draftId);
     this.emit(draftId, 'status', { status: 'closed' });
   }
 
