@@ -8,7 +8,6 @@ import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PluginMonitor } from '../plugins/PluginMonitor.js';
 import type { PatrolManager } from '../core/ModeManager.js';
 import type { PlanWorkflow } from '../core/PlanWorkflow.js';
-import type { AnalysisWorkflow } from '../core/AnalysisWorkflow.js';
 import type { PlanRequest } from '../prompts/brain.js';
 import { log, type LogEntry } from '../utils/logger.js';
 import { isRecord } from '../utils/parse.js';
@@ -23,7 +22,6 @@ interface RouteContext {
   pluginMonitor?: PluginMonitor;
   patrolManager?: PatrolManager;
   planWorkflow?: PlanWorkflow;
-  analysisWorkflow?: AnalysisWorkflow;
 }
 
 type RouteHandler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext, params: Record<string, string>) => Promise<void>;
@@ -477,30 +475,6 @@ route('POST', '/api/plans/:id/execute', async (_req, res, ctx, params) => {
     if (err instanceof Error) { json(res, { error: err.message }, 400); return; }
     throw err;
   }
-});
-
-// --- Analysis (independent operation, no mode check) ---
-route('POST', '/api/analysis', async (req, res, ctx) => {
-  if (!ctx.analysisWorkflow) { json(res, { error: 'Analysis workflow not available' }, 503); return; }
-  const body = await readBody(req) as Record<string, unknown>;
-  const modulePath = typeof body.modulePath === 'string' ? body.modulePath : '';
-  const isProject = body.type === 'project';
-  const analysisPromise = ctx.analysisWorkflow.analyzeModule(ctx.config.projectPath, isProject ? '.' : modulePath);
-  json(res, { ok: true, message: 'Analysis started' }, 202);
-  analysisPromise.catch(err => log.error('Analysis failed', err));
-});
-
-route('GET', '/api/analysis', async (_req, res, ctx) => {
-  const reports = await ctx.taskStore.listAnalysisReports(ctx.config.projectPath);
-  json(res, reports);
-});
-
-route('GET', '/api/analysis/:id', async (_req, res, ctx, params) => {
-  const id = parseInt(params.id, 10);
-  if (isNaN(id)) { json(res, { error: 'Invalid report ID' }, 400); return; }
-  const report = await ctx.taskStore.getAnalysisReport(id);
-  if (!report) { json(res, { error: 'not found' }, 404); return; }
-  json(res, report);
 });
 
 // --- Route matching ---

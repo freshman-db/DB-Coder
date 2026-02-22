@@ -159,25 +159,3 @@ export interface ChatMessage {
   created_at: Date;
 }
 
-export interface AnalysisReport {
-  id: number;
-  project_path: string;
-  module_path: string;
-  title: string;
-  markdown: string;
-  summary: string;
-  modules: ModuleInfo[];
-  cost_usd: number;
-  created_at: Date;
-}
-
-export interface ModuleInfo {
-  name: string;
-  path: string;
-  type: 'class' | 'function' | 'module' | 'file';
-  dependencies: string[];
-  dependents: string[];
-  description: string;
-  lines: number;
-  complexity: 'low' | 'medium' | 'high';
-}

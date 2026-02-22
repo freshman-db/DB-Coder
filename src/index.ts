@@ -14,7 +14,6 @@ import { MainLoop } from './core/MainLoop.js';
 import { CostTracker } from './utils/cost.js';
 import { Server } from './server/Server.js';
 import { PlanWorkflow } from './core/PlanWorkflow.js';
-import { AnalysisWorkflow } from './core/AnalysisWorkflow.js';
 import { PatrolManager } from './core/ModeManager.js';
 import { McpDiscovery } from './mcp/McpDiscovery.js';
 import { TrendAnalyzer } from './evolution/TrendAnalyzer.js';
@@ -85,12 +84,10 @@ program
 
     // Create workflow instances
     const planWorkflow = new PlanWorkflow(brain, claudeBridge, codexBridge, taskStore, taskQueue, config, globalMemory);
-    const analysisWorkflow = new AnalysisWorkflow(brain, claudeBridge, taskStore, config);
-
     // Create patrol manager
     const patrolManager = new PatrolManager(mainLoop);
 
-    const server = new Server(config, mainLoop, taskStore, globalMemory, costTracker, evolutionEngine, pluginMonitor, patrolManager, planWorkflow, analysisWorkflow);
+    const server = new Server(config, mainLoop, taskStore, globalMemory, costTracker, evolutionEngine, pluginMonitor, patrolManager, planWorkflow);
 
     // Global error handlers
     process.on('unhandledRejection', (err) => { log.error('Unhandled rejection', err); });

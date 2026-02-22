@@ -11,7 +11,6 @@ import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PluginMonitor } from '../plugins/PluginMonitor.js';
 import type { PatrolManager } from '../core/ModeManager.js';
 import type { PlanWorkflow } from '../core/PlanWorkflow.js';
-import type { AnalysisWorkflow } from '../core/AnalysisWorkflow.js';
 import { handleRequest } from './routes.js';
 import { log } from '../utils/logger.js';
 
@@ -42,7 +41,6 @@ export class Server {
     private pluginMonitor?: PluginMonitor,
     private patrolManager?: PatrolManager,
     private planWorkflow?: PlanWorkflow,
-    private analysisWorkflow?: AnalysisWorkflow,
   ) {
     // Web files directory (relative to compiled output)
     const thisDir = fileURLToPath(new URL('.', import.meta.url));
@@ -53,7 +51,7 @@ export class Server {
       this.webDir = join(thisDir, '..', '..', 'src', 'web');
     }
 
-    const ctx = { loop, taskStore, globalMemory, costTracker, config, evolutionEngine: this.evolutionEngine, pluginMonitor: this.pluginMonitor, patrolManager: this.patrolManager, planWorkflow: this.planWorkflow, analysisWorkflow: this.analysisWorkflow };
+    const ctx = { loop, taskStore, globalMemory, costTracker, config, evolutionEngine: this.evolutionEngine, pluginMonitor: this.pluginMonitor, patrolManager: this.patrolManager, planWorkflow: this.planWorkflow };
 
     this.server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       try {

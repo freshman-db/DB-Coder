@@ -233,44 +233,6 @@ Output as JSON:
 }`;
 }
 
-export function analysisPrompt(projectPath: string, modulePath: string, memories: string, mcpGuidance: string = ''): string {
-  const isProject = modulePath === '.' || modulePath === '';
-  const target = isProject ? 'the entire project' : `the module at ${modulePath}`;
-
-  return `Perform a deep architectural analysis of ${target} in the project at ${projectPath}.
-
-## Relevant memories
-${memories || 'None'}
-${mcpGuidance}
-
-## Analysis Tasks
-1. Map out all modules/classes/functions in the target area
-2. Trace dependency relationships (who imports what)
-3. Identify the public API surface and internal implementation details
-4. Evaluate code complexity and identify hotspots
-5. Check for design patterns used and their appropriateness
-6. Assess test coverage and quality
-7. Identify potential improvements and technical debt
-
-## Output
-Output as JSON:
-{
-  "title": string (descriptive title for this analysis),
-  "summary": string (executive summary, 2-3 paragraphs),
-  "markdown": string (detailed Markdown report with sections for architecture, dependencies, complexity, recommendations),
-  "modules": [{
-    "name": string,
-    "path": string,
-    "type": "class"|"function"|"module"|"file",
-    "dependencies": [string] (paths this module imports from),
-    "dependents": [string] (paths that import this module),
-    "description": string,
-    "lines": number,
-    "complexity": "low"|"medium"|"high"
-  }]
-}`;
-}
-
 export function reflectPrompt(taskDescription: string, result: string, reviewSummary: string, outcome: string = 'success'): string {
   const outcomeGuidance = outcome === 'success'
     ? `Focus on:

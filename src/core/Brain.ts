@@ -7,9 +7,9 @@ import type { ProjectAnalysis, TaskPlan, ReflectionResult } from './types.js';
 import type { QuestionHandler } from '../bridges/MessageHandler.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PromptRegistry } from '../prompts/PromptRegistry.js';
-import { BRAIN_SYSTEM_PROMPT, scanPrompt, planPrompt, reflectPrompt, brainMcpGuidance, researchPrompt, planWithMarkdownPrompt, analysisPrompt } from '../prompts/brain.js';
+import { BRAIN_SYSTEM_PROMPT, scanPrompt, planPrompt, reflectPrompt, brainMcpGuidance, researchPrompt, planWithMarkdownPrompt } from '../prompts/brain.js';
 import type { PlanRequest } from '../prompts/brain.js';
-import type { PlanDraft, AnalysisReport, ModuleInfo } from '../memory/types.js';
+import type { PlanDraft } from '../memory/types.js';
 import { buildAgentGuidance } from '../prompts/agents.js';
 import { getHeadCommit, getRecentLog, getChangedFilesSince } from '../utils/git.js';
 import { log } from '../utils/logger.js';
@@ -274,47 +274,6 @@ export class Brain implements QuestionHandler {
 
     log.info(`Plan generated: ${parsed.tasks.length} tasks`);
     return { plan: parsed, markdown, reasoning: parsed.reasoning, cost: result.cost_usd };
-  }
-
-  async analyzeModule(
-    projectPath: string,
-    modulePath: string,
-  ): Promise<{ report: AnalysisReport; cost: number }> {
-    log.info(`Analyzing module: ${modulePath || '(project)'}`);
-
-    const memories = await this.globalMemory.getRelevant('architecture code analysis');
-    const projectMems = await this.projectMemory.search('architecture structure', 5);
-    const allMemories = memories + '\n' + projectMems.map(m => m.text).join('\n');
-    const mcpGuidance = brainMcpGuidance(this.claude.getMcpServerNames('scan'));
-
-    const basePrompt = analysisPrompt(projectPath, modulePath, allMemories, mcpGuidance);
-    const prompt = this.promptRegistry ? await this.promptRegistry.resolve('analysis', basePrompt) : basePrompt;
-    const systemPrompt = this.promptRegistry
-      ? await this.promptRegistry.resolve('brain_system', BRAIN_SYSTEM_PROMPT)
-      : BRAIN_SYSTEM_PROMPT;
-
-    const result = await this.claude.plan(prompt, projectPath, {
-      systemPrompt,
-      maxTurns: 30,
-    });
-
-    const parsed = extractJsonFromText(
-      result.output,
-      (value) => isRecord(value) && Object.prototype.hasOwnProperty.call(value, 'modules'),
-    );
-
-    const report: Omit<AnalysisReport, 'id' | 'created_at'> = {
-      project_path: projectPath,
-      module_path: modulePath || '.',
-      title: isRecord(parsed) && typeof parsed.title === 'string' ? parsed.title : `Analysis: ${modulePath || 'Project'}`,
-      markdown: isRecord(parsed) && typeof parsed.markdown === 'string' ? parsed.markdown : result.output,
-      summary: isRecord(parsed) && typeof parsed.summary === 'string' ? parsed.summary : result.output.slice(0, 500),
-      modules: isRecord(parsed) && Array.isArray(parsed.modules) ? parsed.modules as ModuleInfo[] : [],
-      cost_usd: result.cost_usd,
-    };
-
-    log.info(`Analysis complete: ${report.modules.length} modules found`);
-    return { report: report as AnalysisReport, cost: result.cost_usd };
   }
 
   /** Auto-answer AskUserQuestion from subprocesses (skills, plugins) */

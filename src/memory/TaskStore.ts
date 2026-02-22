@@ -1,5 +1,5 @@
 import type postgres from 'postgres';
-import type { Task, TaskLog, TaskStatus, ScanResult, ReviewEvent, RecurringIssueCategory, PlanDraft, PlanReviewStatus, PlanDraftAnnotation, AnalysisReport, ChatMessage, ChatStatus } from './types.js';
+import type { Task, TaskLog, TaskStatus, ScanResult, ReviewEvent, RecurringIssueCategory, PlanDraft, PlanReviewStatus, PlanDraftAnnotation, ChatMessage, ChatStatus } from './types.js';
 import type { Adjustment, AdjustmentCategory, AdjustmentStatus, GoalProgress, ConfigProposal, ProposalStatus, PromptVersion, PromptName, PromptPatch, PromptMetrics, PromptVersionStatus } from '../evolution/types.js';
 import { closeDb, getDb } from '../db.js';
 import { log } from '../utils/logger.js';
@@ -139,18 +139,6 @@ CREATE TABLE IF NOT EXISTS plan_drafts (
   cost_usd NUMERIC(10,4) DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   reviewed_at TIMESTAMPTZ
-);
-
-CREATE TABLE IF NOT EXISTS analysis_reports (
-  id SERIAL PRIMARY KEY,
-  project_path TEXT NOT NULL,
-  module_path TEXT NOT NULL,
-  title TEXT NOT NULL DEFAULT '',
-  markdown TEXT NOT NULL DEFAULT '',
-  summary TEXT NOT NULL DEFAULT '',
-  modules JSONB DEFAULT '[]',
-  cost_usd NUMERIC(10,4) DEFAULT 0,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 ALTER TABLE plan_drafts ADD COLUMN IF NOT EXISTS chat_session_id TEXT;
@@ -851,44 +839,6 @@ export class TaskStore {
           reasoning = ${data.reasoning},
           cost_usd = ${data.cost_usd}
       WHERE id = ${draftId}
-    `;
-  }
-
-  // --- Analysis Reports ---
-
-  async saveAnalysisReport(report: {
-    project_path: string;
-    module_path: string;
-    title: string;
-    markdown: string;
-    summary: string;
-    modules: unknown[];
-    cost_usd?: number;
-  }): Promise<AnalysisReport> {
-    const sql = this.getSql();
-    const [row] = await sql<AnalysisReport[]>`
-      INSERT INTO analysis_reports (project_path, module_path, title, markdown, summary, modules, cost_usd)
-      VALUES (${report.project_path}, ${report.module_path}, ${report.title},
-              ${report.markdown}, ${report.summary}, ${sql.json(report.modules as any)}, ${report.cost_usd ?? 0})
-      RETURNING *
-    `;
-    return row;
-  }
-
-  async getAnalysisReport(id: number): Promise<AnalysisReport | null> {
-    const sql = this.getSql();
-    const [row] = await sql<AnalysisReport[]>`
-      SELECT * FROM analysis_reports WHERE id = ${id}
-    `;
-    return row ?? null;
-  }
-
-  async listAnalysisReports(projectPath: string): Promise<AnalysisReport[]> {
-    const sql = this.getSql();
-    return sql<AnalysisReport[]>`
-      SELECT * FROM analysis_reports
-      WHERE project_path = ${projectPath}
-      ORDER BY created_at DESC
     `;
   }
 

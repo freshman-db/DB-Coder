@@ -164,8 +164,6 @@ const routes = [
   { pattern: /^#\/memory$/, page: 'memory', title: '记忆检索' },
   { pattern: /^#\/plans$/, page: 'plans', title: '计划对话' },
   { pattern: /^#\/plans\/(.+)$/, page: 'planDetail', title: '计划详情' },
-  { pattern: /^#\/analysis$/, page: 'analysis', title: '代码分析' },
-  { pattern: /^#\/analysis\/(.+)$/, page: 'analysisDetail', title: '分析报告' },
   { pattern: /^#\/plugins$/, page: 'plugins', title: '插件管理' },
   { pattern: /^#\/evolution$/, page: 'evolution', title: '进化分析' },
   { pattern: /^#\/settings$/, page: 'settings', title: '系统设置' },
@@ -200,7 +198,6 @@ function updateNav(page) {
       p === page
       || (page === 'taskDetail' && p === 'tasks')
       || (page === 'planDetail' && p === 'plans')
-      || (page === 'analysisDetail' && p === 'analysis')
     );
   });
 }
@@ -232,8 +229,6 @@ function renderPage(page, param) {
     memory: renderMemory,
     plans: renderPlans,
     planDetail: () => renderPlanDetail(param),
-    analysis: renderAnalysis,
-    analysisDetail: () => renderAnalysisDetail(param),
     plugins: renderPlugins,
     evolution: renderEvolution,
     settings: renderSettings,
@@ -360,79 +355,6 @@ async function stopPatrol() {
     updatePatrolBtn(false);
     if (state.currentPage === 'dashboard') renderDashboard();
   }
-}
-
-function showPlanForm() {
-  const overlay = $('#modalOverlay');
-  const modal = overlay.querySelector('.modal');
-  modal.querySelector('.modal-header h3').textContent = '新建计划';
-  modal.querySelector('.modal-body').innerHTML = `
-    <div class="form-group">
-      <label for="planDesc">需求描述</label>
-      <textarea id="planDesc" class="form-input" rows="4" placeholder="描述你希望实现的功能或改进..."></textarea>
-    </div>
-    <div class="form-group">
-      <label for="planGoals">目标 (可选, 每行一个)</label>
-      <textarea id="planGoals" class="form-input" rows="2" placeholder="例如：提升性能\n改善用户体验"></textarea>
-    </div>
-    <div class="form-group">
-      <label for="planConstraints">约束 (可选, 每行一个)</label>
-      <textarea id="planConstraints" class="form-input" rows="2" placeholder="例如：不能修改 API 接口\n保持向后兼容"></textarea>
-    </div>
-    <div class="form-group">
-      <label for="planModules">目标模块 (可选, 每行一个)</label>
-      <textarea id="planModules" class="form-input" rows="2" placeholder="例如：src/core/\nsrc/server/"></textarea>
-    </div>
-  `;
-  const submitBtn = modal.querySelector('#modalSubmit');
-  submitBtn.textContent = '提交计划';
-  submitBtn.onclick = async () => {
-    const desc = $('#planDesc')?.value?.trim();
-    if (!desc) { toast('请填写需求描述', 'error'); return; }
-    const goals = $('#planGoals')?.value?.split('\n').map(s => s.trim()).filter(Boolean) || [];
-    const constraints = $('#planConstraints')?.value?.split('\n').map(s => s.trim()).filter(Boolean) || [];
-    const targetModules = $('#planModules')?.value?.split('\n').map(s => s.trim()).filter(Boolean) || [];
-    const body = { description: desc };
-    if (goals.length) body.goals = goals;
-    if (constraints.length) body.constraints = constraints;
-    if (targetModules.length) body.targetModules = targetModules;
-    const result = await api('/plans', { method: 'POST', body: JSON.stringify(body) });
-    if (result) {
-      toast('计划生成已启动，请稍候查看');
-      overlay.classList.remove('show');
-      location.hash = '#/plans';
-    }
-  };
-  overlay.classList.add('show');
-}
-
-function showAnalysisForm() {
-  const overlay = $('#modalOverlay');
-  const modal = overlay.querySelector('.modal');
-  modal.querySelector('.modal-header h3').textContent = '发起代码分析';
-  modal.querySelector('.modal-body').innerHTML = `
-    <div class="form-group">
-      <label for="analysisPath">模块路径</label>
-      <input id="analysisPath" class="form-input" placeholder="例如：src/core/ 或留空分析整个项目">
-    </div>
-    <div class="form-group">
-      <label><input type="checkbox" id="analysisProject"> 分析整个项目</label>
-    </div>
-  `;
-  const submitBtn = modal.querySelector('#modalSubmit');
-  submitBtn.textContent = '开始分析';
-  submitBtn.onclick = async () => {
-    const isProject = $('#analysisProject')?.checked;
-    const modulePath = $('#analysisPath')?.value?.trim() || '';
-    const body = isProject ? { type: 'project' } : { modulePath };
-    const result = await api('/analysis', { method: 'POST', body: JSON.stringify(body) });
-    if (result) {
-      toast('代码分析已启动，请稍候查看');
-      overlay.classList.remove('show');
-      location.hash = '#/analysis';
-    }
-  };
-  overlay.classList.add('show');
 }
 
 function renderTaskRow(t) {
@@ -1534,72 +1456,6 @@ async function executePlan(id) {
     toast('计划任务已加入队列');
     location.hash = '#/tasks';
   }
-}
-
-// ---- 代码分析页面 ----
-async function renderAnalysis() {
-  const content = $('#content');
-  const reports = await api('/analysis');
-
-  content.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-      <h2 style="margin:0;">代码分析</h2>
-      <button class="btn btn-primary" onclick="showAnalysisForm()">+ 发起分析</button>
-    </div>
-    <div class="list-container" id="analysisList">
-      ${!reports || reports.length === 0 ? '<div class="empty-state"><p>暂无分析报告</p></div>' :
-        reports.map(r => `
-          <div class="list-item" onclick="location.hash='#/analysis/${r.id}'">
-            <span class="list-item-title" style="flex:1;">${escapeHtml(r.title || '分析 #' + r.id)}</span>
-            <span style="color:var(--text-muted);font-size:12px;">${r.modules?.length ?? 0} 模块</span>
-            <span style="color:var(--text-muted);font-size:12px;min-width:80px;">${escapeHtml(r.module_path || '.')}</span>
-            <span style="color:var(--text-muted);font-size:12px;min-width:50px;text-align:right;">$${Number(r.cost_usd || 0).toFixed(2)}</span>
-            <span style="color:var(--text-muted);font-size:12px;min-width:70px;text-align:right;">${timeAgo(r.created_at)}</span>
-          </div>
-        `).join('')}
-    </div>
-  `;
-
-}
-
-async function renderAnalysisDetail(id) {
-  const content = $('#content');
-  const report = await api(`/analysis/${id}`);
-  if (!report) { content.innerHTML = '<div class="empty-state"><p>报告不存在</p></div>'; return; }
-
-  const modules = report.modules || [];
-  const complexityColors = { low: 'green', medium: 'orange', high: 'red' };
-
-  content.innerHTML = `
-    <div style="margin-bottom:16px;">
-      <a href="#/analysis" style="font-size:12px;color:var(--text-muted);">&larr; 返回列表</a>
-      <h2 style="margin:4px 0 0;">${escapeHtml(report.title || '分析报告 #' + report.id)}</h2>
-      <div style="color:var(--text-muted);font-size:12px;">模块: ${escapeHtml(report.module_path || '.')} | 费用: $${Number(report.cost_usd || 0).toFixed(4)} | ${timeAgo(report.created_at)}</div>
-    </div>
-    <div class="card" style="margin-bottom:16px;padding:16px;">
-      <div class="card-label">摘要</div>
-      <div style="white-space:pre-wrap;font-size:13px;">${escapeHtml(report.summary || '无')}</div>
-    </div>
-    <div class="card" style="margin-bottom:16px;padding:16px;">
-      <div class="card-label">详细报告</div>
-      <div style="white-space:pre-wrap;font-size:13px;max-height:500px;overflow-y:auto;">${escapeHtml(report.markdown || '无')}</div>
-    </div>
-    ${modules.length > 0 ? `
-    <div class="card" style="padding:16px;">
-      <div class="card-label">模块列表 (${modules.length})</div>
-      <div class="list-container">
-        ${modules.map(m => `
-          <div class="list-item" style="cursor:default;">
-            <span class="badge badge-${m.type === 'class' ? 'running' : m.type === 'function' ? 'pending' : 'done'}">${m.type}</span>
-            <span class="list-item-title" style="flex:1;">${escapeHtml(m.name)}</span>
-            <span style="color:var(--text-muted);font-size:12px;">${escapeHtml(m.path)}</span>
-            <span style="color:${complexityColors[m.complexity] || 'inherit'};font-size:12px;">${m.complexity}</span>
-            <span style="color:var(--text-muted);font-size:12px;">${m.lines}L</span>
-          </div>
-        `).join('')}
-      </div>
-    </div>` : ''}
-  `;
 }
 
 // ---- 移动端菜单 ----
