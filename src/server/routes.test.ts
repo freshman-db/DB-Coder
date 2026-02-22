@@ -771,9 +771,62 @@ test('GET /api/metrics falls back to config projectPath and returns empty metric
   assert.deepEqual(parseJson<OperationalMetrics>(state), emptyMetrics);
 });
 
-test('GET /api/metrics requires auth and does not query metrics without token', async () => {
+test('GET /api/metrics returns the operational metrics response shape', async () => {
+  const expectedMetrics: OperationalMetrics = {
+    cycleCount: 2,
+    avgCycleDurationMs: 3210,
+    taskPassRate: 0.5,
+    dailyCostUsd: 1.2,
+    queueDepth: 6,
+    tasksByStatus: {
+      queued: 6,
+      done: 1,
+      failed: 1,
+    },
+    recentHealthScores: [90, 92],
+  };
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getOperationalMetrics: async () => expectedMetrics,
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: 'GET',
+    url: '/api/metrics',
+    token,
+  });
+
+  const payload = parseJson<OperationalMetrics>(state);
+
+  assert.equal(state.statusCode, 200);
+  assert.deepEqual(Object.keys(payload).sort(), [
+    'avgCycleDurationMs',
+    'cycleCount',
+    'dailyCostUsd',
+    'queueDepth',
+    'recentHealthScores',
+    'taskPassRate',
+    'tasksByStatus',
+  ]);
+  assert.equal(typeof payload.cycleCount, 'number');
+  assert.equal(typeof payload.avgCycleDurationMs, 'number');
+  assert.equal(typeof payload.taskPassRate, 'number');
+  assert.equal(typeof payload.dailyCostUsd, 'number');
+  assert.equal(typeof payload.queueDepth, 'number');
+  assert.equal(Array.isArray(payload.recentHealthScores), true);
+  assert.equal(typeof payload.tasksByStatus, 'object');
+  assert.equal(Array.isArray(payload.tasksByStatus), false);
+  for (const value of Object.values(payload.tasksByStatus)) {
+    assert.equal(typeof value, 'number');
+  }
+});
+
+test('GET /api/metrics requires auth and does not query metrics without a valid token', async () => {
   let metricsCalls = 0;
   const { server } = createServerFixture({
+    apiToken: 'metrics-token',
     taskStore: {
       getOperationalMetrics: async () => {
         metricsCalls += 1;
@@ -790,13 +843,24 @@ test('GET /api/metrics requires auth and does not query metrics without token', 
     },
   });
 
-  const state = await dispatch(server, {
+  const missingToken = await dispatch(server, {
     method: 'GET',
     url: '/api/metrics',
   });
 
-  assert.equal(state.statusCode, 401);
-  assert.deepEqual(parseJson<{ error: string }>(state), {
+  assert.equal(missingToken.statusCode, 401);
+  assert.deepEqual(parseJson<{ error: string }>(missingToken), {
+    error: 'Unauthorized',
+  });
+
+  const wrongToken = await dispatch(server, {
+    method: 'GET',
+    url: '/api/metrics',
+    token: 'wrong-token',
+  });
+
+  assert.equal(wrongToken.statusCode, 401);
+  assert.deepEqual(parseJson<{ error: string }>(wrongToken), {
     error: 'Unauthorized',
   });
   assert.equal(metricsCalls, 0);
