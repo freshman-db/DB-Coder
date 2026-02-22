@@ -258,7 +258,8 @@ route('POST', '/api/control/scan', async (req, res, ctx) => {
 // --- Logs (SSE) ---
 route('GET', '/api/logs', async (req, res, ctx) => {
   const url = new URL(req.url ?? '', `http://${req.headers.host}`);
-  const follow = url.searchParams.get('follow') === 'true';
+  const followParam = url.searchParams.get('follow');
+  const follow = followParam === null || followParam === 'true';
 
   if (follow) {
     // SSE stream
@@ -490,19 +491,27 @@ route('POST', '/api/plans/chat', async (_req, res, ctx) => {
   json(res, { id }, 201);
 });
 
-route('POST', '/api/plans/:id/message', async (req, res, ctx, params) => {
+async function handlePlanChatMessage(req: IncomingMessage, res: ServerResponse, ctx: RouteContext, params: Record<string, string>, successStatus: number): Promise<void> {
   if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
   const id = parseInt(params.id, 10);
   if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
-  const body = await readBody(req) as Record<string, unknown>;
-  const message = body.message;
+  const body = await readBody(req);
+  const message = isRecord(body) ? body.message : undefined;
   if (typeof message !== 'string' || message.trim().length === 0) {
     json(res, { error: 'message is required' }, 400);
     return;
   }
   ctx.planWorkflow.processUserMessage(id, message.trim())
     .catch(err => log.error(`Chat message processing failed for plan #${id}`, err));
-  json(res, { ok: true }, 202);
+  json(res, { ok: true }, successStatus);
+}
+
+route('POST', '/api/plans/:id/message', async (req, res, ctx, params) => {
+  await handlePlanChatMessage(req, res, ctx, params, 202);
+});
+
+route('POST', '/api/plans/:id/chat', async (req, res, ctx, params) => {
+  await handlePlanChatMessage(req, res, ctx, params, 200);
 });
 
 route('GET', '/api/plans/:id/messages', async (_req, res, ctx, params) => {

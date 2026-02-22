@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
-import { log, type LogEntry } from '../utils/logger.js';
-import { handleRequest, safeSseWrite } from './routes.js';
+import type { Config } from '../config/Config.js';
+import type { MainLoop } from '../core/MainLoop.js';
+import type { PatrolManager } from '../core/ModeManager.js';
+import type { PlanWorkflow } from '../core/PlanWorkflow.js';
+import type { GlobalMemory } from '../memory/GlobalMemory.js';
+import type { TaskStore } from '../memory/TaskStore.js';
+import type { CostTracker } from '../utils/cost.js';
+import { Server } from './Server.js';
 
-const MAX_REQUEST_BODY_BYTES = 64 * 1024;
+type RequestListener = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 
 interface MockResponseState {
   statusCode: number;
@@ -14,107 +20,132 @@ interface MockResponseState {
   body: string;
 }
 
-type RouteContext = Parameters<typeof handleRequest>[2];
+interface RequestOptions {
+  method: 'GET' | 'POST';
+  url: string;
+  token?: string;
+  authorization?: string;
+  body?: unknown;
+}
 
-const defaultCreateTask = async (
-  _projectPath: string,
-  description: string,
-  priority: number,
-): Promise<unknown> => ({ id: 'task-1', description, priority });
+interface ServerFixtureOptions {
+  apiToken?: string;
+  loop?: Partial<MainLoop>;
+  taskStore?: Partial<TaskStore>;
+  costTracker?: Partial<CostTracker>;
+  modeManager?: Partial<PatrolManager>;
+  planWorkflow?: Partial<PlanWorkflow>;
+}
 
-function createContext(
-  createTask: (projectPath: string, description: string, priority: number) => Promise<unknown> = defaultCreateTask,
-  getTask: (taskId: string) => Promise<{ task_description: string } | null> = async () => null,
-): RouteContext {
+interface ServerFixture {
+  server: Server;
+  token: string;
+}
+
+function createServerFixture(options: ServerFixtureOptions = {}): ServerFixture {
+  const token = options.apiToken ?? 'test-token';
+
+  const loop = {
+    getState: () => 'idle',
+    getCurrentTaskId: () => null,
+    isPaused: () => false,
+    isRunning: () => false,
+    addStatusListener: () => () => {},
+    pause: () => {},
+    resume: () => {},
+    triggerScan: async () => {},
+    ...options.loop,
+  } as unknown as MainLoop;
+
+  const taskStore = {
+    createTask: async () => ({ id: 'task-1' }),
+    listTasksPaged: async () => ({ tasks: [], total: 0, page: 1, pageSize: 20 }),
+    getTask: async () => null,
+    ...options.taskStore,
+  } as unknown as TaskStore;
+
+  const costTracker = {
+    getDailySummary: async () => [],
+    getSessionCost: () => 0,
+    ...options.costTracker,
+  } as unknown as CostTracker;
+
+  const modeManager = {
+    startPatrol: async () => {},
+    stopPatrol: async () => {},
+    ...options.modeManager,
+  } as unknown as PatrolManager;
+
+  const planWorkflow = {
+    createChatSession: async () => 1,
+    ...options.planWorkflow,
+  } as unknown as PlanWorkflow;
+
+  const config = {
+    projectPath: '/workspace/project',
+    values: {
+      apiToken: token,
+      server: { host: '127.0.0.1', port: 18890 },
+      brain: { scanInterval: 30 },
+      evolution: { goals: [] },
+    },
+  } as unknown as Config;
+
+  const globalMemory = {} as GlobalMemory;
+
   return {
-    loop: {
-      getState: () => 'idle',
-      getCurrentTaskId: () => null,
-      isPaused: () => false,
-      isRunning: () => false,
-      addStatusListener: () => () => {},
-      triggerScan: async () => {},
-    } as unknown as RouteContext['loop'],
-    taskStore: { createTask, getTask } as RouteContext['taskStore'],
-    globalMemory: {} as RouteContext['globalMemory'],
-    costTracker: {
-      getDailySummary: async () => [],
-      getSessionCost: () => 0,
-    } as unknown as RouteContext['costTracker'],
-    config: {
-      projectPath: '/tmp/project',
-      values: {
-        brain: { scanInterval: 30 },
-        evolution: { goals: [] },
-      },
-    } as unknown as RouteContext['config'],
+    server: new Server(config, loop, taskStore, globalMemory, costTracker, undefined, undefined, modeManager, planWorkflow),
+    token,
   };
 }
 
-function createStreamRequest(): PassThrough & {
-  method: string;
-  url: string;
-  headers: Record<string, string>;
-} {
+function getRequestListener(server: Server): RequestListener {
+  const instance = server as unknown as { server: HttpServer };
+  const [listener] = instance.server.listeners('request');
+  assert.equal(typeof listener, 'function');
+  return async (req, res) => {
+    await listener(req, res);
+  };
+}
+
+function createMockRequest(options: RequestOptions): IncomingMessage {
   const req = new PassThrough() as PassThrough & {
     method: string;
     url: string;
     headers: Record<string, string>;
   };
-  req.method = 'POST';
-  req.url = '/api/tasks';
-  req.headers = { host: 'localhost' };
-  return req;
-}
 
-function createRequest(body?: string | string[]): IncomingMessage {
-  const req = createStreamRequest();
-  if (body === undefined) {
-    req.end();
-  } else if (Array.isArray(body)) {
-    for (const chunk of body) {
-      req.write(chunk);
-    }
+  req.method = options.method;
+  req.url = options.url;
+
+  const headers: Record<string, string> = { host: 'localhost' };
+  if (options.token !== undefined) {
+    headers.authorization = `Bearer ${options.token}`;
+  } else if (options.authorization !== undefined) {
+    headers.authorization = options.authorization;
+  }
+
+  let bodyText: string | undefined;
+  if (options.body !== undefined) {
+    bodyText = typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
+    headers['content-type'] = 'application/json';
+    headers['content-length'] = String(Buffer.byteLength(bodyText));
+  }
+
+  req.headers = headers;
+  if (bodyText === undefined) {
     req.end();
   } else {
-    req.end(body);
+    req.end(bodyText);
   }
+
   return req as unknown as IncomingMessage;
 }
 
-function createErroredRequest(): IncomingMessage {
-  const req = createStreamRequest();
-  setImmediate(() => {
-    req.destroy(new Error('socket failure'));
-  });
-  return req as unknown as IncomingMessage;
-}
-
-function createGetRequest(url: string): PassThrough & {
-  method: string;
-  url: string;
-  headers: Record<string, string>;
+function createMockResponse(): {
+  response: ServerResponse;
+  state: MockResponseState;
 } {
-  const req = createStreamRequest();
-  req.method = 'GET';
-  req.url = url;
-  req.end();
-  return req;
-}
-
-function createPostRequest(url: string, body?: string): IncomingMessage {
-  const req = createStreamRequest();
-  req.method = 'POST';
-  req.url = url;
-  if (body === undefined) {
-    req.end();
-  } else {
-    req.end(body);
-  }
-  return req as unknown as IncomingMessage;
-}
-
-function createMockResponse(): { response: ServerResponse; state: MockResponseState } {
   const state: MockResponseState = {
     statusCode: 200,
     headers: {},
@@ -123,12 +154,14 @@ function createMockResponse(): { response: ServerResponse; state: MockResponseSt
 
   const response = {
     setHeader: (name: string, value: string): void => {
-      state.headers[name] = value;
+      state.headers[name.toLowerCase()] = value;
     },
     writeHead: (statusCode: number, headers?: Record<string, string>): ServerResponse => {
       state.statusCode = statusCode;
       if (headers) {
-        Object.assign(state.headers, headers);
+        for (const [name, value] of Object.entries(headers)) {
+          state.headers[name.toLowerCase()] = value;
+        }
       }
       return response as unknown as ServerResponse;
     },
@@ -141,759 +174,372 @@ function createMockResponse(): { response: ServerResponse; state: MockResponseSt
   return { response, state };
 }
 
-interface MockSseResponseState extends MockResponseState {
-  writes: string[];
-}
-
-function createSseResponse(options: { throwOnWrite?: boolean } = {}): {
-  response: ServerResponse & { writableEnded: boolean; destroyed: boolean };
-  state: MockSseResponseState;
-} {
-  const state: MockSseResponseState = {
-    statusCode: 200,
-    headers: {},
-    body: '',
-    writes: [],
-  };
-
-  const response = {
-    writableEnded: false,
-    destroyed: false,
-    setHeader: (name: string, value: string): void => {
-      state.headers[name] = value;
-    },
-    writeHead: (statusCode: number, headers?: Record<string, string>): ServerResponse => {
-      state.statusCode = statusCode;
-      if (headers) {
-        Object.assign(state.headers, headers);
-      }
-      return response as unknown as ServerResponse;
-    },
-    write: (chunk: string | Buffer): boolean => {
-      if (options.throwOnWrite) {
-        throw new Error('write failure');
-      }
-      const text = Buffer.isBuffer(chunk) ? chunk.toString() : chunk;
-      state.writes.push(text);
-      return true;
-    },
-    end: (chunk?: string | Buffer): void => {
-      if (chunk !== undefined) {
-        state.body += Buffer.isBuffer(chunk) ? chunk.toString() : chunk;
-      }
-      response.writableEnded = true;
-    },
-  } as unknown as ServerResponse & { writableEnded: boolean; destroyed: boolean };
-
-  return { response, state };
-}
-
-async function runRequest(req: IncomingMessage, ctx = createContext()): Promise<MockResponseState> {
+async function dispatch(server: Server, options: RequestOptions): Promise<MockResponseState> {
+  const listener = getRequestListener(server);
   const { response, state } = createMockResponse();
-  const handled = await handleRequest(req, response, ctx);
-  assert.equal(handled, true);
+  await listener(createMockRequest(options), response);
   return state;
 }
 
-async function runPostTasksRequest(req: IncomingMessage, ctx = createContext()): Promise<MockResponseState> {
-  return runRequest(req, ctx);
+function parseJson<T>(state: MockResponseState): T {
+  return JSON.parse(state.body) as T;
 }
 
-function parseJsonBody(state: MockResponseState): Record<string, unknown> {
-  return JSON.parse(state.body) as Record<string, unknown>;
-}
+test('GET /api/tasks returns paginated task list JSON', async () => {
+  let listArgs:
+    | {
+      projectPath: string;
+      page: number | undefined;
+      pageSize: number | undefined;
+      status: unknown;
+    }
+    | undefined;
 
-function stubHeartbeatInterval(): {
-  trigger: () => void;
-  getClearCallCount: () => number;
-  restore: () => void;
-} {
-  const originalSetInterval = globalThis.setInterval;
-  const originalClearInterval = globalThis.clearInterval;
-  let callback: (() => void) | undefined;
-  let clearCallCount = 0;
+  const expected = {
+    tasks: [
+      {
+        id: 'task-1',
+        task_description: 'Write routes integration tests',
+        priority: 1,
+        status: 'queued',
+      },
+    ],
+    total: 1,
+    page: 2,
+    pageSize: 10,
+  } as unknown as Awaited<ReturnType<TaskStore['listTasksPaged']>>;
 
-  globalThis.setInterval = (((fn: TimerHandler): ReturnType<typeof setInterval> => {
-    callback = (): void => {
-      if (typeof fn === 'function') {
-        fn();
-      }
-    };
-    return { token: 'interval' } as unknown as ReturnType<typeof setInterval>;
-  }) as unknown as typeof setInterval);
-
-  globalThis.clearInterval = (() => {
-    clearCallCount += 1;
-  }) as typeof clearInterval;
-
-  return {
-    trigger: (): void => {
-      assert.ok(callback, 'expected heartbeat callback to be registered');
-      callback();
+  const { server, token } = createServerFixture({
+    taskStore: {
+      listTasksPaged: async (projectPath, page, pageSize, status) => {
+        listArgs = { projectPath, page, pageSize, status };
+        return expected;
+      },
     },
-    getClearCallCount: () => clearCallCount,
-    restore: (): void => {
-      globalThis.setInterval = originalSetInterval;
-      globalThis.clearInterval = originalClearInterval;
-    },
-  };
-}
-
-interface StatusSsePayload {
-  state: string;
-  currentTaskId: string | null;
-  currentTaskTitle: string | null;
-  patrolling: boolean;
-  paused: boolean;
-}
-
-function parseStatusSsePayload(writeChunk: string | undefined): StatusSsePayload {
-  assert.ok(writeChunk, 'expected SSE write chunk');
-  const eventLine = writeChunk.split('\n').find(line => line.startsWith('event: '));
-  assert.equal(eventLine, 'event: status');
-  const dataLine = writeChunk.split('\n').find(line => line.startsWith('data: '));
-  assert.ok(dataLine, 'expected SSE data line');
-  return JSON.parse(dataLine.slice('data: '.length)) as StatusSsePayload;
-}
-
-async function waitForSseWrite(): Promise<void> {
-  await new Promise<void>(resolve => setImmediate(resolve));
-}
-
-test('safeSseWrite returns true and writes data when response is open', () => {
-  let writes = '';
-  const response = {
-    writableEnded: false,
-    destroyed: false,
-    write: (data: string): boolean => {
-      writes += data;
-      return true;
-    },
-  } as unknown as ServerResponse;
-
-  const result = safeSseWrite(response, 'data: ping\n\n');
-
-  assert.equal(result, true);
-  assert.equal(writes, 'data: ping\n\n');
-});
-
-test('safeSseWrite returns false when response is already destroyed', () => {
-  let writeCalled = false;
-  const response = {
-    writableEnded: false,
-    destroyed: true,
-    write: (): boolean => {
-      writeCalled = true;
-      return true;
-    },
-  } as unknown as ServerResponse;
-
-  const result = safeSseWrite(response, 'data: ping\n\n');
-
-  assert.equal(result, false);
-  assert.equal(writeCalled, false);
-});
-
-test('safeSseWrite returns false when response is already ended', () => {
-  let writeCalled = false;
-  const response = {
-    writableEnded: true,
-    destroyed: false,
-    write: (): boolean => {
-      writeCalled = true;
-      return true;
-    },
-  } as unknown as ServerResponse;
-
-  let result = true;
-  assert.doesNotThrow(() => {
-    result = safeSseWrite(response, 'data: ping\n\n');
   });
 
-  assert.equal(result, false);
-  assert.equal(writeCalled, false);
-});
+  const state = await dispatch(server, {
+    method: 'GET',
+    url: '/api/tasks?page=2&pageSize=10&status=queued,active',
+    token,
+  });
 
-test('safeSseWrite returns false when response.write throws', () => {
-  const response = {
-    writableEnded: false,
-    destroyed: false,
-    write: (): boolean => {
-      throw new Error('socket closed');
-    },
-  } as unknown as ServerResponse;
-
-  const result = safeSseWrite(response, 'data: ping\n\n');
-
-  assert.equal(result, false);
-});
-
-test('GET /api/status includes currentTaskTitle when currentTaskId exists', async () => {
-  let requestedTaskId = '';
-  const ctx = {
-    ...createContext(defaultCreateTask, async (taskId) => {
-      requestedTaskId = taskId;
-      return { task_description: '修复 dashboard 状态冲突' };
-    }),
-    loop: {
-      getState: () => 'executing',
-      getCurrentTaskId: () => 'task-123',
-      isPaused: () => false,
-      isRunning: () => true,
-    } as unknown as RouteContext['loop'],
-  };
-
-  const state = await runRequest(createGetRequest('/api/status') as unknown as IncomingMessage, ctx);
-
-  assert.equal(requestedTaskId, 'task-123');
   assert.equal(state.statusCode, 200);
-  assert.deepEqual(parseJsonBody(state), {
-    state: 'executing',
-    currentTaskId: 'task-123',
-    currentTaskTitle: '修复 dashboard 状态冲突',
-    paused: false,
-    patrolling: true,
-    scanInterval: 30,
-    projectPath: '/tmp/project',
-    dailyCosts: [],
+  assert.deepEqual(parseJson<typeof expected>(state), expected);
+  assert.deepEqual(listArgs, {
+    projectPath: '/workspace/project',
+    page: 2,
+    pageSize: 10,
+    status: ['queued', 'active'],
   });
 });
 
-test('GET /api/status skips task lookup and returns null title when no current task id', async () => {
-  let getTaskCalled = false;
-  const ctx = {
-    ...createContext(defaultCreateTask, async () => {
-      getTaskCalled = true;
-      return { task_description: 'should-not-be-called' };
-    }),
-    loop: {
-      getState: () => 'idle',
-      getCurrentTaskId: () => null,
-      isPaused: () => false,
-      isRunning: () => false,
-    } as unknown as RouteContext['loop'],
-  };
+test('POST /api/tasks with valid body creates task and returns 201', async () => {
+  let createArgs:
+    | {
+      projectPath: string;
+      description: string;
+      priority: number | undefined;
+    }
+    | undefined;
 
-  const state = await runRequest(createGetRequest('/api/status') as unknown as IncomingMessage, ctx);
+  const createdTask = {
+    id: 'task-99',
+    task_description: 'Ship API coverage',
+    priority: 1,
+    status: 'queued',
+  } as unknown as Awaited<ReturnType<TaskStore['createTask']>>;
 
-  assert.equal(getTaskCalled, false);
-  assert.equal(state.statusCode, 200);
-  assert.equal(parseJsonBody(state).currentTaskTitle, null);
-});
-
-test('GET /api/status returns null currentTaskTitle when task lookup misses', async () => {
-  const ctx = {
-    ...createContext(defaultCreateTask, async (_taskId) => null),
-    loop: {
-      getState: () => 'executing',
-      getCurrentTaskId: () => 'task-missing',
-      isPaused: () => true,
-      isRunning: () => true,
-    } as unknown as RouteContext['loop'],
-  };
-
-  const state = await runRequest(createGetRequest('/api/status') as unknown as IncomingMessage, ctx);
-
-  assert.equal(state.statusCode, 200);
-  assert.equal(parseJsonBody(state).currentTaskTitle, null);
-});
-
-test('GET /api/status/stream sends initial and subsequent status events with task titles', async () => {
-  const req = createGetRequest('/api/status/stream');
-  const { response, state } = createSseResponse();
-  const intervalStub = stubHeartbeatInterval();
-  const requestedTaskIds: string[] = [];
-  let removeCalls = 0;
-  let listener: ((snapshot: {
-    state: string;
-    currentTaskId: string | null;
-    patrolling: boolean;
-    paused: boolean;
-  }) => void) | undefined;
-
-  const ctx = {
-    ...createContext(defaultCreateTask, async (taskId) => {
-      requestedTaskIds.push(taskId);
-      return { task_description: `Title for ${taskId}` };
-    }),
-    loop: {
-      getState: () => 'scanning',
-      getCurrentTaskId: () => 'task-1',
-      isPaused: () => false,
-      isRunning: () => true,
-      addStatusListener: (statusListener: (snapshot: {
-        state: string;
-        currentTaskId: string | null;
-        patrolling: boolean;
-        paused: boolean;
-      }) => void): (() => void) => {
-        listener = statusListener;
-        return () => {
-          removeCalls += 1;
-        };
+  const { server, token } = createServerFixture({
+    taskStore: {
+      createTask: async (projectPath, description, priority) => {
+        createArgs = { projectPath, description, priority };
+        return createdTask;
       },
-    } as unknown as RouteContext['loop'],
-  };
-
-  try {
-    const handled = await handleRequest(req as unknown as IncomingMessage, response, ctx);
-    assert.equal(handled, true);
-    assert.equal(state.statusCode, 200);
-    assert.equal(state.headers['Content-Type'], 'text/event-stream');
-    assert.ok(listener, 'expected status listener registration');
-
-    assert.deepEqual(parseStatusSsePayload(state.writes[0]), {
-      state: 'scanning',
-      currentTaskId: 'task-1',
-      currentTaskTitle: 'Title for task-1',
-      patrolling: true,
-      paused: false,
-    });
-
-    listener!({
-      state: 'executing',
-      currentTaskId: 'task-2',
-      patrolling: true,
-      paused: false,
-    });
-    await waitForSseWrite();
-
-    assert.deepEqual(parseStatusSsePayload(state.writes[1]), {
-      state: 'executing',
-      currentTaskId: 'task-2',
-      currentTaskTitle: 'Title for task-2',
-      patrolling: true,
-      paused: false,
-    });
-    assert.deepEqual(requestedTaskIds, ['task-1', 'task-2']);
-
-    req.emit('close');
-    assert.equal(intervalStub.getClearCallCount(), 1);
-    assert.equal(removeCalls, 1);
-  } finally {
-    intervalStub.restore();
-  }
-});
-
-test('GET /api/status/stream returns null title when task lookup throws', async () => {
-  const req = createGetRequest('/api/status/stream');
-  const { response, state } = createSseResponse();
-  const intervalStub = stubHeartbeatInterval();
-  let listener: ((snapshot: {
-    state: string;
-    currentTaskId: string | null;
-    patrolling: boolean;
-    paused: boolean;
-  }) => void) | undefined;
-
-  const ctx = {
-    ...createContext(defaultCreateTask, async () => {
-      throw new Error('task lookup failed');
-    }),
-    loop: {
-      getState: () => 'planning',
-      getCurrentTaskId: () => 'task-1',
-      isPaused: () => false,
-      isRunning: () => true,
-      addStatusListener: (statusListener: (snapshot: {
-        state: string;
-        currentTaskId: string | null;
-        patrolling: boolean;
-        paused: boolean;
-      }) => void): (() => void) => {
-        listener = statusListener;
-        return () => {};
-      },
-    } as unknown as RouteContext['loop'],
-  };
-
-  try {
-    const handled = await handleRequest(req as unknown as IncomingMessage, response, ctx);
-    assert.equal(handled, true);
-    assert.ok(listener, 'expected status listener registration');
-
-    assert.equal(parseStatusSsePayload(state.writes[0]).currentTaskTitle, null);
-
-    listener!({
-      state: 'executing',
-      currentTaskId: 'task-2',
-      patrolling: true,
-      paused: false,
-    });
-    await waitForSseWrite();
-
-    assert.equal(parseStatusSsePayload(state.writes[1]).currentTaskTitle, null);
-    req.emit('close');
-  } finally {
-    intervalStub.restore();
-  }
-});
-
-test('GET /api/status/stream skips task lookup when currentTaskId is null', async () => {
-  const req = createGetRequest('/api/status/stream');
-  const { response, state } = createSseResponse();
-  const intervalStub = stubHeartbeatInterval();
-  let getTaskCalls = 0;
-  let listener: ((snapshot: {
-    state: string;
-    currentTaskId: string | null;
-    patrolling: boolean;
-    paused: boolean;
-  }) => void) | undefined;
-
-  const ctx = {
-    ...createContext(defaultCreateTask, async () => {
-      getTaskCalls += 1;
-      return { task_description: 'should-not-be-called' };
-    }),
-    loop: {
-      getState: () => 'idle',
-      getCurrentTaskId: () => null,
-      isPaused: () => false,
-      isRunning: () => false,
-      addStatusListener: (statusListener: (snapshot: {
-        state: string;
-        currentTaskId: string | null;
-        patrolling: boolean;
-        paused: boolean;
-      }) => void): (() => void) => {
-        listener = statusListener;
-        return () => {};
-      },
-    } as unknown as RouteContext['loop'],
-  };
-
-  try {
-    const handled = await handleRequest(req as unknown as IncomingMessage, response, ctx);
-    assert.equal(handled, true);
-    assert.ok(listener, 'expected status listener registration');
-
-    assert.equal(parseStatusSsePayload(state.writes[0]).currentTaskTitle, null);
-    assert.equal(getTaskCalls, 0);
-
-    listener!({
-      state: 'idle',
-      currentTaskId: null,
-      patrolling: false,
-      paused: false,
-    });
-    await waitForSseWrite();
-
-    assert.equal(parseStatusSsePayload(state.writes[1]).currentTaskTitle, null);
-    assert.equal(getTaskCalls, 0);
-    req.emit('close');
-  } finally {
-    intervalStub.restore();
-  }
-});
-
-test('GET /api/status/stream cleans up heartbeat and status listener when heartbeat write is unsafe', async () => {
-  const req = createGetRequest('/api/status/stream');
-  const { response } = createSseResponse();
-  const intervalStub = stubHeartbeatInterval();
-  let removeCalls = 0;
-
-  const ctx = {
-    ...createContext(),
-    loop: {
-      getState: () => 'idle',
-      getCurrentTaskId: () => null,
-      isPaused: () => false,
-      isRunning: () => false,
-      addStatusListener: (_statusListener: (snapshot: {
-        state: string;
-        currentTaskId: string | null;
-        patrolling: boolean;
-        paused: boolean;
-      }) => void): (() => void) => {
-        return () => {
-          removeCalls += 1;
-        };
-      },
-    } as unknown as RouteContext['loop'],
-  };
-
-  try {
-    const handled = await handleRequest(req as unknown as IncomingMessage, response, ctx);
-    assert.equal(handled, true);
-
-    response.destroyed = true;
-    intervalStub.trigger();
-
-    assert.equal(intervalStub.getClearCallCount(), 1);
-    assert.equal(removeCalls, 1);
-
-    req.emit('close');
-    assert.equal(intervalStub.getClearCallCount(), 1);
-    assert.equal(removeCalls, 1);
-  } finally {
-    intervalStub.restore();
-  }
-});
-
-test('POST /api/control/scan accepts boundary depth values', async () => {
-  const triggeredDepths: string[] = [];
-  const ctx = {
-    ...createContext(),
-    loop: {
-      isRunning: () => false,
-      triggerScan: async (depth: 'quick' | 'normal' | 'deep') => {
-        triggeredDepths.push(depth);
-      },
-    } as unknown as RouteContext['loop'],
-  };
-
-  const quickState = await runRequest(createPostRequest('/api/control/scan', '{"depth":"quick"}'), ctx);
-  const deepState = await runRequest(createPostRequest('/api/control/scan', '{"depth":"deep"}'), ctx);
-
-  assert.equal(quickState.statusCode, 200);
-  assert.deepEqual(parseJsonBody(quickState), { triggered: true, depth: 'quick' });
-  assert.equal(deepState.statusCode, 200);
-  assert.deepEqual(parseJsonBody(deepState), { triggered: true, depth: 'deep' });
-  assert.deepEqual(triggeredDepths, ['quick', 'deep']);
-});
-
-test('POST /api/control/scan defaults depth to normal when omitted', async () => {
-  const triggeredDepths: string[] = [];
-  const ctx = {
-    ...createContext(),
-    loop: {
-      isRunning: () => false,
-      triggerScan: async (depth: 'quick' | 'normal' | 'deep') => {
-        triggeredDepths.push(depth);
-      },
-    } as unknown as RouteContext['loop'],
-  };
-
-  const state = await runRequest(createPostRequest('/api/control/scan', '{}'), ctx);
-
-  assert.equal(state.statusCode, 200);
-  assert.deepEqual(parseJsonBody(state), { triggered: true, depth: 'normal' });
-  assert.deepEqual(triggeredDepths, ['normal']);
-});
-
-test('POST /api/control/scan returns 400 for invalid depth values', async () => {
-  let triggerScanCalled = false;
-  const ctx = {
-    ...createContext(),
-    loop: {
-      isRunning: () => false,
-      triggerScan: async () => {
-        triggerScanCalled = true;
-      },
-    } as unknown as RouteContext['loop'],
-  };
-
-  const state = await runRequest(createPostRequest('/api/control/scan', '{"depth":"invalid"}'), ctx);
-
-  assert.equal(state.statusCode, 400);
-  assert.deepEqual(parseJsonBody(state), { error: 'Invalid depth' });
-  assert.equal(triggerScanCalled, false);
-});
-
-test('POST /api/control/scan returns 400 for non-string depth values', async () => {
-  let triggerScanCalled = false;
-  const ctx = {
-    ...createContext(),
-    loop: {
-      isRunning: () => false,
-      triggerScan: async () => {
-        triggerScanCalled = true;
-      },
-    } as unknown as RouteContext['loop'],
-  };
-
-  const state = await runRequest(createPostRequest('/api/control/scan', '{"depth":1}'), ctx);
-
-  assert.equal(state.statusCode, 400);
-  assert.deepEqual(parseJsonBody(state), { error: 'Invalid depth' });
-  assert.equal(triggerScanCalled, false);
-});
-
-test('POST /api/tasks parses valid JSON from streamed chunks and creates the task', async () => {
-  let callCount = 0;
-  const ctx = createContext(async (projectPath, description, priority) => {
-    callCount += 1;
-    assert.equal(projectPath, '/tmp/project');
-    assert.equal(description, 'Ship feature');
-    assert.equal(priority, 1);
-    return { id: 'task-123', description, priority };
+    },
   });
 
-  const state = await runPostTasksRequest(
-    createRequest(['{"description":"  Ship', ' feature  ","priority":1}']),
-    ctx,
-  );
+  const state = await dispatch(server, {
+    method: 'POST',
+    url: '/api/tasks',
+    token,
+    body: {
+      description: '  Ship API coverage  ',
+      priority: 1,
+    },
+  });
 
-  assert.equal(callCount, 1);
   assert.equal(state.statusCode, 201);
-  assert.deepEqual(parseJsonBody(state), { id: 'task-123', description: 'Ship feature', priority: 1 });
+  assert.deepEqual(parseJson<typeof createdTask>(state), createdTask);
+  assert.deepEqual(createArgs, {
+    projectPath: '/workspace/project',
+    description: 'Ship API coverage',
+    priority: 1,
+  });
 });
 
-test('POST /api/tasks treats an empty body as an empty object', async () => {
-  let callCount = 0;
-  const ctx = createContext(async () => {
-    callCount += 1;
-    return {};
+test('POST /api/tasks with invalid body returns 400', async () => {
+  let createCalls = 0;
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      createTask: async () => {
+        createCalls += 1;
+        return {} as Awaited<ReturnType<TaskStore['createTask']>>;
+      },
+    },
   });
 
-  const state = await runPostTasksRequest(createRequest(), ctx);
+  const state = await dispatch(server, {
+    method: 'POST',
+    url: '/api/tasks',
+    token,
+    body: {
+      description: '   ',
+    },
+  });
 
-  assert.equal(callCount, 0);
   assert.equal(state.statusCode, 400);
-  assert.deepEqual(parseJsonBody(state), {
+  assert.deepEqual(parseJson<{ error: string }>(state), {
     error: 'description is required and must be a non-empty string.',
   });
+  assert.equal(createCalls, 0);
 });
 
-test('POST /api/tasks handles explicit JSON null body', async () => {
-  const state = await runPostTasksRequest(createRequest('null'));
+test('POST /api/patrol/start returns 200 and calls mode manager startPatrol', async () => {
+  let startCalls = 0;
 
-  assert.equal(state.statusCode, 400);
-  assert.deepEqual(parseJsonBody(state), {
-    error: 'Request body must be a JSON object.',
+  const { server, token } = createServerFixture({
+    modeManager: {
+      startPatrol: async () => {
+        startCalls += 1;
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: 'POST',
+    url: '/api/patrol/start',
+    token,
+  });
+
+  assert.equal(state.statusCode, 200);
+  assert.deepEqual(parseJson<{ ok: boolean; patrolling: boolean }>(state), {
+    ok: true,
+    patrolling: true,
+  });
+  assert.equal(startCalls, 1);
+});
+
+test('POST /api/patrol/stop returns 200', async () => {
+  let stopCalls = 0;
+
+  const { server, token } = createServerFixture({
+    modeManager: {
+      stopPatrol: async () => {
+        stopCalls += 1;
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: 'POST',
+    url: '/api/patrol/stop',
+    token,
+  });
+
+  assert.equal(state.statusCode, 200);
+  assert.deepEqual(parseJson<{ ok: boolean; patrolling: boolean }>(state), {
+    ok: true,
+    patrolling: false,
+  });
+  assert.equal(stopCalls, 1);
+});
+
+test('API requests without a valid Bearer token return 401', async () => {
+  let listCalled = false;
+  const { server } = createServerFixture({
+    apiToken: 'secret-token',
+    taskStore: {
+      listTasksPaged: async () => {
+        listCalled = true;
+        return { tasks: [], total: 0, page: 1, pageSize: 20 };
+      },
+    },
+  });
+
+  const missingToken = await dispatch(server, {
+    method: 'GET',
+    url: '/api/tasks',
+  });
+
+  assert.equal(missingToken.statusCode, 401);
+  assert.equal(missingToken.headers['www-authenticate'], 'Bearer');
+  assert.deepEqual(parseJson<{ error: string }>(missingToken), {
+    error: 'Unauthorized',
+  });
+
+  const wrongToken = await dispatch(server, {
+    method: 'GET',
+    url: '/api/tasks',
+    token: 'wrong-token',
+  });
+
+  assert.equal(wrongToken.statusCode, 401);
+  assert.deepEqual(parseJson<{ error: string }>(wrongToken), {
+    error: 'Unauthorized',
+  });
+  assert.equal(listCalled, false);
+});
+
+test('GET /api/status returns health-style status fields', async () => {
+  let taskLookupId: string | null = null;
+  const dailyCosts = [{ date: '2026-02-22', total_cost_usd: 0.42, task_count: 1 }];
+
+  const { server, token } = createServerFixture({
+    loop: {
+      getState: () => 'planning',
+      getCurrentTaskId: () => 'task-42',
+      isPaused: () => true,
+      isRunning: () => true,
+    },
+    taskStore: {
+      getTask: async (id) => {
+        taskLookupId = id;
+        return { task_description: 'Review public API routes' } as Awaited<ReturnType<TaskStore['getTask']>>;
+      },
+    },
+    costTracker: {
+      getDailySummary: async () => dailyCosts,
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: 'GET',
+    url: '/api/status',
+    token,
+  });
+
+  assert.equal(state.statusCode, 200);
+  assert.equal(taskLookupId, 'task-42');
+  assert.deepEqual(parseJson<Record<string, unknown>>(state), {
+    state: 'planning',
+    currentTaskId: 'task-42',
+    currentTaskTitle: 'Review public API routes',
+    paused: true,
+    patrolling: true,
+    scanInterval: 30,
+    projectPath: '/workspace/project',
+    dailyCosts,
   });
 });
 
-test('POST /api/tasks returns 400 for malformed JSON', async () => {
-  let callCount = 0;
-  const ctx = createContext(async () => {
-    callCount += 1;
-    return {};
+test('GET /api/logs returns SSE headers', async () => {
+  const { server, token } = createServerFixture();
+  const listener = getRequestListener(server);
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token,
   });
+  const { response, state } = createMockResponse();
 
-  const state = await runPostTasksRequest(createRequest('{"description":"broken"'), ctx);
+  await listener(req, response);
 
-  assert.equal(callCount, 0);
-  assert.equal(state.statusCode, 400);
-  assert.deepEqual(parseJsonBody(state), { error: 'Invalid JSON' });
+  assert.equal(state.statusCode, 200);
+  assert.equal(state.headers['content-type'], 'text/event-stream');
+  assert.equal(state.headers['cache-control'], 'no-cache');
+  assert.equal(state.headers.connection, 'keep-alive');
+
+  req.emit('close');
 });
 
-test('POST /api/tasks returns 500 when request stream fails', async () => {
-  let callCount = 0;
-  const ctx = createContext(async () => {
-    callCount += 1;
-    return {};
-  });
+test('GET /api/plans/:id/stream returns SSE headers', async () => {
+  let draftId: number | null = null;
+  let cleanupCalls = 0;
 
-  const state = await runPostTasksRequest(createErroredRequest(), ctx);
-
-  assert.equal(callCount, 0);
-  assert.equal(state.statusCode, 500);
-  assert.deepEqual(parseJsonBody(state), { error: 'Failed to read request body.' });
-});
-
-test('POST /api/tasks returns 413 when request body exceeds the byte limit', async () => {
-  let callCount = 0;
-  const ctx = createContext(async () => {
-    callCount += 1;
-    return {};
-  });
-  const oversizedDescription = 'a'.repeat(MAX_REQUEST_BODY_BYTES);
-  const state = await runPostTasksRequest(createRequest(`{"description":"${oversizedDescription}"}`), ctx);
-
-  assert.equal(callCount, 0);
-  assert.equal(state.statusCode, 413);
-  assert.deepEqual(parseJsonBody(state), {
-    error: `Request body exceeds ${MAX_REQUEST_BODY_BYTES} bytes.`,
-  });
-});
-
-test('GET /api/logs follow stream cleans up heartbeat and logger listener when SSE write is unsafe', async () => {
-  const req = createGetRequest('/api/logs?follow=true');
-  const { response } = createSseResponse();
-  const intervalStub = stubHeartbeatInterval();
-
-  const loggerWithMutableListener = log as unknown as {
-    addListener: (listener: (entry: LogEntry) => void) => () => void;
-  };
-  const originalAddListener = loggerWithMutableListener.addListener;
-  let removeCalls = 0;
-  loggerWithMutableListener.addListener = (_listener: (entry: LogEntry) => void): (() => void) => {
-    return () => {
-      removeCalls += 1;
-    };
-  };
-
-  try {
-    const handled = await handleRequest(req as unknown as IncomingMessage, response, createContext());
-    assert.equal(handled, true);
-
-    response.destroyed = true;
-    intervalStub.trigger();
-
-    assert.equal(intervalStub.getClearCallCount(), 1);
-    assert.equal(removeCalls, 1);
-  } finally {
-    loggerWithMutableListener.addListener = originalAddListener;
-    intervalStub.restore();
-  }
-});
-
-test('GET /api/logs follow stream clears heartbeat interval when heartbeat write throws', async () => {
-  const req = createGetRequest('/api/logs?follow=true');
-  const { response } = createSseResponse({ throwOnWrite: true });
-  const intervalStub = stubHeartbeatInterval();
-
-  const loggerWithMutableListener = log as unknown as {
-    addListener: (listener: (entry: LogEntry) => void) => () => void;
-  };
-  const originalAddListener = loggerWithMutableListener.addListener;
-  let removeCalls = 0;
-  loggerWithMutableListener.addListener = (_listener: (entry: LogEntry) => void): (() => void) => {
-    return () => {
-      removeCalls += 1;
-    };
-  };
-
-  try {
-    const handled = await handleRequest(req as unknown as IncomingMessage, response, createContext());
-    assert.equal(handled, true);
-
-    intervalStub.trigger();
-
-    assert.equal(intervalStub.getClearCallCount(), 1);
-    assert.equal(removeCalls, 1);
-  } finally {
-    loggerWithMutableListener.addListener = originalAddListener;
-    intervalStub.restore();
-  }
-});
-
-test('GET /api/plans/:id/stream cleans up heartbeat and plan listener when SSE write throws', async () => {
-  const req = createGetRequest('/api/plans/7/stream');
-  const { response } = createSseResponse({ throwOnWrite: true });
-  const intervalStub = stubHeartbeatInterval();
-  let removeCalls = 0;
-  let listener: ((event: string, data: string) => void) | undefined;
-
-  const ctx = {
-    ...createContext(),
+  const { server, token } = createServerFixture({
     planWorkflow: {
-      addSSEListener: (draftId: number, sseListener: (event: string, data: string) => void): (() => void) => {
-        assert.equal(draftId, 7);
-        listener = sseListener;
+      addSSEListener: (id) => {
+        draftId = id;
         return () => {
-          removeCalls += 1;
+          cleanupCalls += 1;
         };
       },
-    } as unknown as NonNullable<RouteContext['planWorkflow']>,
-  };
+    },
+  });
+  const listener = getRequestListener(server);
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/plans/42/stream',
+    token,
+  });
+  const { response, state } = createMockResponse();
 
-  try {
-    const handled = await handleRequest(req as unknown as IncomingMessage, response, ctx);
-    assert.equal(handled, true);
-    assert.ok(listener, 'expected plan listener registration');
+  await listener(req, response);
 
-    listener!('status', '{"status":"ready"}');
+  assert.equal(state.statusCode, 200);
+  assert.equal(state.headers['content-type'], 'text/event-stream');
+  assert.equal(state.headers['cache-control'], 'no-cache');
+  assert.equal(state.headers.connection, 'keep-alive');
+  assert.equal(draftId, 42);
 
-    assert.equal(intervalStub.getClearCallCount(), 1);
-    assert.equal(removeCalls, 1);
+  req.emit('close');
+  assert.equal(cleanupCalls, 1);
+});
 
-    req.emit('close');
-    assert.equal(intervalStub.getClearCallCount(), 1);
-    assert.equal(removeCalls, 1);
-  } finally {
-    intervalStub.restore();
-  }
+test('POST /api/plans/chat returns 201 and creates a chat session', async () => {
+  let capturedProjectPath: string | undefined;
+
+  const { server, token } = createServerFixture({
+    planWorkflow: {
+      createChatSession: async (projectPath) => {
+        capturedProjectPath = projectPath;
+        return 123;
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: 'POST',
+    url: '/api/plans/chat',
+    token,
+  });
+
+  assert.equal(state.statusCode, 201);
+  assert.equal(capturedProjectPath, '/workspace/project');
+  assert.deepEqual(parseJson<{ id: number }>(state), { id: 123 });
+});
+
+test('POST /api/plans/:id/chat with valid message returns 200', async () => {
+  let processArgs:
+    | {
+      id: number;
+      message: string;
+    }
+    | undefined;
+
+  const { server, token } = createServerFixture({
+    planWorkflow: {
+      processUserMessage: async (id, message) => {
+        processArgs = { id, message };
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: 'POST',
+    url: '/api/plans/7/chat',
+    token,
+    body: {
+      message: '  Run dependency audit  ',
+    },
+  });
+
+  assert.equal(state.statusCode, 200);
+  assert.deepEqual(parseJson<{ ok: boolean }>(state), { ok: true });
+  assert.deepEqual(processArgs, {
+    id: 7,
+    message: 'Run dependency audit',
+  });
 });
