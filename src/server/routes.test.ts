@@ -10,6 +10,7 @@ import type { PlanWorkflow } from '../core/PlanWorkflow.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { CostTracker } from '../utils/cost.js';
+import { createSseStream } from './routes.js';
 import { Server } from './Server.js';
 
 type RequestListener = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
@@ -155,6 +156,13 @@ function createMockResponse(): {
   const response = {
     setHeader: (name: string, value: string): void => {
       state.headers[name.toLowerCase()] = value;
+    },
+    write: (chunk?: string | Buffer): boolean => {
+      if (chunk === undefined) {
+        return true;
+      }
+      state.body += Buffer.isBuffer(chunk) ? chunk.toString() : chunk;
+      return true;
     },
     writeHead: (statusCode: number, headers?: Record<string, string>): ServerResponse => {
       state.statusCode = statusCode;
@@ -432,6 +440,48 @@ test('GET /api/status returns health-style status fields', async () => {
     projectPath: '/workspace/project',
     dailyCosts,
   });
+});
+
+test('createSseStream writes SSE headers and event payloads', async () => {
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token: 'token',
+  });
+  const { response, state } = createMockResponse();
+
+  const stream = createSseStream(req, response);
+  assert.equal(state.statusCode, 200);
+  assert.equal(state.headers['content-type'], 'text/event-stream');
+  assert.equal(state.headers['cache-control'], 'no-cache');
+  assert.equal(state.headers.connection, 'keep-alive');
+  assert.equal(state.headers['access-control-allow-origin'], '*');
+
+  const wroteEvent = stream.write('status', { ok: true });
+  assert.equal(wroteEvent, true);
+  assert.equal(state.body, 'event: status\ndata: {"ok":true}\n\n');
+
+  req.emit('close');
+  const wroteAfterClose = stream.write('status', { ok: false });
+  assert.equal(wroteAfterClose, false);
+});
+
+test('createSseStream validates nullish request and response inputs', () => {
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token: 'token',
+  });
+  const { response } = createMockResponse();
+
+  assert.throws(
+    () => createSseStream(undefined as unknown as IncomingMessage, response),
+    /IncomingMessage instance\./,
+  );
+  assert.throws(
+    () => createSseStream(req, undefined as unknown as ServerResponse),
+    /ServerResponse instance\./,
+  );
 });
 
 test('GET /api/logs returns SSE headers', async () => {

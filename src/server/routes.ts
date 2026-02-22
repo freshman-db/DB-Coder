@@ -90,6 +90,68 @@ export function safeSseWrite(res: ServerResponse, data: string): boolean {
   }
 }
 
+interface SseStream {
+  write(event: string, data: unknown): boolean;
+  cleanup(): void;
+}
+
+const SSE_HEADERS: Record<string, string> = {
+  'Content-Type': 'text/event-stream',
+  'Cache-Control': 'no-cache',
+  'Connection': 'keep-alive',
+  'Access-Control-Allow-Origin': '*',
+};
+const SSE_HEARTBEAT_INTERVAL_MS = 30_000;
+
+export function createSseStream(req: IncomingMessage, res: ServerResponse): SseStream {
+  if (!req) {
+    throw new TypeError('createSseStream requires an IncomingMessage instance.');
+  }
+  if (!res) {
+    throw new TypeError('createSseStream requires a ServerResponse instance.');
+  }
+
+  res.writeHead(200, SSE_HEADERS);
+
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let cleanedUp = false;
+  const cleanup = (): void => {
+    if (cleanedUp) {
+      return;
+    }
+    cleanedUp = true;
+    if (heartbeat !== undefined) {
+      clearInterval(heartbeat);
+      heartbeat = undefined;
+    }
+    req.off('close', cleanup);
+  };
+
+  const write = (event: string, data: unknown): boolean => {
+    if (cleanedUp) {
+      return false;
+    }
+
+    const eventName = typeof event === 'string' && event.trim().length > 0 ? event.trim() : 'message';
+    const payload = `event: ${eventName}\ndata: ${JSON.stringify(data ?? null)}\n\n`;
+    if (!safeSseWrite(res, payload)) {
+      cleanup();
+      return false;
+    }
+    return true;
+  };
+
+  heartbeat = setInterval(() => {
+    if (!safeSseWrite(res, ': heartbeat\n\n')) {
+      cleanup();
+    }
+  }, SSE_HEARTBEAT_INTERVAL_MS);
+
+  req.on('close', cleanup);
+
+  return { write, cleanup };
+}
+
 interface StatusSseSnapshot {
   state: ReturnType<MainLoop['getState']>;
   currentTaskId: string | null;
