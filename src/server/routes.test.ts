@@ -372,6 +372,52 @@ test('POST /api/evolution/proposals/:id/apply returns 400 for invalid proposal I
   assert.equal(updateCalls, 0);
 });
 
+test('POST /api/evolution/prompt-versions/:id/activate parses version ID and activates version', async () => {
+  let requestedId: number | undefined;
+  let supersedeArgs:
+    | {
+      projectPath: string;
+      promptName: string;
+    }
+    | undefined;
+  let activatedId: number | undefined;
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getPromptVersion: async (id) => {
+        requestedId = id;
+        return {
+          prompt_name: 'planner',
+        } as unknown as Awaited<ReturnType<TaskStore['getPromptVersion']>>;
+      },
+      supersedeActivePromptVersion: async (projectPath, promptName) => {
+        supersedeArgs = { projectPath, promptName };
+      },
+      activatePromptVersion: async (id) => {
+        activatedId = id;
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: 'POST',
+    url: '/api/evolution/prompt-versions/5/activate',
+    token,
+  });
+
+  assert.equal(state.statusCode, 200);
+  assert.deepEqual(parseJson<{ ok: boolean; status: string }>(state), {
+    ok: true,
+    status: 'active',
+  });
+  assert.equal(requestedId, 5);
+  assert.deepEqual(supersedeArgs, {
+    projectPath: '/workspace/project',
+    promptName: 'planner',
+  });
+  assert.equal(activatedId, 5);
+});
+
 test('POST /api/evolution/prompt-versions/:id/activate returns 400 for invalid version ID', async () => {
   const { server, token } = createServerFixture();
 
@@ -385,6 +431,39 @@ test('POST /api/evolution/prompt-versions/:id/activate returns 400 for invalid v
   assert.deepEqual(parseJson<{ error: string }>(state), {
     error: 'Invalid version ID',
   });
+});
+
+test('GET /api/plans/:id/messages parses plan ID and returns messages', async () => {
+  let requestedId: number | undefined;
+  const expectedMessages = [
+    {
+      id: 1,
+      session_id: 9,
+      role: 'user',
+      content: 'review this',
+      metadata: {},
+      created_at: '2026-02-22T00:00:00.000Z',
+    },
+  ] as unknown as Awaited<ReturnType<TaskStore['getChatMessages']>>;
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getChatMessages: async (id) => {
+        requestedId = id;
+        return expectedMessages;
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: 'GET',
+    url: '/api/plans/9/messages',
+    token,
+  });
+
+  assert.equal(state.statusCode, 200);
+  assert.deepEqual(parseJson<typeof expectedMessages>(state), expectedMessages);
+  assert.equal(requestedId, 9);
 });
 
 test('GET /api/plans/:id/messages returns 400 for invalid plan ID', async () => {

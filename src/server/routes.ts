@@ -814,11 +814,12 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   }
 }
 
-function parseRouteId(params: Record<string, string>, field = 'id', label = `${field} ID`): number {
+function parseRouteId(params: Record<string, string>, field = 'id', label?: string): number {
   const rawId = params[field];
   const id = parseInt(rawId ?? '', 10);
-  if (isNaN(id)) {
-    throw new HttpError(400, `Invalid ${label}`);
+  const resolvedLabel = label ?? `${field} ID`;
+  if (Number.isNaN(id)) {
+    throw new HttpError(400, `Invalid ${resolvedLabel}`);
   }
   return id;
 }
