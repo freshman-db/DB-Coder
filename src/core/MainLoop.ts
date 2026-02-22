@@ -16,6 +16,7 @@ import { reviewerPrompt } from '../prompts/reviewer.js';
 import { buildAgentGuidance } from '../prompts/agents.js';
 import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch, isWorkingClean, branchExists, getChangedFilesSince } from '../utils/git.js';
 import { log } from '../utils/logger.js';
+import { calculateRetryDelay } from '../utils/retry.js';
 import { readFileSync, existsSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -422,9 +423,18 @@ export class MainLoop {
   ): Promise<boolean> {
     const attempt = (retryCounts.get(subtask.id) ?? 0) + 1;
     retryCounts.set(subtask.id, attempt);
-    const shouldRetry = await this.handleStuck(task, subtask, error, stuckAdjustments, attempt);
+    const maxRetries = this.config.values.autonomy.maxRetries;
+    const shouldRetry = await this.handleStuck(task, subtask, error, stuckAdjustments, attempt, maxRetries);
     if (!shouldRetry) return false;
-    const backoffMs = Math.min(8000, 1000 * 2 ** (attempt - 1));
+
+    const baseDelayMs = this.config.values.autonomy.retryBaseDelayMs;
+    const maxDelayMs = baseDelayMs * 2 ** Math.max(0, maxRetries);
+    const backoffMs = calculateRetryDelay({
+      attempt: attempt - 1,
+      baseDelayMs,
+      maxDelayMs,
+    });
+
     subtask.status = 'pending';
     subtask.result = `Retrying (attempt ${attempt + 1})`;
     await this.taskStore.updateTask(task.id, { subtasks });
@@ -485,13 +495,14 @@ export class MainLoop {
     error: string,
     stuckAdjustments: string[],
     iteration: number,
+    maxRetries: number,
   ): Promise<boolean> {
-    if (iteration === 1) {
+    if (iteration < maxRetries && iteration === 1) {
       log.info('Stuck: retrying subtask');
       return true; // Will retry in next iteration
     }
 
-    if (iteration === 2) {
+    if (iteration < maxRetries && iteration === 2) {
       log.info('Stuck: asking Brain to reflect and adjust');
       const { reflection } = await this.brain.reflect(
         this.config.projectPath,
@@ -518,8 +529,13 @@ export class MainLoop {
       return true; // Will retry with new insights
     }
 
-    // 3rd failure: reflect then skip
-    log.warn(`Stuck: skipping subtask "${subtask.description}" after ${iteration} attempts`);
+    if (iteration < maxRetries) {
+      log.info(`Stuck: retrying subtask (attempt ${iteration}/${maxRetries})`);
+      return true;
+    }
+
+    // Max retries reached: reflect then skip
+    log.warn(`Stuck: skipping subtask "${subtask.description}" after ${iteration} attempts (max: ${maxRetries})`);
     try {
       const { reflection } = await this.brain.reflect(
         this.config.projectPath, task.task_description,

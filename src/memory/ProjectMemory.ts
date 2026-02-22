@@ -6,6 +6,10 @@ interface ClaudeMemResult {
   text: string;
 }
 
+type ProjectMemoryResult<T extends unknown[]> =
+  | (T & { ok: true; data: T })
+  | (T & { ok: false; error: string });
+
 export class ProjectMemory {
   private baseUrl: string;
 
@@ -13,7 +17,7 @@ export class ProjectMemory {
     this.baseUrl = claudeMemUrl.replace(/\/$/, '');
   }
 
-  async search(query: string, limit = 10): Promise<ClaudeMemResult[]> {
+  async search(query: string, limit = 10): Promise<ProjectMemoryResult<ClaudeMemResult[]>> {
     try {
       const res = await fetch(`${this.baseUrl}/api/search`, {
         method: 'POST',
@@ -21,16 +25,22 @@ export class ProjectMemory {
         body: JSON.stringify({ query, limit }),
         signal: AbortSignal.timeout(5000),
       });
-      if (!res.ok) return [];
+      if (!res.ok) {
+        const error = `ProjectMemory search failed with HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ''}`;
+        log.warn(error);
+        return Object.assign([], { ok: false as const, error });
+      }
       const data = await res.json() as { results?: ClaudeMemResult[] };
-      return data.results ?? [];
-    } catch {
-      log.warn('ProjectMemory: claude-mem unavailable, degrading gracefully');
-      return [];
+      const results = data.results ?? [];
+      return Object.assign(results, { ok: true as const, data: results });
+    } catch (err) {
+      const error = `ProjectMemory search failed: ${err instanceof Error ? err.message : String(err)}`;
+      log.warn(error);
+      return Object.assign([], { ok: false as const, error });
     }
   }
 
-  async timeline(anchor: number, depthBefore = 3, depthAfter = 3): Promise<ClaudeMemResult[]> {
+  async timeline(anchor: number, depthBefore = 3, depthAfter = 3): Promise<ProjectMemoryResult<ClaudeMemResult[]>> {
     try {
       const res = await fetch(`${this.baseUrl}/api/timeline`, {
         method: 'POST',
@@ -38,11 +48,18 @@ export class ProjectMemory {
         body: JSON.stringify({ anchor, depth_before: depthBefore, depth_after: depthAfter }),
         signal: AbortSignal.timeout(5000),
       });
-      if (!res.ok) return [];
+      if (!res.ok) {
+        const error = `ProjectMemory timeline failed with HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ''}`;
+        log.warn(error);
+        return Object.assign([], { ok: false as const, error });
+      }
       const data = await res.json() as { results?: ClaudeMemResult[] };
-      return data.results ?? [];
-    } catch {
-      return [];
+      const results = data.results ?? [];
+      return Object.assign(results, { ok: true as const, data: results });
+    } catch (err) {
+      const error = `ProjectMemory timeline failed: ${err instanceof Error ? err.message : String(err)}`;
+      log.warn(error);
+      return Object.assign([], { ok: false as const, error });
     }
   }
 
