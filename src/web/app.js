@@ -109,8 +109,10 @@ function escapeHtml(str) {
 }
 
 function renderMarkdown(text) {
-  if (typeof marked !== 'undefined' && marked.parse) {
-    try { return marked.parse(text, { breaks: true }); } catch { /* fall through */ }
+  if (typeof marked !== 'undefined' && marked.parse && typeof DOMPurify !== 'undefined') {
+    try {
+      return DOMPurify.sanitize(marked.parse(text, { breaks: true }));
+    } catch { /* fall through */ }
   }
   return escapeHtml(text).replace(/\n/g, '<br>');
 }
