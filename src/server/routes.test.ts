@@ -240,6 +240,26 @@ test('safeSseWrite returns false when response is already destroyed', () => {
   assert.equal(writeCalled, false);
 });
 
+test('safeSseWrite returns false when response is already ended', () => {
+  let writeCalled = false;
+  const response = {
+    writableEnded: true,
+    destroyed: false,
+    write: (): boolean => {
+      writeCalled = true;
+      return true;
+    },
+  } as unknown as ServerResponse;
+
+  let result = true;
+  assert.doesNotThrow(() => {
+    result = safeSseWrite(response, 'data: ping\n\n');
+  });
+
+  assert.equal(result, false);
+  assert.equal(writeCalled, false);
+});
+
 test('safeSseWrite returns false when response.write throws', () => {
   const response = {
     writableEnded: false,
@@ -364,6 +384,36 @@ test('GET /api/logs follow stream cleans up heartbeat and logger listener when S
     assert.equal(handled, true);
 
     response.destroyed = true;
+    intervalStub.trigger();
+
+    assert.equal(intervalStub.getClearCallCount(), 1);
+    assert.equal(removeCalls, 1);
+  } finally {
+    loggerWithMutableListener.addListener = originalAddListener;
+    intervalStub.restore();
+  }
+});
+
+test('GET /api/logs follow stream clears heartbeat interval when heartbeat write throws', async () => {
+  const req = createGetRequest('/api/logs?follow=true');
+  const { response } = createSseResponse({ throwOnWrite: true });
+  const intervalStub = stubHeartbeatInterval();
+
+  const loggerWithMutableListener = log as unknown as {
+    addListener: (listener: (entry: LogEntry) => void) => () => void;
+  };
+  const originalAddListener = loggerWithMutableListener.addListener;
+  let removeCalls = 0;
+  loggerWithMutableListener.addListener = (_listener: (entry: LogEntry) => void): (() => void) => {
+    return () => {
+      removeCalls += 1;
+    };
+  };
+
+  try {
+    const handled = await handleRequest(req as unknown as IncomingMessage, response, createContext());
+    assert.equal(handled, true);
+
     intervalStub.trigger();
 
     assert.equal(intervalStub.getClearCallCount(), 1);
