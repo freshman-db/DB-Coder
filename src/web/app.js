@@ -1099,11 +1099,11 @@ function updatePatrolBtn(patrolling) {
   if (!btn) return;
   state.patrolling = !!patrolling;
   if (patrolling) {
-    btn.innerHTML = '&#9632; 停止巡逻';
+    btn.textContent = '■ 停止巡逻';
     btn.classList.remove('btn-primary');
     btn.classList.add('btn-warning');
   } else {
-    btn.innerHTML = '&#9654; 开始巡逻';
+    btn.textContent = '▶ 开始巡逻';
     btn.classList.remove('btn-warning');
     btn.classList.add('btn-primary');
   }
