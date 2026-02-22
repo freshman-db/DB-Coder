@@ -17,6 +17,7 @@ type SSEListener = (event: string, data: string) => void;
 export class PlanWorkflow {
   private chatSessions = new Map<number, ChatSession>();
   private sseListeners = new Map<number, Set<SSEListener>>();
+  private streamingText = new Map<number, string>();
 
   constructor(
     private brain: Brain,
@@ -83,23 +84,26 @@ export class PlanWorkflow {
   }
 
   private async handleSDKMessage(draftId: number, msg: SDKMessage): Promise<void> {
-    // Forward stream events (partial text) to SSE
+    // Extract text deltas from stream events and emit accumulated text
     if (msg.type === 'stream_event') {
-      this.emit(draftId, 'partial', msg);
+      const event = (msg as any).event;
+      if (event?.type === 'content_block_delta' && event?.delta?.type === 'text_delta' && event.delta.text) {
+        const accumulated = (this.streamingText.get(draftId) ?? '') + event.delta.text;
+        this.streamingText.set(draftId, accumulated);
+        this.emit(draftId, 'assistant_text', { text: accumulated });
+      }
       return;
     }
 
-    // assistant complete message — extract text
+    // assistant complete message — reset streaming accumulator
     if (msg.type === 'assistant') {
-      const text = extractAssistantText(msg);
-      if (text) {
-        this.emit(draftId, 'assistant_text', { text });
-      }
+      this.streamingText.delete(draftId);
       return;
     }
 
     // result message — one round of conversation done
     if (msg.type === 'result') {
+      this.streamingText.delete(draftId);
       const result = msg as any;
       const text = result.result ?? '';
       const cost = result.total_cost_usd ?? 0;
@@ -260,6 +264,7 @@ export class PlanWorkflow {
     this.chatSessions.get(draftId)?.close();
     this.chatSessions.delete(draftId);
     this.emit(draftId, 'status', { status: 'closed' });
+    this.sseListeners.delete(draftId);
   }
 
   shutdown(): void {
@@ -267,11 +272,4 @@ export class PlanWorkflow {
       this.closeSession(id);
     }
   }
-}
-
-function extractAssistantText(msg: any): string {
-  return (msg.message?.content ?? [])
-    .filter((b: any) => b.type === 'text')
-    .map((b: any) => b.text)
-    .join('');
 }
