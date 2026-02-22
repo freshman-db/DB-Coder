@@ -49,9 +49,14 @@ function createStreamRequest(): PassThrough & {
   return req;
 }
 
-function createRequest(body?: string): IncomingMessage {
+function createRequest(body?: string | string[]): IncomingMessage {
   const req = createStreamRequest();
   if (body === undefined) {
+    req.end();
+  } else if (Array.isArray(body)) {
+    for (const chunk of body) {
+      req.write(chunk);
+    }
     req.end();
   } else {
     req.end(body);
@@ -105,7 +110,7 @@ function parseJsonBody(state: MockResponseState): Record<string, unknown> {
   return JSON.parse(state.body) as Record<string, unknown>;
 }
 
-test('POST /api/tasks parses valid JSON body and creates the task', async () => {
+test('POST /api/tasks parses valid JSON from streamed chunks and creates the task', async () => {
   let callCount = 0;
   const ctx = createContext(async (projectPath, description, priority) => {
     callCount += 1;
@@ -115,7 +120,10 @@ test('POST /api/tasks parses valid JSON body and creates the task', async () => 
     return { id: 'task-123', description, priority };
   });
 
-  const state = await runPostTasksRequest(createRequest('{"description":"  Ship feature  ","priority":1}'), ctx);
+  const state = await runPostTasksRequest(
+    createRequest(['{"description":"  Ship', ' feature  ","priority":1}']),
+    ctx,
+  );
 
   assert.equal(callCount, 1);
   assert.equal(state.statusCode, 201);
@@ -123,8 +131,15 @@ test('POST /api/tasks parses valid JSON body and creates the task', async () => 
 });
 
 test('POST /api/tasks treats an empty body as an empty object', async () => {
-  const state = await runPostTasksRequest(createRequest());
+  let callCount = 0;
+  const ctx = createContext(async () => {
+    callCount += 1;
+    return {};
+  });
 
+  const state = await runPostTasksRequest(createRequest(), ctx);
+
+  assert.equal(callCount, 0);
   assert.equal(state.statusCode, 400);
   assert.deepEqual(parseJsonBody(state), {
     error: 'description is required and must be a non-empty string.',
@@ -155,16 +170,29 @@ test('POST /api/tasks returns 400 for malformed JSON', async () => {
 });
 
 test('POST /api/tasks returns 500 when request stream fails', async () => {
-  const state = await runPostTasksRequest(createErroredRequest());
+  let callCount = 0;
+  const ctx = createContext(async () => {
+    callCount += 1;
+    return {};
+  });
 
+  const state = await runPostTasksRequest(createErroredRequest(), ctx);
+
+  assert.equal(callCount, 0);
   assert.equal(state.statusCode, 500);
   assert.deepEqual(parseJsonBody(state), { error: 'Failed to read request body.' });
 });
 
 test('POST /api/tasks returns 413 when request body exceeds the byte limit', async () => {
+  let callCount = 0;
+  const ctx = createContext(async () => {
+    callCount += 1;
+    return {};
+  });
   const oversizedDescription = 'a'.repeat(MAX_REQUEST_BODY_BYTES);
-  const state = await runPostTasksRequest(createRequest(`{"description":"${oversizedDescription}"}`));
+  const state = await runPostTasksRequest(createRequest(`{"description":"${oversizedDescription}"}`), ctx);
 
+  assert.equal(callCount, 0);
   assert.equal(state.statusCode, 413);
   assert.deepEqual(parseJsonBody(state), {
     error: `Request body exceeds ${MAX_REQUEST_BODY_BYTES} bytes.`,
