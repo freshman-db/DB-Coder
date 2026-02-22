@@ -206,35 +206,18 @@ ${prompt}`;
 }
 
 function extractCost(events: JsonlEvent[], pricing?: TokenPricing): number {
-  // 1. Search for explicit cost fields in events, preferring total cost fields.
+  // 1. Search for explicit structured cost fields in events.
+  const structuredCost = extractFromStructuredFields(events);
+  if (structuredCost !== null) {
+    return structuredCost;
+  }
+
+  // 2. Search for explicit cost text in event payloads.
   let lastTotalCost = 0;
   let lastPartialCost = 0;
 
-  for (const e of events) {
-    const directTotal = firstPositiveNumber([e.total_cost_usd, e.total_cost]);
-    if (directTotal !== null) {
-      lastTotalCost = directTotal;
-    }
-
-    const directPartial = firstPositiveNumber([e.cost]);
-    if (directPartial !== null) {
-      lastPartialCost = directPartial;
-    }
-
-    if (typeof e.usage === 'object' && e.usage !== null) {
-      const u = e.usage as Record<string, unknown>;
-      const usageTotal = firstPositiveNumber([u.total_cost_usd, u.total_cost]);
-      if (usageTotal !== null) {
-        lastTotalCost = usageTotal;
-      }
-
-      const usagePartial = firstPositiveNumber([u.cost]);
-      if (usagePartial !== null) {
-        lastPartialCost = usagePartial;
-      }
-    }
-
-    const textCosts = extractCostFromEventText(e);
+  for (const event of events) {
+    const textCosts = extractCostFromEventText(event);
     if (textCosts.total !== null) {
       lastTotalCost = textCosts.total;
     }
@@ -246,7 +229,7 @@ function extractCost(events: JsonlEvent[], pricing?: TokenPricing): number {
   if (lastTotalCost > 0) return lastTotalCost;
   if (lastPartialCost > 0) return lastPartialCost;
 
-  // 2. Estimate from token usage in turn.completed events
+  // 3. Estimate from token usage in turn.completed events
   if (pricing) {
     let totalInput = 0, totalCached = 0, totalOutput = 0;
     for (const e of events) {
@@ -265,6 +248,30 @@ function extractCost(events: JsonlEvent[], pricing?: TokenPricing): number {
   }
 
   return 0;
+}
+
+function extractFromStructuredFields(events: JsonlEvent[]): number | null {
+  let lastTotalCost = 0;
+  let lastPartialCost = 0;
+
+  for (const event of events) {
+    const directTotal = firstPositiveNumber([event.total_cost_usd, event.total_cost]);
+    if (directTotal !== null) lastTotalCost = directTotal;
+
+    const directPartial = firstPositiveNumber([event.cost]);
+    if (directPartial !== null) lastPartialCost = directPartial;
+
+    if (typeof event.usage !== 'object' || event.usage === null) continue;
+    const usage = event.usage as Record<string, unknown>;
+    const usageTotal = firstPositiveNumber([usage.total_cost_usd, usage.total_cost]);
+    if (usageTotal !== null) lastTotalCost = usageTotal;
+    const usagePartial = firstPositiveNumber([usage.cost]);
+    if (usagePartial !== null) lastPartialCost = usagePartial;
+  }
+
+  if (lastTotalCost > 0) return lastTotalCost;
+  if (lastPartialCost > 0) return lastPartialCost;
+  return null;
 }
 
 function extractCostFromEventText(event: JsonlEvent): { total: number | null; partial: number | null } {
