@@ -73,6 +73,16 @@ export interface RecurringIssueCategory {
   count: number;
 }
 
+export interface OperationalMetrics {
+  cycleCount: number;
+  avgCycleDurationMs: number;
+  taskPassRate: number;
+  dailyCostUsd: number;
+  queueDepth: number;
+  tasksByStatus: Record<string, number>;
+  recentHealthScores: number[];
+}
+
 export interface ScanResult {
   id: number;
   project_path: string;
@@ -158,4 +168,3 @@ export interface ChatMessage {
   metadata: Record<string, unknown>;
   created_at: Date;
 }
-
