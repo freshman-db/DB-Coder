@@ -36,6 +36,7 @@ const PROMPT_SUCCESS_DELTA = 0.1;
 const PROMPT_FAILURE_DELTA = -0.15;
 
 type StatusListener = (status: StatusSnapshot) => void;
+type AdjustmentOutcome = 'success' | 'failed' | 'blocked_stuck' | 'blocked_max_retries';
 
 export class MainLoop {
   private state: LoopState = 'idle';
@@ -282,7 +283,7 @@ export class MainLoop {
     // EXECUTE + REVIEW queued tasks
     let task = await this.taskQueue.getNext(projectPath);
     while (task && this.running && !this.paused) {
-      if (!(await this.enforceBudget(task.id))) {
+      if (await this.checkBudgetOrAbort(task.id)) {
         break;
       }
 
@@ -365,12 +366,10 @@ export class MainLoop {
         }
       } else {
         // Review failed — clean up task branch
-        try {
-          await switchBranch(originalBranch, projectPath);
-          await forceDeleteBranch(branchName, projectPath);
-        } catch (cleanupErr) {
+        await switchBranch(originalBranch, projectPath).catch(cleanupErr => {
           log.warn(`Failed to cleanup branch ${branchName}: ${cleanupErr}`);
-        }
+        });
+        await this.cleanupTaskBranch(branchName);
       }
 
       // PROMPT EVOLUTION: update effectiveness of active prompt versions
@@ -391,12 +390,10 @@ export class MainLoop {
       log.error('Task execution error', err);
       await this.taskStore.updateTask(task.id, { status: 'failed', phase: 'failed' });
       // Clean up task branch after crash
-      try {
-        await switchBranch(originalBranch, projectPath);
-        await forceDeleteBranch(branchName, projectPath);
-      } catch (cleanupErr) {
+      await switchBranch(originalBranch, projectPath).catch(cleanupErr => {
         log.warn(`Failed to cleanup branch ${branchName} after error: ${cleanupErr}`);
-      }
+      });
+      await this.cleanupTaskBranch(branchName);
       // Reflect on failure to extract lessons
       try {
         const { reflection, cost: reflectCost } = await this.brain.reflect(
@@ -456,7 +453,7 @@ export class MainLoop {
       if (subtask.status === 'done') continue;
 
       while (true) {
-        if (!(await this.enforceBudget(task.id))) {
+        if (await this.checkBudgetOrAbort(task.id)) {
           return { subtasks, stuckAdjustments, aborted: true };
         }
 
@@ -464,7 +461,7 @@ export class MainLoop {
         await this.taskStore.updateTask(task.id, { subtasks });
         const result = await this.executeSubtask(task, subtask, standards, projectPath);
 
-        if (!(await this.enforceBudget(task.id))) {
+        if (await this.checkBudgetOrAbort(task.id)) {
           subtask.status = 'failed';
           subtask.result = 'Blocked: budget exceeded';
           await this.taskStore.updateTask(task.id, { subtasks });
@@ -509,7 +506,7 @@ export class MainLoop {
     stuckAdjustments: string[],
     projectPath: string,
   ): Promise<{ aborted: true } | { aborted: false; reviewResult: MergedReviewResult; reviewRetries: number }> {
-    if (!(await this.enforceBudget(task.id))) {
+    if (await this.checkBudgetOrAbort(task.id)) {
       return { aborted: true };
     }
 
@@ -526,7 +523,7 @@ export class MainLoop {
     await this.saveReviewEvent(task.id, 0, reviewResult, null, reviewCost, reviewDuration);
 
     while (reviewDecision === 'retry') {
-      if (!(await this.enforceBudget(task.id))) {
+      if (await this.checkBudgetOrAbort(task.id)) {
         return { aborted: true };
       }
 
@@ -541,7 +538,7 @@ export class MainLoop {
       await fixAgent.execute(fixPrompt, projectPath, {});
       const changedFilesForCommit = await getModifiedAndAddedFiles(projectPath).catch(() => []);
       await commitAll(`db-coder: fix review issues (attempt ${reviewRetries}, ${fixAgentName})`, projectPath, changedFilesForCommit).catch(() => {});
-      if (!(await this.enforceBudget(task.id))) {
+      if (await this.checkBudgetOrAbort(task.id)) {
         return { aborted: true };
       }
 
@@ -574,11 +571,7 @@ export class MainLoop {
     if (reflectCost > 0) await this.costTracker.addCost(task.id, reflectCost);
 
     if (this.evolutionEngine && reflection.adjustments.length > 0) {
-      try {
-        await this.evolutionEngine.processAdjustments(projectPath, task.id, reflection.adjustments, outcome);
-      } catch (err) {
-        log.warn(`Evolution processAdjustments failed: ${err}`);
-      }
+      await this.tryProcessAdjustments(task.id, reflection.adjustments, outcome);
     }
 
     const finalStatus = reviewResult.passed ? 'done' : 'blocked';
@@ -734,15 +727,12 @@ export class MainLoop {
         // Inject adjustments into task-level context for immediate use
         stuckAdjustments.push(...reflection.adjustments);
         // EVOLVE: store stuck adjustments
-        if (this.evolutionEngine) {
-          try {
-            await this.evolutionEngine.processAdjustments(
-              this.config.projectPath, task.id, reflection.adjustments, 'blocked_stuck',
-            );
-          } catch (err) {
-            log.warn(`Evolution processAdjustments (stuck) failed: ${err}`);
-          }
-        }
+        await this.tryProcessAdjustments(
+          task.id,
+          reflection.adjustments,
+          'blocked_stuck',
+          'Evolution processAdjustments (stuck) failed',
+        );
       }
       return true; // Will retry with new insights
     }
@@ -764,11 +754,7 @@ export class MainLoop {
       if (reflection.adjustments.length > 0) {
         stuckAdjustments.push(...reflection.adjustments);
       }
-      if (this.evolutionEngine && reflection.adjustments.length > 0) {
-        await this.evolutionEngine.processAdjustments(
-          this.config.projectPath, task.id, reflection.adjustments, 'blocked_stuck',
-        );
-      }
+      await this.tryProcessAdjustments(task.id, reflection.adjustments, 'blocked_stuck');
     } catch (reflectErr) {
       log.warn(`Reflect on stuck failed: ${reflectErr}`);
     }
@@ -910,11 +896,10 @@ Fix these issues while maintaining code quality. Do not introduce new issues.`;
     let cleaned = 0;
     for (const branch of branches) {
       if (activeBranches.has(branch)) continue;
-      try {
-        await forceDeleteBranch(branch, projectPath);
+      await this.cleanupTaskBranch(branch);
+      const stillExists = await branchExists(branch, projectPath).catch(() => true);
+      if (!stillExists) {
         cleaned++;
-      } catch (err) {
-        log.warn(`Failed to delete orphaned branch ${branch}: ${err}`);
       }
     }
     if (cleaned > 0) {
@@ -922,13 +907,36 @@ Fix these issues while maintaining code quality. Do not introduce new issues.`;
     }
   }
 
-  private async enforceBudget(taskId: string): Promise<boolean> {
+  private async checkBudgetOrAbort(taskId: string): Promise<boolean> {
     const budget = await this.costTracker.checkBudget(taskId);
-    if (budget.allowed) return true;
+    if (budget.allowed) return false;
 
     log.warn(`Budget exceeded: ${budget.reason}`);
     await this.taskStore.updateTask(taskId, { status: 'blocked', phase: 'blocked' });
-    return false;
+    return true;
+  }
+
+  private async cleanupTaskBranch(branch: string): Promise<void> {
+    const projectPath = this.config.projectPath;
+    try {
+      await forceDeleteBranch(branch, projectPath);
+    } catch (cleanupErr) {
+      log.warn(`Failed to cleanup branch ${branch}: ${cleanupErr}`);
+    }
+  }
+
+  private async tryProcessAdjustments(
+    taskId: string | null,
+    adjustments: string[],
+    outcome: AdjustmentOutcome,
+    errorContext = 'Evolution processAdjustments failed',
+  ): Promise<void> {
+    if (!this.evolutionEngine || adjustments.length === 0) return;
+    try {
+      await this.evolutionEngine.processAdjustments(this.config.projectPath, taskId, adjustments, outcome);
+    } catch (err) {
+      log.warn(`${errorContext}: ${err}`);
+    }
   }
 }
 

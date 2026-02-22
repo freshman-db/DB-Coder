@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Config } from '../config/Config.js';
 import type { ClaudeBridge } from '../bridges/ClaudeBridge.js';
 import type { CodexBridge } from '../bridges/CodexBridge.js';
@@ -12,6 +15,8 @@ import type { PromptRegistry } from '../prompts/PromptRegistry.js';
 import { MainLoop, extractIssueCategories } from './MainLoop.js';
 import type { StatusSnapshot } from './types.js';
 import type { ReviewIssue } from '../bridges/CodingAgent.js';
+import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
+import { runProcess } from '../utils/process.js';
 
 /** Helper to build a minimal ReviewIssue for testing */
 function issue(
@@ -73,6 +78,61 @@ function createMainLoopForPromptDelta(taskStore: TaskStore): MainLoop {
     {} as unknown as GlobalMemory,
     {} as unknown as CostTracker,
   );
+}
+
+type DedupInternals = {
+  checkBudgetOrAbort(taskId: string): Promise<boolean>;
+  cleanupTaskBranch(branch: string): Promise<void>;
+  tryProcessAdjustments(
+    taskId: string | null,
+    adjustments: string[],
+    outcome: 'success' | 'failed' | 'blocked_stuck' | 'blocked_max_retries',
+    errorContext?: string,
+  ): Promise<void>;
+};
+
+function getDedupInternals(loop: MainLoop): DedupInternals {
+  return loop as unknown as DedupInternals;
+}
+
+function createMainLoopForDedupHelpers(options: {
+  projectPath?: string;
+  taskStore?: TaskStore;
+  costTracker?: CostTracker;
+} = {}): MainLoop {
+  const config = {
+    projectPath: options.projectPath ?? '/tmp/db-coder-main-loop-test',
+  } as unknown as Config;
+
+  return new MainLoop(
+    config,
+    {} as unknown as Brain,
+    {} as unknown as TaskQueue,
+    {} as unknown as ClaudeBridge,
+    {} as unknown as CodexBridge,
+    options.taskStore ?? ({} as TaskStore),
+    {} as unknown as GlobalMemory,
+    options.costTracker ?? ({} as CostTracker),
+  );
+}
+
+async function runGit(repoPath: string, args: string[]): Promise<string> {
+  const result = await runProcess('git', args, { cwd: repoPath });
+  assert.equal(result.exitCode, 0, `git ${args.join(' ')} failed: ${result.stderr}`);
+  return result.stdout.trim();
+}
+
+async function initGitRepo(): Promise<{ repoPath: string; defaultBranch: string }> {
+  const repoPath = mkdtempSync(join(tmpdir(), 'db-coder-main-loop-'));
+  await runGit(repoPath, ['init']);
+  await runGit(repoPath, ['config', 'user.email', 'tests@example.com']);
+  await runGit(repoPath, ['config', 'user.name', 'DB Coder Tests']);
+  writeFileSync(join(repoPath, 'README.md'), 'seed\n');
+  await runGit(repoPath, ['add', 'README.md']);
+  await runGit(repoPath, ['commit', '-m', 'init']);
+
+  const defaultBranch = await runGit(repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  return { repoPath, defaultBranch };
 }
 
 describe('extractIssueCategories', () => {
@@ -290,5 +350,167 @@ describe('MainLoop prompt effectiveness deltas', () => {
     loop.setPromptRegistry({} as PromptRegistry);
 
     await assert.doesNotReject(getPromptDeltaInternals(loop).updatePromptVersionEffectiveness(true));
+  });
+});
+
+describe('MainLoop dedup helpers', () => {
+  test('checkBudgetOrAbort continues when budget allows', async () => {
+    let updateCalls = 0;
+    const taskStore = {
+      updateTask: async () => {
+        updateCalls++;
+      },
+    } as unknown as TaskStore;
+    const costTracker = {
+      checkBudget: async (taskId: string) => {
+        assert.equal(taskId, 'task-allow');
+        return { allowed: true };
+      },
+    } as unknown as CostTracker;
+    const loop = createMainLoopForDedupHelpers({ taskStore, costTracker });
+
+    const aborted = await getDedupInternals(loop).checkBudgetOrAbort('task-allow');
+
+    assert.equal(aborted, false);
+    assert.equal(updateCalls, 0);
+  });
+
+  test('checkBudgetOrAbort blocks task when budget is exceeded', async () => {
+    const updates: Array<{ taskId: string; patch: unknown }> = [];
+    const taskStore = {
+      updateTask: async (taskId: string, patch: unknown) => {
+        updates.push({ taskId, patch });
+      },
+    } as unknown as TaskStore;
+    const costTracker = {
+      checkBudget: async () => ({ allowed: false, reason: 'hard limit reached' }),
+    } as unknown as CostTracker;
+    const loop = createMainLoopForDedupHelpers({ taskStore, costTracker });
+
+    const aborted = await getDedupInternals(loop).checkBudgetOrAbort('task-block');
+
+    assert.equal(aborted, true);
+    assert.deepEqual(updates, [
+      { taskId: 'task-block', patch: { status: 'blocked', phase: 'blocked' } },
+    ]);
+  });
+
+  test('checkBudgetOrAbort handles empty task IDs as a boundary input', async () => {
+    let seenTaskId: string | null = null;
+    const costTracker = {
+      checkBudget: async (taskId: string) => {
+        seenTaskId = taskId;
+        return { allowed: true };
+      },
+    } as unknown as CostTracker;
+    const loop = createMainLoopForDedupHelpers({ costTracker, taskStore: {} as TaskStore });
+
+    const aborted = await getDedupInternals(loop).checkBudgetOrAbort('');
+
+    assert.equal(aborted, false);
+    assert.equal(seenTaskId, '');
+  });
+
+  test('cleanupTaskBranch deletes an existing branch', async () => {
+    const { repoPath, defaultBranch } = await initGitRepo();
+    try {
+      await runGit(repoPath, ['checkout', '-b', 'db-task-cleanup']);
+      await runGit(repoPath, ['checkout', defaultBranch]);
+
+      const loop = createMainLoopForDedupHelpers({ projectPath: repoPath, taskStore: {} as TaskStore, costTracker: {} as CostTracker });
+      await getDedupInternals(loop).cleanupTaskBranch('db-task-cleanup');
+
+      const branchList = await runGit(repoPath, ['branch', '--list', 'db-task-cleanup']);
+      assert.equal(branchList, '');
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  test('cleanupTaskBranch swallows cleanup errors', async () => {
+    const loop = createMainLoopForDedupHelpers({
+      projectPath: '/tmp/non-existent-main-loop-repo',
+      taskStore: {} as TaskStore,
+      costTracker: {} as CostTracker,
+    });
+
+    await assert.doesNotReject(getDedupInternals(loop).cleanupTaskBranch('missing-branch'));
+  });
+
+  test('cleanupTaskBranch tolerates empty branch names', async () => {
+    const { repoPath } = await initGitRepo();
+    try {
+      const loop = createMainLoopForDedupHelpers({ projectPath: repoPath, taskStore: {} as TaskStore, costTracker: {} as CostTracker });
+      await assert.doesNotReject(getDedupInternals(loop).cleanupTaskBranch(''));
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  test('tryProcessAdjustments forwards adjustments to the evolution engine', async () => {
+    const calls: Array<[string, string | null, string[], string]> = [];
+    const loop = createMainLoopForDedupHelpers({
+      taskStore: {} as TaskStore,
+      costTracker: {} as CostTracker,
+    });
+    loop.setEvolutionEngine({
+      processAdjustments: async (
+        projectPath: string,
+        taskId: string | null,
+        adjustments: string[],
+        outcome: 'success' | 'failed' | 'blocked_stuck' | 'blocked_max_retries',
+      ) => {
+        calls.push([projectPath, taskId, adjustments, outcome]);
+      },
+    } as unknown as EvolutionEngine);
+
+    await getDedupInternals(loop).tryProcessAdjustments('task-adjust', ['prefer smaller patches'], 'failed');
+
+    assert.deepEqual(calls, [[
+      '/tmp/db-coder-main-loop-test',
+      'task-adjust',
+      ['prefer smaller patches'],
+      'failed',
+    ]]);
+  });
+
+  test('tryProcessAdjustments swallows evolution-engine failures', async () => {
+    const loop = createMainLoopForDedupHelpers({
+      taskStore: {} as TaskStore,
+      costTracker: {} as CostTracker,
+    });
+    loop.setEvolutionEngine({
+      processAdjustments: async () => {
+        throw new Error('write failed');
+      },
+    } as unknown as EvolutionEngine);
+
+    await assert.doesNotReject(
+      getDedupInternals(loop).tryProcessAdjustments('task-adjust', ['a'], 'blocked_stuck'),
+    );
+  });
+
+  test('tryProcessAdjustments no-ops for empty adjustments and missing engine', async () => {
+    let calls = 0;
+    const loop = createMainLoopForDedupHelpers({
+      taskStore: {} as TaskStore,
+      costTracker: {} as CostTracker,
+    });
+    loop.setEvolutionEngine({
+      processAdjustments: async () => {
+        calls++;
+      },
+    } as unknown as EvolutionEngine);
+
+    await getDedupInternals(loop).tryProcessAdjustments('task-adjust', [], 'success');
+    assert.equal(calls, 0);
+
+    const loopWithoutEngine = createMainLoopForDedupHelpers({
+      taskStore: {} as TaskStore,
+      costTracker: {} as CostTracker,
+    });
+    await assert.doesNotReject(
+      getDedupInternals(loopWithoutEngine).tryProcessAdjustments('task-adjust', ['x'], 'success'),
+    );
   });
 });
