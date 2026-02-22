@@ -49,3 +49,10 @@ export interface ExtractedExperience {
 
 export type LoopState = 'idle' | 'scanning' | 'planning' | 'executing' | 'reviewing' | 'reflecting' | 'paused' | 'error'
   | 'researching' | 'awaiting_approval' | 'analyzing';
+
+export interface StatusSnapshot {
+  state: LoopState;
+  currentTaskId: string | null;
+  patrolling: boolean;
+  paused: boolean;
+}

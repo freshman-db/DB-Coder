@@ -10,7 +10,7 @@ import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PluginMonitor } from '../plugins/PluginMonitor.js';
 import type { PromptRegistry } from '../prompts/PromptRegistry.js';
 import type { Task, SubTaskRecord, ReviewEvent } from '../memory/types.js';
-import type { MergedReviewResult, LoopState, ProjectAnalysis } from './types.js';
+import type { MergedReviewResult, LoopState, ProjectAnalysis, StatusSnapshot } from './types.js';
 import type { AgentResult, ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
 import { executorPrompt } from '../prompts/executor.js';
 import { reviewerPrompt } from '../prompts/reviewer.js';
@@ -23,11 +23,14 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 
+type StatusListener = (status: StatusSnapshot) => void;
+
 export class MainLoop {
   private state: LoopState = 'idle';
   private running = false;
   private paused = false;
   private currentTaskId: string | null = null;
+  private statusListeners = new Set<StatusListener>();
   private lockFile: string;
 
   private stoppedPromise: Promise<void> | null = null;
@@ -59,6 +62,54 @@ export class MainLoop {
   isPaused(): boolean { return this.paused; }
   isRunning(): boolean { return this.running; }
 
+  addStatusListener(listener: StatusListener): () => void {
+    this.statusListeners.add(listener);
+    return () => {
+      this.statusListeners.delete(listener);
+    };
+  }
+
+  private setState(state: LoopState): void {
+    if (this.state === state) return;
+    this.state = state;
+    this.broadcastStatus();
+  }
+
+  private setCurrentTaskId(taskId: string | null): void {
+    if (this.currentTaskId === taskId) return;
+    this.currentTaskId = taskId;
+    this.broadcastStatus();
+  }
+
+  private setPaused(paused: boolean): void {
+    if (this.paused === paused) return;
+    this.paused = paused;
+    this.broadcastStatus();
+  }
+
+  private setRunning(running: boolean): void {
+    if (this.running === running) return;
+    this.running = running;
+    this.broadcastStatus();
+  }
+
+  private broadcastStatus(): void {
+    if (this.statusListeners.size === 0) return;
+    const snapshot: StatusSnapshot = {
+      state: this.state,
+      currentTaskId: this.currentTaskId,
+      patrolling: this.running,
+      paused: this.paused,
+    };
+    for (const listener of this.statusListeners) {
+      try {
+        listener(snapshot);
+      } catch {
+        // Ignore listener failures so one consumer cannot block others.
+      }
+    }
+  }
+
   setEvolutionEngine(engine: EvolutionEngine): void {
     this.evolutionEngine = engine;
   }
@@ -78,7 +129,7 @@ export class MainLoop {
       return;
     }
 
-    this.running = true;
+    this.setRunning(true);
     this.stoppedPromise = new Promise<void>(resolve => { this.stoppedResolve = resolve; });
     log.info('Main loop started');
 
@@ -102,7 +153,7 @@ export class MainLoop {
     try {
       while (this.running) {
         if (this.paused) {
-          this.state = 'paused';
+          this.setState('paused');
           await sleep(5000);
           continue;
         }
@@ -111,7 +162,7 @@ export class MainLoop {
           await this.runCycle();
         } catch (err) {
           log.error('Cycle error', err);
-          this.state = 'error';
+          this.setState('error');
           await sleep(30000); // Wait before retry
         }
 
@@ -120,8 +171,8 @@ export class MainLoop {
       }
     } finally {
       this.releaseLock();
-      this.running = false;
-      this.state = 'idle';
+      this.setRunning(false);
+      this.setState('idle');
       log.info('Main loop stopped');
       this.stoppedResolve?.();
       this.stoppedResolve = null;
@@ -130,7 +181,7 @@ export class MainLoop {
   }
 
   async stop(): Promise<void> {
-    this.running = false;
+    this.setRunning(false);
   }
 
   /** Wait for start() to fully exit (including finally block). Use after stop(). */
@@ -145,12 +196,12 @@ export class MainLoop {
   }
 
   pause(): void {
-    this.paused = true;
+    this.setPaused(true);
     log.info('Loop paused');
   }
 
   resume(): void {
-    this.paused = false;
+    this.setPaused(false);
     log.info('Loop resumed');
   }
 
@@ -172,14 +223,14 @@ export class MainLoop {
     }
 
     // SCAN
-    this.state = 'scanning';
+    this.setState('scanning');
     const hasChanges = await this.brain.hasChanges(projectPath);
     if (!hasChanges) {
       // Check if there are queued tasks to process
       const queued = await this.taskQueue.getQueued(projectPath);
       if (queued.length === 0) {
         log.info('No changes and no queued tasks. Sleeping.');
-        this.state = 'idle';
+        this.setState('idle');
         return;
       }
       log.info(`No new changes but ${queued.length} queued tasks.`);
@@ -189,7 +240,7 @@ export class MainLoop {
       // PLAN
       const actionableItems = analysis.issues.length + analysis.opportunities.length;
       if (actionableItems > 0) {
-        this.state = 'planning';
+        this.setState('planning');
         const { plan } = await this.brain.createPlan(projectPath, analysis);
 
         if (plan.tasks.length > 0) {
@@ -225,7 +276,7 @@ export class MainLoop {
       task = await this.taskQueue.getNext(projectPath);
     }
 
-    this.state = 'idle';
+    this.setState('idle');
   }
 
   /** Run a single manually-triggered scan (not allowed while patrol loop is running) */
@@ -233,18 +284,18 @@ export class MainLoop {
     if (this.running) {
       throw new Error('Cannot trigger manual scan while patrol loop is running');
     }
-    this.state = 'scanning';
+    this.setState('scanning');
     try {
       await this.brain.scanProject(this.config.projectPath, depth);
     } finally {
-      this.state = 'idle';
+      this.setState('idle');
     }
   }
 
   private async executeTask(task: Task): Promise<void> {
     const projectPath = this.config.projectPath;
-    this.currentTaskId = task.id;
-    this.state = 'executing';
+    this.setCurrentTaskId(task.id);
+    this.setState('executing');
 
     log.info(`Executing task [P${task.priority}]: ${task.task_description.slice(0, 80)}`);
 
@@ -345,7 +396,7 @@ export class MainLoop {
     } finally {
       // Return to original branch
       await switchBranch(originalBranch, projectPath).catch(() => {});
-      this.currentTaskId = null;
+      this.setCurrentTaskId(null);
     }
   }
 
@@ -445,7 +496,7 @@ export class MainLoop {
       return { aborted: true };
     }
 
-    this.state = 'reviewing';
+    this.setState('reviewing');
     await this.taskStore.updateTask(task.id, { phase: 'reviewing' });
 
     let reviewRetries = 0;
@@ -496,7 +547,7 @@ export class MainLoop {
     stuckAdjustments: string[],
     projectPath: string,
   ): Promise<void> {
-    this.state = 'reflecting';
+    this.setState('reflecting');
     await this.taskStore.updateTask(task.id, { phase: 'reflecting' });
 
     const allResults = subtasks.map(st => `${st.description}: ${st.status} ${st.result ?? ''}`).join('\n');
