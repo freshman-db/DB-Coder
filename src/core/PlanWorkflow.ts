@@ -10,6 +10,7 @@ import type { PlanDraft, ChatStatus } from '../memory/types.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { log } from '../utils/logger.js';
 import type { AgentResultMessage, AgentSystemPrompt } from '../types/agentSdk.js';
+import { createInternalMcpServer } from '../mcp/InternalMcpServer.js';
 
 export type { PlanRequest };
 
@@ -76,6 +77,12 @@ export class PlanWorkflow {
   }
 
   private startSession(draftId: number, projectPath: string): void {
+    const internalMcpServer = createInternalMcpServer({
+      projectPath,
+      taskStore: this.taskStore,
+      globalMemory: this.globalMemory,
+    });
+
     const systemPrompt: AgentSystemPrompt = {
       type: 'preset',
       preset: 'claude_code',
@@ -84,9 +91,14 @@ export class PlanWorkflow {
 你的工作流程：
 1. 仔细理解用户的需求描述
 2. 使用可用的工具（Read, Glob, Grep, Bash）主动研究项目代码库
-3. 提出澄清问题，帮助用户明确需求细节
-4. 分析技术可行性和潜在风险
-5. 当需求足够清晰时，输出 [READY_TO_PLAN] 标记，表示可以生成正式计划
+3. 优先使用 db-coder-tools 中的工具直接操作系统能力：
+   - add_task(description, priority): 创建任务
+   - list_tasks(status?): 查看任务状态
+   - search_memory(query): 搜索历史经验
+   - get_status(): 查看项目整体状态
+4. 提出澄清问题，帮助用户明确需求细节
+5. 分析技术可行性和潜在风险
+6. 当需求足够清晰时，输出 [READY_TO_PLAN] 标记，表示可以生成正式计划
 
 请用中文回复用户。每次回复都应该推进需求的梳理进度。`,
     };
@@ -96,6 +108,9 @@ export class PlanWorkflow {
       (msg: SDKMessage) => this.handleSDKMessage(draftId, msg),
       {
         systemPrompt,
+        internalMcpServers: {
+          'db-coder-tools': internalMcpServer,
+        },
       },
     );
     this.chatSessions.set(draftId, session);
