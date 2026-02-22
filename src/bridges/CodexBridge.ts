@@ -206,25 +206,10 @@ ${prompt}`;
 }
 
 function extractCost(events: JsonlEvent[], pricing?: TokenPricing): number {
-  // 1. Search for explicit structured cost fields in events.
-  const structuredCost = extractFromStructuredFields(events);
-  if (structuredCost !== null) {
-    return structuredCost;
-  }
-
-  // 2. Search for explicit cost text in event payloads.
-  const textCost = extractFromEventText(events);
-  if (textCost !== null) {
-    return textCost;
-  }
-
-  // 3. Estimate from token usage in turn.completed events.
-  const estimatedCost = estimateFromTokenUsage(events, pricing);
-  if (estimatedCost !== null) {
-    return estimatedCost;
-  }
-
-  return 0;
+  return extractFromStructuredFields(events)
+    ?? extractFromEventText(events)
+    ?? estimateFromTokenUsage(events, pricing)
+    ?? 0;
 }
 
 function extractFromStructuredFields(events: JsonlEvent[]): number | null {
