@@ -442,7 +442,7 @@ test('GET /api/status returns health-style status fields', async () => {
   });
 });
 
-test('createSseStream writes SSE headers and event payloads', async () => {
+test('createSseStream writes SSE headers and event payloads', () => {
   const req = createMockRequest({
     method: 'GET',
     url: '/api/logs',
@@ -461,9 +461,84 @@ test('createSseStream writes SSE headers and event payloads', async () => {
   assert.equal(wroteEvent, true);
   assert.equal(state.body, 'event: status\ndata: {"ok":true}\n\n');
 
-  req.emit('close');
-  const wroteAfterClose = stream.write('status', { ok: false });
-  assert.equal(wroteAfterClose, false);
+  stream.cleanup();
+});
+
+test('createSseStream writes heartbeat comments on interval ticks', () => {
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token: 'token',
+  });
+  const { response, state } = createMockResponse();
+
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  let heartbeatTick: (() => void) | undefined;
+  let heartbeatDelayMs: number | undefined;
+  const timerHandle = { id: 'heartbeat-timer' } as unknown as ReturnType<typeof setInterval>;
+
+  globalThis.setInterval = ((callback: (...args: unknown[]) => void, delay?: number): ReturnType<typeof setInterval> => {
+    heartbeatDelayMs = delay;
+    heartbeatTick = () => callback();
+    return timerHandle;
+  }) as typeof setInterval;
+  globalThis.clearInterval = (() => {}) as typeof clearInterval;
+
+  try {
+    const stream = createSseStream(req, response);
+    assert.equal(heartbeatDelayMs, 15_000);
+    assert.equal(typeof heartbeatTick, 'function');
+
+    heartbeatTick?.();
+    assert.equal(state.body, ': heartbeat\n\n');
+
+    stream.cleanup();
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
+
+test('createSseStream cleanup prevents double-close and write after cleanup returns false', () => {
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token: 'token',
+  });
+  const { response } = createMockResponse();
+
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  const timerHandle = { id: 'cleanup-timer' } as unknown as ReturnType<typeof setInterval>;
+  let clearIntervalCalls = 0;
+
+  globalThis.setInterval = ((callback: (...args: unknown[]) => void): ReturnType<typeof setInterval> => {
+    void callback;
+    return timerHandle;
+  }) as typeof setInterval;
+  globalThis.clearInterval = ((timer: ReturnType<typeof setInterval> | undefined): void => {
+    if (timer === timerHandle) {
+      clearIntervalCalls += 1;
+    }
+  }) as typeof clearInterval;
+
+  try {
+    const stream = createSseStream(req, response);
+    assert.equal(req.listenerCount('close'), 1);
+
+    stream.cleanup();
+    stream.cleanup();
+    req.emit('close');
+    req.emit('close');
+
+    assert.equal(req.listenerCount('close'), 0);
+    assert.equal(clearIntervalCalls, 1);
+    assert.equal(stream.write('status', { ok: false }), false);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
 });
 
 test('createSseStream keeps pre-serialized string payloads intact', () => {
