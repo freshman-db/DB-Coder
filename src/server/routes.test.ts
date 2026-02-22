@@ -399,6 +399,69 @@ test('POST /api/evolution/proposals/:id/apply returns 400 for invalid proposal I
   assert.equal(updateCalls, 0);
 });
 
+test('GET /api/evolution/prompt-versions/:name validates prompt name and returns history', async () => {
+  let historyArgs:
+    | {
+      projectPath: string;
+      promptName: string;
+    }
+    | undefined;
+
+  const expectedHistory = [
+    {
+      id: 7,
+      prompt_name: 'scan',
+    },
+  ] as unknown as Awaited<ReturnType<TaskStore['getPromptVersionHistory']>>;
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getPromptVersionHistory: async (projectPath, promptName) => {
+        historyArgs = { projectPath, promptName };
+        return expectedHistory;
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: 'GET',
+    url: '/api/evolution/prompt-versions/scan',
+    token,
+  });
+
+  assert.equal(state.statusCode, 200);
+  assert.deepEqual(parseJson<typeof expectedHistory>(state), expectedHistory);
+  assert.deepEqual(historyArgs, {
+    projectPath: '/workspace/project',
+    promptName: 'scan',
+  });
+});
+
+test('GET /api/evolution/prompt-versions/:name returns 400 for unsupported prompt name', async () => {
+  let historyCalls = 0;
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getPromptVersionHistory: async () => {
+        historyCalls += 1;
+        return [] as Awaited<ReturnType<TaskStore['getPromptVersionHistory']>>;
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: 'GET',
+    url: '/api/evolution/prompt-versions/unsupported_prompt',
+    token,
+  });
+
+  assert.equal(state.statusCode, 400);
+  assert.deepEqual(parseJson<{ error: string }>(state), {
+    error: 'Invalid prompt name. Valid names: brain_system, scan, plan, reflect, executor, reviewer, research, plan_markdown, analysis, evaluator',
+  });
+  assert.equal(historyCalls, 0);
+});
+
 test('POST /api/evolution/prompt-versions/:id/activate parses version ID and activates version', async () => {
   let requestedId: number | undefined;
   let supersedeArgs:

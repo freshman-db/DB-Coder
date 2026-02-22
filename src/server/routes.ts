@@ -5,6 +5,7 @@ import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { CostTracker } from '../utils/cost.js';
 import type { Config } from '../config/Config.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
+import type { PromptName } from '../evolution/types.js';
 import type { PluginMonitor } from '../plugins/PluginMonitor.js';
 import type { PatrolManager } from '../core/ModeManager.js';
 import type { PlanWorkflow } from '../core/PlanWorkflow.js';
@@ -45,6 +46,18 @@ const MAX_MEMORY_TAG_COUNT = 20;
 const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 const VALID_DEPTHS = ['quick', 'normal', 'deep'] as const;
 type ScanDepth = (typeof VALID_DEPTHS)[number];
+const validPromptNames: ReadonlySet<string> = new Set<string>([
+  'brain_system',
+  'scan',
+  'plan',
+  'reflect',
+  'executor',
+  'reviewer',
+  'research',
+  'plan_markdown',
+  'analysis',
+  'evaluator',
+]);
 
 export class HttpError extends Error {
   constructor(public readonly statusCode: number, message: string) {
@@ -552,7 +565,12 @@ route('GET', '/api/evolution/prompt-versions', async (_req, res, ctx) => {
 
 route('GET', '/api/evolution/prompt-versions/:name', async (_req, res, ctx, params) => {
   const name = params.name;
-  const history = await ctx.taskStore.getPromptVersionHistory(ctx.config.projectPath, name as any);
+  if (!validPromptNames.has(name)) {
+    json(res, { error: `Invalid prompt name. Valid names: ${Array.from(validPromptNames).join(', ')}` }, 400);
+    return;
+  }
+
+  const history = await ctx.taskStore.getPromptVersionHistory(ctx.config.projectPath, name as PromptName);
   json(res, history);
 });
 
