@@ -828,6 +828,111 @@ describe('MainLoop runCycle integration', () => {
     assert.equal(runReviewCycleCalls, 1);
     assert.equal(reflectOnTaskCalls, 1);
   });
+
+  test('evaluation rejects task — task marked pending_review, executeTask not called', async () => {
+    let getQueuedCalls = 0;
+    let getNextCalls = 0;
+    let executeTaskCalls = 0;
+    const updateTaskCalls: Array<{ taskId: string; patch: unknown }> = [];
+    const evaluationEvents: Array<{ task_id: string; passed: boolean; score: { total: number } }> = [];
+
+    const now = new Date();
+    const mockTask: Task = {
+      id: 'task-rejected-1',
+      project_path: '/tmp/db-coder-main-loop-test',
+      task_description: 'Low value task that should be reviewed first',
+      phase: 'init',
+      priority: 2,
+      plan: null,
+      subtasks: [{ id: 'S1', description: 'Should never execute', executor: 'codex', status: 'pending' }],
+      review_results: [],
+      iteration: 0,
+      total_cost_usd: 0,
+      git_branch: null,
+      start_commit: null,
+      depends_on: [],
+      status: 'queued',
+      created_at: now,
+      updated_at: now,
+    };
+
+    const { loop } = createMainLoopForCycle({
+      brain: {
+        hasChanges: async () => false,
+      },
+      taskQueue: {
+        getQueued: async (projectPath: string) => {
+          getQueuedCalls++;
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return [mockTask];
+        },
+        getNext: async (projectPath: string) => {
+          getNextCalls++;
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return getNextCalls === 1 ? mockTask : null;
+        },
+      },
+      claude: {
+        plan: async () => ({
+          success: true,
+          output: JSON.stringify({
+            problemLegitimacy: -1,
+            solutionProportionality: -1,
+            expectedComplexity: 0,
+            historicalSuccess: 0,
+            reasoning: 'Task has negative ROI right now',
+          }),
+          cost_usd: 0,
+          duration_ms: 0,
+        }),
+      },
+      taskStore: {
+        updateTask: async (taskId: string, patch: unknown) => {
+          updateTaskCalls.push({ taskId, patch });
+        },
+        saveEvaluationEvent: async (event: unknown) => {
+          evaluationEvents.push(event as { task_id: string; passed: boolean; score: { total: number } });
+        },
+      },
+    });
+
+    const internals = getMainLoopInternals(loop);
+    const loopWithExecuteTask = loop as unknown as { executeTask(task: Task): Promise<void> };
+    const originalExecuteTask = loopWithExecuteTask.executeTask;
+    loopWithExecuteTask.executeTask = async () => {
+      executeTaskCalls++;
+    };
+
+    try {
+      internals.setRunning(true);
+      await loop.runCycle();
+    } finally {
+      internals.setRunning(false);
+      loopWithExecuteTask.executeTask = originalExecuteTask;
+    }
+
+    assert.equal(getQueuedCalls, 1);
+    assert.equal(getNextCalls, 2);
+    assert.equal(executeTaskCalls, 0);
+    assert.deepEqual(updateTaskCalls, [{
+      taskId: 'task-rejected-1',
+      patch: {
+        status: 'pending_review',
+        evaluation_score: {
+          problemLegitimacy: -1,
+          solutionProportionality: -1,
+          expectedComplexity: 0,
+          historicalSuccess: 0,
+          total: -2,
+        },
+        evaluation_reasoning: 'Task has negative ROI right now',
+      },
+    }]);
+    assert.equal(evaluationEvents.length, 1);
+    assert.equal(evaluationEvents[0]?.task_id, 'task-rejected-1');
+    assert.equal(evaluationEvents[0]?.passed, false);
+    assert.equal(evaluationEvents[0]?.score.total, -2);
+  });
 });
 
 describe('MainLoop status listeners', () => {
