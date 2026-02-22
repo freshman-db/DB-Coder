@@ -16,14 +16,29 @@ interface MockResponseState {
 
 type RouteContext = Parameters<typeof handleRequest>[2];
 
+const defaultCreateTask = async (
+  _projectPath: string,
+  description: string,
+  priority: number,
+): Promise<unknown> => ({ id: 'task-1', description, priority });
+
 function createContext(
-  createTask: (projectPath: string, description: string, priority: number) => Promise<unknown> = async (_projectPath, description, priority) => ({ id: 'task-1', description, priority }),
+  createTask: (projectPath: string, description: string, priority: number) => Promise<unknown> = defaultCreateTask,
+  getTask: (taskId: string) => Promise<{ task_description: string } | null> = async () => null,
 ): RouteContext {
   return {
-    loop: {} as RouteContext['loop'],
-    taskStore: { createTask } as RouteContext['taskStore'],
+    loop: {
+      getState: () => 'idle',
+      getCurrentTaskId: () => null,
+      isPaused: () => false,
+      isRunning: () => false,
+    } as unknown as RouteContext['loop'],
+    taskStore: { createTask, getTask } as RouteContext['taskStore'],
     globalMemory: {} as RouteContext['globalMemory'],
-    costTracker: {} as RouteContext['costTracker'],
+    costTracker: {
+      getDailySummary: async () => [],
+      getSessionCost: () => 0,
+    } as unknown as RouteContext['costTracker'],
     config: {
       projectPath: '/tmp/project',
       values: {
@@ -159,11 +174,15 @@ function createSseResponse(options: { throwOnWrite?: boolean } = {}): {
   return { response, state };
 }
 
-async function runPostTasksRequest(req: IncomingMessage, ctx = createContext()): Promise<MockResponseState> {
+async function runRequest(req: IncomingMessage, ctx = createContext()): Promise<MockResponseState> {
   const { response, state } = createMockResponse();
   const handled = await handleRequest(req, response, ctx);
   assert.equal(handled, true);
   return state;
+}
+
+async function runPostTasksRequest(req: IncomingMessage, ctx = createContext()): Promise<MockResponseState> {
+  return runRequest(req, ctx);
 }
 
 function parseJsonBody(state: MockResponseState): Record<string, unknown> {
@@ -272,6 +291,76 @@ test('safeSseWrite returns false when response.write throws', () => {
   const result = safeSseWrite(response, 'data: ping\n\n');
 
   assert.equal(result, false);
+});
+
+test('GET /api/status includes currentTaskTitle when currentTaskId exists', async () => {
+  let requestedTaskId = '';
+  const ctx = {
+    ...createContext(defaultCreateTask, async (taskId) => {
+      requestedTaskId = taskId;
+      return { task_description: '修复 dashboard 状态冲突' };
+    }),
+    loop: {
+      getState: () => 'executing',
+      getCurrentTaskId: () => 'task-123',
+      isPaused: () => false,
+      isRunning: () => true,
+    } as unknown as RouteContext['loop'],
+  };
+
+  const state = await runRequest(createGetRequest('/api/status') as unknown as IncomingMessage, ctx);
+
+  assert.equal(requestedTaskId, 'task-123');
+  assert.equal(state.statusCode, 200);
+  assert.deepEqual(parseJsonBody(state), {
+    state: 'executing',
+    currentTaskId: 'task-123',
+    currentTaskTitle: '修复 dashboard 状态冲突',
+    paused: false,
+    patrolling: true,
+    scanInterval: 30,
+    projectPath: '/tmp/project',
+    dailyCosts: [],
+  });
+});
+
+test('GET /api/status skips task lookup and returns null title when no current task id', async () => {
+  let getTaskCalled = false;
+  const ctx = {
+    ...createContext(defaultCreateTask, async () => {
+      getTaskCalled = true;
+      return { task_description: 'should-not-be-called' };
+    }),
+    loop: {
+      getState: () => 'idle',
+      getCurrentTaskId: () => null,
+      isPaused: () => false,
+      isRunning: () => false,
+    } as unknown as RouteContext['loop'],
+  };
+
+  const state = await runRequest(createGetRequest('/api/status') as unknown as IncomingMessage, ctx);
+
+  assert.equal(getTaskCalled, false);
+  assert.equal(state.statusCode, 200);
+  assert.equal(parseJsonBody(state).currentTaskTitle, null);
+});
+
+test('GET /api/status returns null currentTaskTitle when task lookup misses', async () => {
+  const ctx = {
+    ...createContext(defaultCreateTask, async (_taskId) => null),
+    loop: {
+      getState: () => 'executing',
+      getCurrentTaskId: () => 'task-missing',
+      isPaused: () => true,
+      isRunning: () => true,
+    } as unknown as RouteContext['loop'],
+  };
+
+  const state = await runRequest(createGetRequest('/api/status') as unknown as IncomingMessage, ctx);
+
+  assert.equal(state.statusCode, 200);
+  assert.equal(parseJsonBody(state).currentTaskTitle, null);
 });
 
 test('POST /api/tasks parses valid JSON from streamed chunks and creates the task', async () => {

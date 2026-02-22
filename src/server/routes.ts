@@ -92,11 +92,23 @@ export function safeSseWrite(res: ServerResponse, data: string): boolean {
 route('GET', '/api/status', async (_req, res, ctx) => {
   const state = ctx.loop.getState();
   const taskId = ctx.loop.getCurrentTaskId();
+  const currentTaskTitle = taskId
+    ? (await ctx.taskStore.getTask(taskId))?.task_description ?? null
+    : null;
   const paused = ctx.loop.isPaused();
   const patrolling = ctx.loop.isRunning();
   const daily = await ctx.costTracker.getDailySummary();
   const scanInterval = ctx.config.values.brain.scanInterval;
-  json(res, { state, currentTaskId: taskId, paused, patrolling, scanInterval, projectPath: ctx.config.projectPath, dailyCosts: daily });
+  json(res, {
+    state,
+    currentTaskId: taskId,
+    currentTaskTitle,
+    paused,
+    patrolling,
+    scanInterval,
+    projectPath: ctx.config.projectPath,
+    dailyCosts: daily,
+  });
 });
 
 // --- Tasks ---

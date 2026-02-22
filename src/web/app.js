@@ -161,6 +161,18 @@ function getTaskBody(task) {
   return lines.slice(start).join('\n');
 }
 
+function getCurrentTaskSubtitle(status) {
+  const currentTaskId = status?.currentTaskId ?? null;
+  const currentTaskTitle = status?.currentTaskTitle ?? null;
+  if (!currentTaskId) {
+    return '无进行中任务';
+  }
+  if (typeof currentTaskTitle === 'string' && currentTaskTitle.trim().length > 0) {
+    return getTaskTitle({ id: currentTaskId, task_description: currentTaskTitle });
+  }
+  return `任务 #${currentTaskId}`;
+}
+
 // ---- 路由 ----
 const routes = [
   { pattern: /^#\/$|^#?$/, page: 'dashboard', title: '仪表盘' },
@@ -296,6 +308,7 @@ async function renderDashboard() {
 
   const scanInterval = st.scanInterval || 300;
   const patrolStateDesc = getPatrolStateDesc(patrolling, st.state, st.currentTaskId, scanInterval);
+  const currentTaskSubtitle = getCurrentTaskSubtitle(st);
 
   const patrolBtn = patrolling
     ? `<button class="btn btn-sm btn-warning" onclick="stopPatrol()">停止巡逻</button>`
@@ -311,7 +324,7 @@ async function renderDashboard() {
       <div class="card">
         <div class="card-label">当前任务</div>
         <div class="card-value blue" style="font-size:16px;word-break:break-all;">${st.currentTaskId ? `<a href="#/tasks/${st.currentTaskId}">#${st.currentTaskId}</a>` : '空闲'}</div>
-        <div class="card-sub">${st.currentTaskTitle || '无进行中任务'}</div>
+        <div class="card-sub">${escapeHtml(currentTaskSubtitle)}</div>
       </div>
       <div class="card">
         <div class="card-label">今日费用</div>
