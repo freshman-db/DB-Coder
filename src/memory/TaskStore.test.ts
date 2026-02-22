@@ -292,7 +292,7 @@ describe('TaskStore.getOperationalMetrics', () => {
     let dailyCostCalls = 0;
     store.getDailyCost = async () => {
       dailyCostCalls += 1;
-      return { total_cost_usd: 4.75 as number, task_count: 2 };
+      return { total_cost_usd: 4.75, task_count: 2 };
     };
 
     const recentScansArgs: Array<string | number> = [];
