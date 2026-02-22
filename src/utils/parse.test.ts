@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { extractJsonFromText, tryParseReview } from './parse.js';
+import { extractJsonFromText, isRecord, tryParseReview } from './parse.js';
+
+test('isRecord identifies plain objects and rejects non-objects', () => {
+  assert.equal(isRecord({ key: 'value' }), true);
+  assert.equal(isRecord({}), true);
+  assert.equal(isRecord([]), false);
+  assert.equal(isRecord(null), false);
+  assert.equal(isRecord(undefined), false);
+  assert.equal(isRecord('text'), false);
+});
 
 test('extractJsonFromText parses clean JSON', () => {
   const input = '{"status":"ok","count":2}';

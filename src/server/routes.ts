@@ -7,6 +7,7 @@ import type { Config } from '../config/Config.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PluginMonitor } from '../plugins/PluginMonitor.js';
 import { log, type LogEntry } from '../utils/logger.js';
+import { isRecord } from '../utils/parse.js';
 
 interface RouteContext {
   loop: MainLoop;
@@ -524,10 +525,6 @@ function validateCreateMemoryBody(body: unknown): ValidationResult<CreateMemoryR
       ...(normalizedTags !== undefined ? { tags: normalizedTags } : {}),
     },
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isMemoryCategory(value: string): value is MemoryCategory {

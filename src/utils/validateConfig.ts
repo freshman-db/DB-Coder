@@ -2,6 +2,7 @@ import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import type { DbCoderConfig } from '../config/types.js';
+import { isRecord } from './parse.js';
 
 type ConfigRecord = Record<string, unknown>;
 
@@ -423,8 +424,4 @@ function requireRecord(value: unknown, field: string, issues: string[]): ConfigR
     return null;
   }
   return value;
-}
-
-function isRecord(value: unknown): value is ConfigRecord {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

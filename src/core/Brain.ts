@@ -11,7 +11,7 @@ import { BRAIN_SYSTEM_PROMPT, scanPrompt, planPrompt, reflectPrompt, brainMcpGui
 import { buildAgentGuidance } from '../prompts/agents.js';
 import { getHeadCommit, getRecentLog, getChangedFilesSince } from '../utils/git.js';
 import { log } from '../utils/logger.js';
-import { extractJsonFromText } from '../utils/parse.js';
+import { extractJsonFromText, isRecord } from '../utils/parse.js';
 
 export class Brain implements QuestionHandler {
   private evolutionEngine?: EvolutionEngine;
@@ -233,10 +233,6 @@ export class Brain implements QuestionHandler {
       return true;
     }
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function extractObjectByKey(text: string, requiredKey: string): Record<string, unknown> | null {
