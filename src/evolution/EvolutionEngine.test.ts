@@ -4,7 +4,7 @@ import type { Config } from '../config/Config.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { RecurringIssueCategory, ReviewEvent, Task } from '../memory/types.js';
-import type { HealthTrend, PromptVersion } from './types.js';
+import type { HealthTrend, PromptPatch, PromptVersion } from './types.js';
 import type { TrendAnalyzer } from './TrendAnalyzer.js';
 import { EvolutionEngine } from './EvolutionEngine.js';
 
@@ -18,9 +18,25 @@ type MetaReflectData = {
   issueCategories: RecurringIssueCategory[];
 };
 
+type ParsedMetaReflectOutput = {
+  patches: Array<{
+    promptName: string;
+    patches: PromptPatch[];
+    rationale: string;
+    confidence: number;
+  }>;
+  analysis: string;
+};
+
 type EvolutionEngineInternals = {
   collectMetaReflectData(projectPath: string): Promise<MetaReflectData>;
   buildMetaReflectPrompt(data: MetaReflectData): string;
+  storeProposedPatches(
+    parsed: ParsedMetaReflectOutput,
+    projectPath: string,
+    maxActive: number,
+    data: MetaReflectData,
+  ): Promise<void>;
 };
 
 function makeTask(index: number, cost: number): Task {
@@ -286,6 +302,206 @@ describe('EvolutionEngine.buildMetaReflectPrompt', () => {
     assert.throws(
       () => internals.buildMetaReflectPrompt(null as unknown as MetaReflectData),
       /meta-reflect data is required to build prompt/,
+    );
+  });
+});
+
+describe('EvolutionEngine.storeProposedPatches', () => {
+  test('stores eligible proposals then runs promotion and rollback', async () => {
+    const activePromptVersion: PromptVersion = {
+      id: 11,
+      project_path: '/repo',
+      prompt_name: 'scan',
+      version: 1,
+      patches: [{ op: 'append', content: 'Check nulls.', reason: 'Reduce crashes.' }],
+      rationale: 'Current active scan patch',
+      confidence: 0.8,
+      effectiveness: 0.05,
+      status: 'active',
+      baseline_metrics: null,
+      current_metrics: null,
+      tasks_evaluated: 3,
+      activated_at: new Date('2026-01-03T00:00:00.000Z'),
+      created_at: new Date('2026-01-01T00:00:00.000Z'),
+      updated_at: new Date('2026-01-03T00:00:00.000Z'),
+    };
+
+    const savedVersions: Array<{
+      project_path: string;
+      prompt_name: string;
+      version: number;
+      patches: PromptPatch[];
+      rationale: string;
+      confidence: number;
+      baseline_metrics: {
+        passRate: number;
+        avgCostUsd: number;
+        issueCount: number;
+        tasksEvaluated: number;
+      } | null;
+    }> = [];
+
+    let activeLookupCount = 0;
+    let promoteCalls = 0;
+    let rollbackCalls = 0;
+
+    const taskStore: Partial<TaskStore> = {
+      getActivePromptVersions: async (projectPath: string) => {
+        assert.equal(projectPath, '/repo');
+        activeLookupCount += 1;
+        return activeLookupCount === 1 ? [activePromptVersion] : [];
+      },
+      getNextPromptVersion: async (projectPath: string, promptName) => {
+        assert.equal(projectPath, '/repo');
+        assert.equal(promptName, 'plan');
+        return 4;
+      },
+      savePromptVersion: async (pv) => {
+        savedVersions.push({
+          project_path: pv.project_path,
+          prompt_name: pv.prompt_name,
+          version: pv.version,
+          patches: pv.patches,
+          rationale: pv.rationale,
+          confidence: pv.confidence,
+          baseline_metrics: pv.baseline_metrics,
+        });
+        return {} as PromptVersion;
+      },
+    };
+
+    const engine = createEvolutionEngine(taskStore, {});
+    (engine as any).promoteReadyCandidates = async (projectPath: string) => {
+      assert.equal(projectPath, '/repo');
+      promoteCalls += 1;
+      return 1;
+    };
+    (engine as any).rollbackDegradedVersions = async (projectPath: string) => {
+      assert.equal(projectPath, '/repo');
+      rollbackCalls += 1;
+      return 0;
+    };
+
+    const internals = engine as unknown as EvolutionEngineInternals;
+    const parsed: ParsedMetaReflectOutput = {
+      patches: [
+        {
+          promptName: 'scan',
+          patches: [{ op: 'append', content: 'Keep scanning strict.', reason: 'Reduce misses.' }],
+          rationale: 'Improve scan consistency',
+          confidence: 0.7,
+        },
+        {
+          promptName: 'plan',
+          patches: [{ op: 'append', content: 'Add checklist.', reason: 'Catch regressions.' }],
+          rationale: 'Address planning misses',
+          confidence: 0.81,
+        },
+      ],
+      analysis: 'Plan prompt needs more rigor.',
+    };
+    const data: MetaReflectData = {
+      reviewEvents: [
+        {
+          id: 1,
+          task_id: 'task-1',
+          attempt: 1,
+          passed: true,
+          must_fix_count: 0,
+          should_fix_count: 0,
+          issue_categories: [],
+          fix_agent: null,
+          duration_ms: 10,
+          cost_usd: 0.01,
+          created_at: new Date('2026-01-01T00:00:00.000Z'),
+        },
+        {
+          id: 2,
+          task_id: 'task-2',
+          attempt: 1,
+          passed: false,
+          must_fix_count: 1,
+          should_fix_count: 1,
+          issue_categories: ['null-safety'],
+          fix_agent: null,
+          duration_ms: 20,
+          cost_usd: 0.02,
+          created_at: new Date('2026-01-01T00:01:00.000Z'),
+        },
+      ],
+      recentTasks: [],
+      healthTrend: null,
+      activeVersions: [],
+      passRate: 0.5,
+      avgCost: 0.45,
+      issueCategories: [
+        { category: 'null-safety', count: 2 },
+        { category: 'type-error', count: 1 },
+      ],
+    };
+
+    await internals.storeProposedPatches(parsed, '/repo', 1, data);
+
+    assert.equal(savedVersions.length, 1);
+    assert.deepEqual(savedVersions[0], {
+      project_path: '/repo',
+      prompt_name: 'plan',
+      version: 4,
+      patches: [{ op: 'append', content: 'Add checklist.', reason: 'Catch regressions.' }],
+      rationale: 'Address planning misses',
+      confidence: 0.81,
+      baseline_metrics: {
+        passRate: 0.5,
+        avgCostUsd: 0.45,
+        issueCount: 3,
+        tasksEvaluated: 2,
+      },
+    });
+    assert.equal(promoteCalls, 1);
+    assert.equal(rollbackCalls, 1);
+  });
+
+  test('throws when parsed/data are nullish or inputs are invalid', async () => {
+    const engine = createEvolutionEngine({}, {});
+    const internals = engine as unknown as EvolutionEngineInternals;
+
+    const validParsed: ParsedMetaReflectOutput = {
+      patches: [{
+        promptName: 'scan',
+        patches: [{ op: 'append', content: 'x', reason: 'y' }],
+        rationale: 'r',
+        confidence: 0.8,
+      }],
+      analysis: '',
+    };
+    const validData: MetaReflectData = {
+      reviewEvents: [],
+      recentTasks: [],
+      healthTrend: null,
+      activeVersions: [],
+      passRate: 1,
+      avgCost: 0,
+      issueCategories: [],
+    };
+
+    await assert.rejects(
+      internals.storeProposedPatches(undefined as unknown as ParsedMetaReflectOutput, '/repo', 1, validData),
+      /parsed meta-reflect output is required for prompt patch storage/,
+    );
+
+    await assert.rejects(
+      internals.storeProposedPatches(validParsed, '   ', 1, validData),
+      /projectPath is required for prompt patch storage/,
+    );
+
+    await assert.rejects(
+      internals.storeProposedPatches(validParsed, '/repo', 0, validData),
+      /maxActive must be a positive number/,
+    );
+
+    await assert.rejects(
+      internals.storeProposedPatches(validParsed, '/repo', 1, null as unknown as MetaReflectData),
+      /meta-reflect data is required for patch storage/,
     );
   });
 });
