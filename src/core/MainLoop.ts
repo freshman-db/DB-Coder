@@ -18,10 +18,11 @@ import { buildAgentGuidance } from '../prompts/agents.js';
 import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch, isWorkingClean, branchExists, getChangedFilesSince, getModifiedAndAddedFiles, mergeBranch, deleteBranch, listBranches, forceDeleteBranch } from '../utils/git.js';
 import { log } from '../utils/logger.js';
 import { calculateRetryDelay } from '../utils/retry.js';
-import { readFileSync, existsSync, writeFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
+import { safeBuild } from '../utils/safeBuild.js';
 
 const PAUSE_INTERVAL_MS = 5000;
 const ERROR_RECOVERY_MS = 30000;
@@ -45,6 +46,9 @@ export class MainLoop {
   private currentTaskId: string | null = null;
   private statusListeners = new Set<StatusListener>();
   private lockFile: string;
+
+  private restartPending = false;
+  private restartListeners = new Set<() => void>();
 
   private stoppedPromise: Promise<void> | null = null;
   private stoppedResolve: (() => void) | null = null;
@@ -74,6 +78,34 @@ export class MainLoop {
   getCurrentTaskId(): string | null { return this.currentTaskId; }
   isPaused(): boolean { return this.paused; }
   isRunning(): boolean { return this.running; }
+
+  /** Register a callback invoked when the loop exits due to a pending self-restart. */
+  onRestart(listener: () => void): () => void {
+    this.restartListeners.add(listener);
+    return () => { this.restartListeners.delete(listener); };
+  }
+
+  /** Check if this project is db-coder itself (self-modification scenario). */
+  private isSelfProject(): boolean {
+    try {
+      const pkgPath = join(this.config.projectPath, 'package.json');
+      if (!existsSync(pkgPath)) return false;
+      const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+      return pkg.name === 'db-coder';
+    } catch {
+      return false;
+    }
+  }
+
+  /** Write a build error file so the next startup can create a P0 recovery task. */
+  private writeBuildError(error: string): void {
+    const dir = join(homedir(), '.db-coder');
+    mkdirSync(dir, { recursive: true });
+    const filePath = join(dir, 'build-error.json');
+    const data = { timestamp: new Date().toISOString(), type: 'build', error };
+    writeFileSync(filePath, JSON.stringify(data, null, 2));
+    log.warn('Build error written to ' + filePath);
+  }
 
   addStatusListener(listener: StatusListener): () => void {
     this.statusListeners.add(listener);
@@ -179,6 +211,12 @@ export class MainLoop {
           await sleep(ERROR_RECOVERY_MS); // Wait before retry
         }
 
+        // Exit loop if a self-build requires a process restart
+        if (this.restartPending) {
+          log.info('Restart pending after self-build, exiting loop');
+          break;
+        }
+
         // Sleep between cycles
         await sleep(this.config.values.brain.scanInterval * 1000);
       }
@@ -190,6 +228,12 @@ export class MainLoop {
       this.stoppedResolve?.();
       this.stoppedResolve = null;
       this.stoppedPromise = null;
+
+      if (this.restartPending) {
+        for (const listener of this.restartListeners) {
+          try { listener(); } catch { /* ignore */ }
+        }
+      }
     }
   }
 
@@ -361,6 +405,17 @@ export class MainLoop {
           await switchBranch(originalBranch, projectPath);
           await mergeBranch(branchName, projectPath);
           await deleteBranch(branchName, projectPath);
+
+          // Self-modification: rebuild after merging our own code changes
+          if (this.isSelfProject()) {
+            const buildResult = await safeBuild(projectPath);
+            if (buildResult.success) {
+              this.restartPending = true;
+              log.info('Self-build succeeded, restart pending after cycle completes');
+            } else {
+              this.writeBuildError(buildResult.error);
+            }
+          }
         } catch (mergeErr) {
           log.warn(`Auto-merge failed for ${branchName}: ${mergeErr}`);
         }

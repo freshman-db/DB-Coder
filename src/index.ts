@@ -24,6 +24,7 @@ import { PluginMonitor } from './plugins/PluginMonitor.js';
 import { log, type LogEntry } from './utils/logger.js';
 import { validateConfigForStartup } from './startup/configValidation.js';
 import { wireGracefulShutdown } from './startup/gracefulShutdown.js';
+import { checkAndRecoverErrors } from './startup/errorRecovery.js';
 
 const program = new Command()
   .name('db-coder')
@@ -54,6 +55,12 @@ program
 
     await globalMemory.init();
     await taskStore.init();
+
+    // Check for error files from previous failed builds or startup crashes
+    const recoveredErrors = await checkAndRecoverErrors(taskStore, projectPath);
+    if (recoveredErrors > 0) {
+      log.warn(`Created ${recoveredErrors} P0 recovery task(s) from previous errors`);
+    }
 
     // Discover MCP servers from Claude plugins
     const mcpDiscovery = new McpDiscovery(mcpConfig);
@@ -100,6 +107,16 @@ program
       server,
       taskStore,
       globalMemory,
+    });
+
+    // Register restart handler for self-build scenarios
+    const RESTART_EXIT_CODE = 75;
+    mainLoop.onRestart(() => {
+      log.info(`Self-build restart: exiting with code ${RESTART_EXIT_CODE}`);
+      server.stop().catch(() => {});
+      globalMemory.close().catch(() => {});
+      taskStore.close().catch(() => {});
+      process.exit(RESTART_EXIT_CODE);
     });
 
     // Start server only — default to idle mode, user selects mode via API/UI
