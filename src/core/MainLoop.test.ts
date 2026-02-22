@@ -7,6 +7,7 @@ import type { Config } from '../config/Config.js';
 import type { ClaudeBridge } from '../bridges/ClaudeBridge.js';
 import type { CodexBridge } from '../bridges/CodexBridge.js';
 import type { TaskStore } from '../memory/TaskStore.js';
+import type { Task } from '../memory/types.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { CostTracker } from '../utils/cost.js';
 import type { Brain } from './Brain.js';
@@ -32,6 +33,35 @@ type MainLoopInternals = {
   setCurrentTaskId(taskId: string | null): void;
   setPaused(paused: boolean): void;
   setRunning(running: boolean): void;
+};
+
+type MainLoopExecutionInternals = {
+  prepareTaskBranch(
+    task: Task,
+    branchName: string,
+    projectPath: string,
+  ): Promise<{ originalBranch: string; startCommit: string }>;
+  executeSubtasks(
+    task: Task,
+    branchName: string,
+    projectPath: string,
+  ): Promise<{ subtasks: Task['subtasks']; stuckAdjustments: string[]; aborted: boolean }>;
+  runReviewCycle(
+    task: Task,
+    startCommit: string,
+    stuckAdjustments: string[],
+    projectPath: string,
+  ): Promise<{
+    aborted: boolean;
+    reviewResult?: {
+      passed: boolean;
+      mustFix: ReviewIssue[];
+      shouldFix: ReviewIssue[];
+      summary: string;
+    };
+    reviewRetries?: number;
+  }>;
+  reflectOnTask(...args: unknown[]): Promise<void>;
 };
 
 type CycleConfigOverrides = {
@@ -267,6 +297,10 @@ function getMainLoopInternals(loop: MainLoop): MainLoopInternals {
   return loop as unknown as MainLoopInternals;
 }
 
+function getMainLoopExecutionInternals(loop: MainLoop): MainLoopExecutionInternals {
+  return Object.getPrototypeOf(loop) as MainLoopExecutionInternals;
+}
+
 type PromptDeltaInternals = {
   updatePromptVersionEffectiveness(passed: boolean): Promise<void>;
 };
@@ -444,6 +478,126 @@ describe('MainLoop runCycle integration', () => {
     assert.equal(scanProjectCalls, 0);
     assert.equal(createPlanCalls, 0);
     assert.equal(getNextCalls, 0);
+  });
+
+  test('no changes but queued tasks — skips scan and processes queue', async () => {
+    let scanProjectCalls = 0;
+    let getQueuedCalls = 0;
+    let getNextCalls = 0;
+    let claudePlanCalls = 0;
+    let prepareTaskBranchCalls = 0;
+    let executeSubtasksCalls = 0;
+    let runReviewCycleCalls = 0;
+    let reflectOnTaskCalls = 0;
+
+    const now = new Date();
+    const mockTask: Task = {
+      id: 'task-queued-1',
+      project_path: '/tmp/db-coder-main-loop-test',
+      task_description: 'Process a queued task without scanning',
+      phase: 'init',
+      priority: 1,
+      plan: null,
+      subtasks: [{ id: 'S1', description: 'Apply queued fix', executor: 'codex', status: 'pending' }],
+      review_results: [],
+      iteration: 0,
+      total_cost_usd: 0,
+      git_branch: null,
+      start_commit: null,
+      depends_on: [],
+      status: 'queued',
+      created_at: now,
+      updated_at: now,
+    };
+
+    const { loop } = createMainLoopForCycle({
+      brain: {
+        hasChanges: async () => false,
+        scanProject: async () => {
+          scanProjectCalls++;
+          return {
+            analysis: { issues: [], opportunities: [], projectHealth: 100, summary: 'No changes' },
+            cost: 0,
+          };
+        },
+      },
+      taskQueue: {
+        getQueued: async (projectPath: string) => {
+          getQueuedCalls++;
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return [mockTask];
+        },
+        getNext: async (projectPath: string) => {
+          getNextCalls++;
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return getNextCalls === 1 ? mockTask : null;
+        },
+      },
+      claude: {
+        plan: async () => {
+          claudePlanCalls++;
+          return {
+            success: true,
+            output: JSON.stringify({
+              problemLegitimacy: 1,
+              solutionProportionality: 1,
+              expectedComplexity: 1,
+              historicalSuccess: 1,
+              reasoning: 'Queued task is worth executing',
+            }),
+            cost_usd: 0,
+            duration_ms: 0,
+          };
+        },
+      },
+    });
+
+    const internals = getMainLoopInternals(loop);
+    const executionInternals = getMainLoopExecutionInternals(loop);
+    const originalPrepareTaskBranch = executionInternals.prepareTaskBranch;
+    const originalExecuteSubtasks = executionInternals.executeSubtasks;
+    const originalRunReviewCycle = executionInternals.runReviewCycle;
+    const originalReflectOnTask = executionInternals.reflectOnTask;
+
+    executionInternals.prepareTaskBranch = async () => {
+      prepareTaskBranchCalls++;
+      return { originalBranch: 'main', startCommit: '' };
+    };
+    executionInternals.executeSubtasks = async task => {
+      executeSubtasksCalls++;
+      return { subtasks: task.subtasks, stuckAdjustments: [], aborted: false };
+    };
+    executionInternals.runReviewCycle = async () => {
+      runReviewCycleCalls++;
+      return {
+        aborted: false,
+        reviewResult: { passed: false, mustFix: [], shouldFix: [], summary: 'Mock review failure' },
+        reviewRetries: 0,
+      };
+    };
+    executionInternals.reflectOnTask = async () => {
+      reflectOnTaskCalls++;
+    };
+
+    try {
+      internals.setRunning(true);
+      await loop.runCycle();
+    } finally {
+      internals.setRunning(false);
+      executionInternals.prepareTaskBranch = originalPrepareTaskBranch;
+      executionInternals.executeSubtasks = originalExecuteSubtasks;
+      executionInternals.runReviewCycle = originalRunReviewCycle;
+      executionInternals.reflectOnTask = originalReflectOnTask;
+    }
+
+    assert.equal(scanProjectCalls, 0);
+    assert.equal(getQueuedCalls, 1);
+    assert.equal(getNextCalls, 2);
+    assert.equal(claudePlanCalls, 1);
+    assert.equal(prepareTaskBranchCalls, 1);
+    assert.equal(executeSubtasksCalls, 1);
+    assert.equal(runReviewCycleCalls, 1);
+    assert.equal(reflectOnTaskCalls, 1);
   });
 });
 
