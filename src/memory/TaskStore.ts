@@ -195,6 +195,47 @@ export class TaskStore {
     `;
   }
 
+  /** Paginated task list: active → queued → done/failed (by updated_at DESC) */
+  async listTasksPaged(
+    projectPath: string,
+    page = 1,
+    pageSize = 20,
+    status?: TaskStatus | TaskStatus[],
+  ): Promise<{ tasks: Task[]; total: number; page: number; pageSize: number }> {
+    const sql = this.getSql();
+    const offset = (page - 1) * pageSize;
+
+    const statuses = status ? (Array.isArray(status) ? status : [status]) : [];
+    const statusFilter = statuses.length > 0 ? sql`AND status = ANY(${statuses})` : sql``;
+
+    const [countRow] = await sql<[{ count: string }]>`
+      SELECT COUNT(*)::text AS count FROM tasks
+      WHERE project_path = ${projectPath} ${statusFilter}
+    `;
+    const total = parseInt(countRow.count, 10);
+
+    const tasks = await sql<Task[]>`
+      SELECT * FROM tasks
+      WHERE project_path = ${projectPath} ${statusFilter}
+      ORDER BY
+        CASE status
+          WHEN 'active' THEN 0
+          WHEN 'queued' THEN 1
+          WHEN 'blocked' THEN 2
+          WHEN 'done' THEN 3
+          WHEN 'failed' THEN 4
+          WHEN 'skipped' THEN 5
+          ELSE 6
+        END ASC,
+        CASE WHEN status IN ('done', 'failed', 'skipped') THEN updated_at END DESC NULLS LAST,
+        priority ASC,
+        created_at ASC
+      LIMIT ${pageSize} OFFSET ${offset}
+    `;
+
+    return { tasks, total, page, pageSize };
+  }
+
   async updateTask(id: string, updates: TaskUpdateInput): Promise<void> {
     const sql = this.getSql();
     const sets: string[] = [];
