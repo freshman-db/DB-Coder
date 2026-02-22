@@ -23,6 +23,18 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 
+const PAUSE_INTERVAL_MS = 5000;
+const ERROR_RECOVERY_MS = 30000;
+const PLUGIN_CHECK_INTERVAL_MS = 86400_000;
+const BRANCH_ID_LENGTH = 8;
+const TASK_DESC_MAX_LENGTH = 80;
+const SUBTASK_RESULT_MAX_LENGTH = 200;
+const COMMIT_MSG_MAX_LENGTH = 50;
+const REVIEW_SUMMARY_MAX_LENGTH = 200;
+const LOG_OUTPUT_MAX_LENGTH = 500;
+const PROMPT_SUCCESS_DELTA = 0.1;
+const PROMPT_FAILURE_DELTA = -0.15;
+
 type StatusListener = (status: StatusSnapshot) => void;
 
 export class MainLoop {
@@ -52,7 +64,7 @@ export class MainLoop {
     private globalMemory: GlobalMemory,
     private costTracker: CostTracker,
   ) {
-    const hash = createHash('md5').update(config.projectPath).digest('hex').slice(0, 8);
+    const hash = createHash('md5').update(config.projectPath).digest('hex').slice(0, BRANCH_ID_LENGTH);
     const lockDir = join(homedir(), '.db-coder');
     this.lockFile = join(lockDir, `${hash}.lock`);
   }
@@ -154,7 +166,7 @@ export class MainLoop {
       while (this.running) {
         if (this.paused) {
           this.setState('paused');
-          await sleep(5000);
+          await sleep(PAUSE_INTERVAL_MS);
           continue;
         }
 
@@ -163,7 +175,7 @@ export class MainLoop {
         } catch (err) {
           log.error('Cycle error', err);
           this.setState('error');
-          await sleep(30000); // Wait before retry
+          await sleep(ERROR_RECOVERY_MS); // Wait before retry
         }
 
         // Sleep between cycles
@@ -210,7 +222,7 @@ export class MainLoop {
     const projectPath = this.config.projectPath;
 
     // Plugin marketplace check (every 24 hours)
-    if (this.pluginMonitor && Date.now() - this.lastPluginCheck > 86400_000) {
+    if (this.pluginMonitor && Date.now() - this.lastPluginCheck > PLUGIN_CHECK_INTERVAL_MS) {
       try {
         const result = await this.pluginMonitor.checkForUpdates();
         if (result.newPlugins.length > 0 || result.updatable.length > 0) {
@@ -300,9 +312,9 @@ export class MainLoop {
     this.setCurrentTaskId(task.id);
     this.setState('executing');
 
-    log.info(`Executing task [P${task.priority}]: ${task.task_description.slice(0, 80)}`);
+    log.info(`Executing task [P${task.priority}]: ${task.task_description.slice(0, TASK_DESC_MAX_LENGTH)}`);
 
-    const branchName = `${this.config.values.git.branchPrefix}${task.id.slice(0, 8)}`;
+    const branchName = `${this.config.values.git.branchPrefix}${task.id.slice(0, BRANCH_ID_LENGTH)}`;
     let originalBranch = 'main';
     let startCommit = '';
 
@@ -461,14 +473,14 @@ export class MainLoop {
 
         if (result.success) {
           subtask.status = 'done';
-          subtask.result = result.output.slice(0, 200);
+          subtask.result = result.output.slice(0, SUBTASK_RESULT_MAX_LENGTH);
           const changedFiles = await getModifiedAndAddedFiles(projectPath).catch(() => []);
-          await commitAll(`db-coder: ${subtask.description.slice(0, 50)}`, projectPath, changedFiles).catch(() => {});
+          await commitAll(`db-coder: ${subtask.description.slice(0, COMMIT_MSG_MAX_LENGTH)}`, projectPath, changedFiles).catch(() => {});
           break;
         }
 
         subtask.status = 'failed';
-        subtask.result = result.output.slice(0, 200);
+        subtask.result = result.output.slice(0, SUBTASK_RESULT_MAX_LENGTH);
         log.warn(`Subtask failed: ${subtask.description}`);
         const handled = await this.handleRetry(task, subtask, {
           subtasks,
@@ -601,8 +613,8 @@ export class MainLoop {
       task_id: task.id,
       phase: 'execute',
       agent: subtask.executor,
-      input_summary: subtask.description.slice(0, 200),
-      output_summary: result.output.slice(0, 500),
+      input_summary: subtask.description.slice(0, SUBTASK_RESULT_MAX_LENGTH),
+      output_summary: result.output.slice(0, LOG_OUTPUT_MAX_LENGTH),
       cost_usd: result.cost_usd,
       duration_ms: result.duration_ms,
     });
@@ -779,7 +791,7 @@ export class MainLoop {
     // Previous review attempts summary
     const prevResults = (task.review_results as MergedReviewResult[] || []).slice(-2);
     const previousAttempts = prevResults
-      .map((r, i) => `Attempt ${i + 1}: ${r.passed ? 'PASSED' : 'FAILED'} — ${r.summary?.slice(0, 200)}`)
+      .map((r, i) => `Attempt ${i + 1}: ${r.passed ? 'PASSED' : 'FAILED'} — ${r.summary?.slice(0, REVIEW_SUMMARY_MAX_LENGTH)}`)
       .join('\n');
 
     // Coding standards from memory
@@ -852,7 +864,7 @@ Fix these issues while maintaining code quality. Do not introduce new issues.`;
     const projectPath = this.config.projectPath;
     try {
       const versions = await this.taskStore.getActivePromptVersions(projectPath);
-      const delta = passed ? 0.1 : -0.15;
+      const delta = passed ? PROMPT_SUCCESS_DELTA : PROMPT_FAILURE_DELTA;
       for (const v of versions) {
         await this.taskStore.updatePromptVersionEffectiveness(v.id, delta);
       }

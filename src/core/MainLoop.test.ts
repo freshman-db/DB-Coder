@@ -8,6 +8,7 @@ import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { CostTracker } from '../utils/cost.js';
 import type { Brain } from './Brain.js';
 import type { TaskQueue } from './TaskQueue.js';
+import type { PromptRegistry } from '../prompts/PromptRegistry.js';
 import { MainLoop, extractIssueCategories } from './MainLoop.js';
 import type { StatusSnapshot } from './types.js';
 import type { ReviewIssue } from '../bridges/CodingAgent.js';
@@ -47,6 +48,31 @@ function createMainLoop(): MainLoop {
 
 function getMainLoopInternals(loop: MainLoop): MainLoopInternals {
   return loop as unknown as MainLoopInternals;
+}
+
+type PromptDeltaInternals = {
+  updatePromptVersionEffectiveness(passed: boolean): Promise<void>;
+};
+
+function getPromptDeltaInternals(loop: MainLoop): PromptDeltaInternals {
+  return loop as unknown as PromptDeltaInternals;
+}
+
+function createMainLoopForPromptDelta(taskStore: TaskStore): MainLoop {
+  const config = {
+    projectPath: '/tmp/db-coder-main-loop-test',
+  } as unknown as Config;
+
+  return new MainLoop(
+    config,
+    {} as unknown as Brain,
+    {} as unknown as TaskQueue,
+    {} as unknown as ClaudeBridge,
+    {} as unknown as CodexBridge,
+    taskStore,
+    {} as unknown as GlobalMemory,
+    {} as unknown as CostTracker,
+  );
 }
 
 describe('extractIssueCategories', () => {
@@ -182,5 +208,87 @@ describe('MainLoop status listeners', () => {
       patrolling: false,
       paused: false,
     });
+  });
+});
+
+describe('MainLoop prompt effectiveness deltas', () => {
+  test('applies positive delta to every active prompt version when task passed', async () => {
+    const updates: Array<{ id: number; delta: number }> = [];
+    const taskStore = {
+      getActivePromptVersions: async () => [{ id: 101 }, { id: 202 }],
+      updatePromptVersionEffectiveness: async (id: number, delta: number) => {
+        updates.push({ id, delta });
+      },
+    } as unknown as TaskStore;
+    const loop = createMainLoopForPromptDelta(taskStore);
+    loop.setPromptRegistry({} as PromptRegistry);
+
+    await getPromptDeltaInternals(loop).updatePromptVersionEffectiveness(true);
+
+    assert.deepEqual(updates, [
+      { id: 101, delta: 0.1 },
+      { id: 202, delta: 0.1 },
+    ]);
+  });
+
+  test('applies negative delta when task failed', async () => {
+    const updates: Array<{ id: number; delta: number }> = [];
+    const taskStore = {
+      getActivePromptVersions: async () => [{ id: 7 }],
+      updatePromptVersionEffectiveness: async (id: number, delta: number) => {
+        updates.push({ id, delta });
+      },
+    } as unknown as TaskStore;
+    const loop = createMainLoopForPromptDelta(taskStore);
+    loop.setPromptRegistry({} as PromptRegistry);
+
+    await getPromptDeltaInternals(loop).updatePromptVersionEffectiveness(false);
+
+    assert.deepEqual(updates, [{ id: 7, delta: -0.15 }]);
+  });
+
+  test('does nothing when there are no active prompt versions', async () => {
+    let updateCalls = 0;
+    const taskStore = {
+      getActivePromptVersions: async () => [],
+      updatePromptVersionEffectiveness: async () => {
+        updateCalls++;
+      },
+    } as unknown as TaskStore;
+    const loop = createMainLoopForPromptDelta(taskStore);
+    loop.setPromptRegistry({} as PromptRegistry);
+
+    await getPromptDeltaInternals(loop).updatePromptVersionEffectiveness(true);
+
+    assert.equal(updateCalls, 0);
+  });
+
+  test('returns early when prompt registry is not set', async () => {
+    let queried = false;
+    const taskStore = {
+      getActivePromptVersions: async () => {
+        queried = true;
+        return [];
+      },
+      updatePromptVersionEffectiveness: async () => {},
+    } as unknown as TaskStore;
+    const loop = createMainLoopForPromptDelta(taskStore);
+
+    await getPromptDeltaInternals(loop).updatePromptVersionEffectiveness(true);
+
+    assert.equal(queried, false);
+  });
+
+  test('swallows storage errors during prompt effectiveness updates', async () => {
+    const taskStore = {
+      getActivePromptVersions: async () => {
+        throw new Error('db unavailable');
+      },
+      updatePromptVersionEffectiveness: async () => {},
+    } as unknown as TaskStore;
+    const loop = createMainLoopForPromptDelta(taskStore);
+    loop.setPromptRegistry({} as PromptRegistry);
+
+    await assert.doesNotReject(getPromptDeltaInternals(loop).updatePromptVersionEffectiveness(true));
   });
 });
