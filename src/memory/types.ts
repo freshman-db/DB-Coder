@@ -122,3 +122,50 @@ export interface AnalysisItem {
   line?: number;
   suggestion?: string;
 }
+
+export type PlanReviewStatus = 'draft' | 'approved' | 'rejected' | 'expired';
+
+export interface PlanDraftAnnotation {
+  task_index: number;
+  action: 'approve' | 'reject' | 'modify';
+  comment: string;
+  modified_description?: string;
+}
+
+export interface PlanDraft {
+  id: number;
+  project_path: string;
+  plan: unknown;           // TaskPlan JSON
+  analysis_summary: string;
+  reasoning: string;
+  markdown: string;        // human-readable plan
+  status: PlanReviewStatus;
+  annotations: PlanDraftAnnotation[];
+  scan_id: number | null;
+  cost_usd: number;
+  created_at: Date;
+  reviewed_at: Date | null;
+}
+
+export interface AnalysisReport {
+  id: number;
+  project_path: string;
+  module_path: string;
+  title: string;
+  markdown: string;
+  summary: string;
+  modules: ModuleInfo[];
+  cost_usd: number;
+  created_at: Date;
+}
+
+export interface ModuleInfo {
+  name: string;
+  path: string;
+  type: 'class' | 'function' | 'module' | 'file';
+  dependencies: string[];
+  dependents: string[];
+  description: string;
+  lines: number;
+  complexity: 'low' | 'medium' | 'high';
+}

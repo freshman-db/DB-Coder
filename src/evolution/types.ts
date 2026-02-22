@@ -60,7 +60,7 @@ export interface ConfigProposal {
 }
 
 // --- Prompt meta-reflection ---
-export type PromptName = 'brain_system' | 'scan' | 'plan' | 'reflect' | 'executor' | 'reviewer';
+export type PromptName = 'brain_system' | 'scan' | 'plan' | 'reflect' | 'executor' | 'reviewer' | 'research' | 'plan_markdown' | 'analysis';
 
 export type PromptPatchOp = 'prepend' | 'append' | 'replace_section' | 'remove_section';
 

@@ -1,5 +1,5 @@
 import type postgres from 'postgres';
-import type { Task, TaskLog, TaskStatus, ScanResult, ReviewEvent, RecurringIssueCategory } from './types.js';
+import type { Task, TaskLog, TaskStatus, ScanResult, ReviewEvent, RecurringIssueCategory, PlanDraft, PlanReviewStatus, PlanDraftAnnotation, AnalysisReport } from './types.js';
 import type { Adjustment, AdjustmentCategory, AdjustmentStatus, GoalProgress, ConfigProposal, ProposalStatus, PromptVersion, PromptName, PromptPatch, PromptMetrics, PromptVersionStatus } from '../evolution/types.js';
 import { closeDb, getDb } from '../db.js';
 import { log } from '../utils/logger.js';
@@ -125,6 +125,33 @@ CREATE TABLE IF NOT EXISTS prompt_versions (
 );
 CREATE INDEX IF NOT EXISTS idx_prompt_versions_active
   ON prompt_versions (project_path, prompt_name) WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS plan_drafts (
+  id SERIAL PRIMARY KEY,
+  project_path TEXT NOT NULL,
+  plan JSONB NOT NULL,
+  analysis_summary TEXT NOT NULL DEFAULT '',
+  reasoning TEXT NOT NULL DEFAULT '',
+  markdown TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'draft',
+  annotations JSONB DEFAULT '[]',
+  scan_id INTEGER REFERENCES scan_results(id),
+  cost_usd NUMERIC(10,4) DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  reviewed_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS analysis_reports (
+  id SERIAL PRIMARY KEY,
+  project_path TEXT NOT NULL,
+  module_path TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  markdown TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  modules JSONB DEFAULT '[]',
+  cost_usd NUMERIC(10,4) DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 `;
 
 type TaskUpdateInput = Partial<Pick<Task, 'phase' | 'status' | 'plan' | 'subtasks' | 'review_results' | 'iteration' | 'total_cost_usd' | 'git_branch' | 'start_commit'>>;
@@ -688,6 +715,106 @@ export class TaskStore {
       WHERE t.project_path = ${projectPath}
       ORDER BY re.created_at DESC
       LIMIT ${limit}
+    `;
+  }
+
+  // --- Plan Drafts ---
+
+  async savePlanDraft(draft: {
+    project_path: string;
+    plan: unknown;
+    analysis_summary: string;
+    reasoning: string;
+    markdown: string;
+    scan_id?: number | null;
+    cost_usd?: number;
+  }): Promise<PlanDraft> {
+    const sql = this.getSql();
+    const [row] = await sql<PlanDraft[]>`
+      INSERT INTO plan_drafts (project_path, plan, analysis_summary, reasoning, markdown, scan_id, cost_usd)
+      VALUES (${draft.project_path}, ${sql.json(draft.plan as any)}, ${draft.analysis_summary},
+              ${draft.reasoning}, ${draft.markdown}, ${draft.scan_id ?? null}, ${draft.cost_usd ?? 0})
+      RETURNING *
+    `;
+    return row;
+  }
+
+  async getPlanDraft(id: number): Promise<PlanDraft | null> {
+    const sql = this.getSql();
+    const [row] = await sql<PlanDraft[]>`
+      SELECT * FROM plan_drafts WHERE id = ${id}
+    `;
+    return row ?? null;
+  }
+
+  async listPlanDrafts(projectPath: string, status?: PlanReviewStatus): Promise<PlanDraft[]> {
+    const sql = this.getSql();
+    if (status) {
+      return sql<PlanDraft[]>`
+        SELECT * FROM plan_drafts
+        WHERE project_path = ${projectPath} AND status = ${status}
+        ORDER BY created_at DESC
+      `;
+    }
+    return sql<PlanDraft[]>`
+      SELECT * FROM plan_drafts
+      WHERE project_path = ${projectPath}
+      ORDER BY created_at DESC
+    `;
+  }
+
+  async updatePlanDraftStatus(id: number, status: PlanReviewStatus, annotations?: PlanDraftAnnotation[]): Promise<void> {
+    const sql = this.getSql();
+    if (annotations) {
+      await sql`
+        UPDATE plan_drafts
+        SET status = ${status}, annotations = ${sql.json(annotations as any)}, reviewed_at = NOW()
+        WHERE id = ${id}
+      `;
+    } else {
+      await sql`
+        UPDATE plan_drafts
+        SET status = ${status}, reviewed_at = NOW()
+        WHERE id = ${id}
+      `;
+    }
+  }
+
+  // --- Analysis Reports ---
+
+  async saveAnalysisReport(report: {
+    project_path: string;
+    module_path: string;
+    title: string;
+    markdown: string;
+    summary: string;
+    modules: unknown[];
+    cost_usd?: number;
+  }): Promise<AnalysisReport> {
+    const sql = this.getSql();
+    const [row] = await sql<AnalysisReport[]>`
+      INSERT INTO analysis_reports (project_path, module_path, title, markdown, summary, modules, cost_usd)
+      VALUES (${report.project_path}, ${report.module_path}, ${report.title},
+              ${report.markdown}, ${report.summary}, ${sql.json(report.modules as any)}, ${report.cost_usd ?? 0})
+      RETURNING *
+    `;
+    return row;
+  }
+
+  async getAnalysisReport(id: number): Promise<AnalysisReport | null> {
+    const sql = this.getSql();
+    const [row] = await sql<AnalysisReport[]>`
+      SELECT * FROM analysis_reports WHERE id = ${id}
+    `;
+    return row ?? null;
+  }
+
+  async listAnalysisReports(projectPath: string): Promise<AnalysisReport[]> {
+    const sql = this.getSql();
+    return sql<AnalysisReport[]>`
+      SELECT * FROM analysis_reports
+      WHERE project_path = ${projectPath}
+      ORDER BY created_at DESC
     `;
   }
 

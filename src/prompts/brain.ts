@@ -143,6 +143,134 @@ Output as JSON:
 }`;
 }
 
+export interface PlanRequest {
+  description: string;
+  goals?: string[];
+  constraints?: string[];
+  targetModules?: string[];
+}
+
+export function researchPrompt(projectPath: string, request: PlanRequest, memories: string, mcpGuidance: string = ''): string {
+  const goalsSection = request.goals?.length
+    ? `\nGoals:\n${request.goals.map(g => `- ${g}`).join('\n')}`
+    : '';
+  const constraintsSection = request.constraints?.length
+    ? `\nConstraints:\n${request.constraints.map(c => `- ${c}`).join('\n')}`
+    : '';
+  const modulesSection = request.targetModules?.length
+    ? `\nTarget modules to focus on:\n${request.targetModules.map(m => `- ${m}`).join('\n')}`
+    : '';
+
+  return `You are conducting deep research on the project at ${projectPath} to prepare for implementing the following requirement:
+
+## Requirement
+${request.description}
+${goalsSection}${constraintsSection}${modulesSection}
+
+## Relevant memories
+${memories || 'None'}
+${mcpGuidance}
+
+## Research Tasks
+Perform a thorough analysis:
+1. Read and understand the relevant source files, especially those in target modules
+2. Map out the current architecture and how the requirement relates to existing code
+3. Identify dependencies, interfaces, and potential breaking changes
+4. Check for existing patterns, utilities, and conventions in the codebase
+5. Evaluate testing strategy and existing test coverage in relevant areas
+6. Identify risks, edge cases, and potential blockers
+
+## Output
+Write a detailed research report in Markdown covering:
+- **Current State**: How the relevant code works today
+- **Impact Analysis**: What files/modules will be affected
+- **Dependencies**: Internal and external dependencies to consider
+- **Risks**: Potential issues and edge cases
+- **Recommendations**: Suggested approach and alternatives`;
+}
+
+export function planWithMarkdownPrompt(researchReport: string, request: PlanRequest, existingTasks: string): string {
+  const goalsSection = request.goals?.length
+    ? `\nGoals:\n${request.goals.map(g => `- ${g}`).join('\n')}`
+    : '';
+
+  return `Based on the following research report, create a detailed implementation plan.
+
+## Requirement
+${request.description}
+${goalsSection}
+
+## Research Report
+${researchReport}
+
+## Existing Tasks (avoid duplicates)
+${existingTasks || 'None'}
+
+Create both a structured JSON plan AND a human-readable Markdown version.
+
+The Markdown plan should include:
+- Overview and goals
+- Step-by-step implementation tasks with clear descriptions
+- Each task marked with estimated complexity and suggested executor
+- Dependencies between tasks
+- Testing strategy
+- Rollback plan
+
+Output as JSON:
+{
+  "tasks": [{
+    "id": string,
+    "description": string,
+    "type": "bugfix"|"security"|"quality"|"refactor"|"simplify"|"feature"|"test"|"docs",
+    "priority": number (0-3),
+    "executor": "claude"|"codex",
+    "subtasks": [{ "id": string, "description": string, "executor": "claude"|"codex" }],
+    "dependsOn": [task_id],
+    "estimatedComplexity": "low"|"medium"|"high"
+  }],
+  "reasoning": string,
+  "markdown": string (the human-readable Markdown plan)
+}`;
+}
+
+export function analysisPrompt(projectPath: string, modulePath: string, memories: string, mcpGuidance: string = ''): string {
+  const isProject = modulePath === '.' || modulePath === '';
+  const target = isProject ? 'the entire project' : `the module at ${modulePath}`;
+
+  return `Perform a deep architectural analysis of ${target} in the project at ${projectPath}.
+
+## Relevant memories
+${memories || 'None'}
+${mcpGuidance}
+
+## Analysis Tasks
+1. Map out all modules/classes/functions in the target area
+2. Trace dependency relationships (who imports what)
+3. Identify the public API surface and internal implementation details
+4. Evaluate code complexity and identify hotspots
+5. Check for design patterns used and their appropriateness
+6. Assess test coverage and quality
+7. Identify potential improvements and technical debt
+
+## Output
+Output as JSON:
+{
+  "title": string (descriptive title for this analysis),
+  "summary": string (executive summary, 2-3 paragraphs),
+  "markdown": string (detailed Markdown report with sections for architecture, dependencies, complexity, recommendations),
+  "modules": [{
+    "name": string,
+    "path": string,
+    "type": "class"|"function"|"module"|"file",
+    "dependencies": [string] (paths this module imports from),
+    "dependents": [string] (paths that import this module),
+    "description": string,
+    "lines": number,
+    "complexity": "low"|"medium"|"high"
+  }]
+}`;
+}
+
 export function reflectPrompt(taskDescription: string, result: string, reviewSummary: string, outcome: string = 'success'): string {
   const outcomeGuidance = outcome === 'success'
     ? `Focus on:

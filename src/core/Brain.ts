@@ -7,7 +7,9 @@ import type { ProjectAnalysis, TaskPlan, ReflectionResult } from './types.js';
 import type { QuestionHandler } from '../bridges/MessageHandler.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PromptRegistry } from '../prompts/PromptRegistry.js';
-import { BRAIN_SYSTEM_PROMPT, scanPrompt, planPrompt, reflectPrompt, brainMcpGuidance } from '../prompts/brain.js';
+import { BRAIN_SYSTEM_PROMPT, scanPrompt, planPrompt, reflectPrompt, brainMcpGuidance, researchPrompt, planWithMarkdownPrompt, analysisPrompt } from '../prompts/brain.js';
+import type { PlanRequest } from '../prompts/brain.js';
+import type { PlanDraft, AnalysisReport, ModuleInfo } from '../memory/types.js';
 import { buildAgentGuidance } from '../prompts/agents.js';
 import { getHeadCommit, getRecentLog, getChangedFilesSince } from '../utils/git.js';
 import { log } from '../utils/logger.js';
@@ -204,6 +206,115 @@ export class Brain implements QuestionHandler {
     );
 
     return { reflection, cost: r.cost_usd };
+  }
+
+  async research(
+    projectPath: string,
+    request: PlanRequest,
+  ): Promise<{ report: string; cost: number }> {
+    log.info(`Researching: ${request.description.slice(0, 80)}...`);
+
+    const memories = await this.globalMemory.getRelevant(request.description);
+    const projectMems = await this.projectMemory.search(request.description, 5);
+    const allMemories = memories + '\n' + projectMems.map(m => m.text).join('\n');
+    const mcpGuidance = brainMcpGuidance(this.claude.getMcpServerNames('scan'));
+
+    const basePrompt = researchPrompt(projectPath, request, allMemories, mcpGuidance);
+    const prompt = this.promptRegistry ? await this.promptRegistry.resolve('research', basePrompt) : basePrompt;
+    const systemPrompt = this.promptRegistry
+      ? await this.promptRegistry.resolve('brain_system', BRAIN_SYSTEM_PROMPT)
+      : BRAIN_SYSTEM_PROMPT;
+
+    const result = await this.claude.plan(prompt, projectPath, {
+      systemPrompt,
+      maxTurns: 30,
+    });
+
+    log.info('Research complete');
+    return { report: result.output, cost: result.cost_usd };
+  }
+
+  async createPlanWithMarkdown(
+    projectPath: string,
+    researchReport: string,
+    request: PlanRequest,
+  ): Promise<{ plan: TaskPlan; markdown: string; reasoning: string; cost: number }> {
+    log.info('Generating plan with markdown...');
+
+    const [queued, done, blocked, failed] = await Promise.all([
+      this.taskStore.listTasks(projectPath, 'queued'),
+      this.taskStore.listTasks(projectPath, 'done'),
+      this.taskStore.listTasks(projectPath, 'blocked'),
+      this.taskStore.listTasks(projectPath, 'failed'),
+    ]);
+    const allTasks = [
+      ...queued.map(t => `- [P${t.priority}] [queued] ${t.task_description}`),
+      ...done.map(t => `- [P${t.priority}] [done] ${t.task_description}`),
+      ...blocked.map(t => `- [P${t.priority}] [blocked] ${t.task_description}`),
+      ...failed.map(t => `- [P${t.priority}] [failed] ${t.task_description}`),
+    ].join('\n');
+
+    const basePrompt = planWithMarkdownPrompt(researchReport, request, allTasks);
+    const prompt = this.promptRegistry ? await this.promptRegistry.resolve('plan_markdown', basePrompt) : basePrompt;
+    const systemPrompt = this.promptRegistry
+      ? await this.promptRegistry.resolve('brain_system', BRAIN_SYSTEM_PROMPT)
+      : BRAIN_SYSTEM_PROMPT;
+
+    const result = await this.claude.plan(prompt, projectPath, { systemPrompt });
+    const parsed = parsePlan(result.output);
+
+    // Extract markdown from parsed result if present
+    const rawParsed = extractJsonFromText(
+      result.output,
+      (value) => isRecord(value) && Object.prototype.hasOwnProperty.call(value, 'tasks'),
+    );
+    const markdown = isRecord(rawParsed) && typeof rawParsed.markdown === 'string'
+      ? rawParsed.markdown
+      : result.output;
+
+    log.info(`Plan generated: ${parsed.tasks.length} tasks`);
+    return { plan: parsed, markdown, reasoning: parsed.reasoning, cost: result.cost_usd };
+  }
+
+  async analyzeModule(
+    projectPath: string,
+    modulePath: string,
+  ): Promise<{ report: AnalysisReport; cost: number }> {
+    log.info(`Analyzing module: ${modulePath || '(project)'}`);
+
+    const memories = await this.globalMemory.getRelevant('architecture code analysis');
+    const projectMems = await this.projectMemory.search('architecture structure', 5);
+    const allMemories = memories + '\n' + projectMems.map(m => m.text).join('\n');
+    const mcpGuidance = brainMcpGuidance(this.claude.getMcpServerNames('scan'));
+
+    const basePrompt = analysisPrompt(projectPath, modulePath, allMemories, mcpGuidance);
+    const prompt = this.promptRegistry ? await this.promptRegistry.resolve('analysis', basePrompt) : basePrompt;
+    const systemPrompt = this.promptRegistry
+      ? await this.promptRegistry.resolve('brain_system', BRAIN_SYSTEM_PROMPT)
+      : BRAIN_SYSTEM_PROMPT;
+
+    const result = await this.claude.plan(prompt, projectPath, {
+      systemPrompt,
+      maxTurns: 30,
+    });
+
+    const parsed = extractJsonFromText(
+      result.output,
+      (value) => isRecord(value) && Object.prototype.hasOwnProperty.call(value, 'modules'),
+    );
+
+    const report: Omit<AnalysisReport, 'id' | 'created_at'> = {
+      project_path: projectPath,
+      module_path: modulePath || '.',
+      title: isRecord(parsed) && typeof parsed.title === 'string' ? parsed.title : `Analysis: ${modulePath || 'Project'}`,
+      markdown: isRecord(parsed) && typeof parsed.markdown === 'string' ? parsed.markdown : result.output,
+      summary: isRecord(parsed) && typeof parsed.summary === 'string' ? parsed.summary : result.output.slice(0, 500),
+      modules: isRecord(parsed) && Array.isArray(parsed.modules) ? parsed.modules as ModuleInfo[] : [],
+      cost_usd: result.cost_usd,
+    };
+
+    log.info(`Analysis complete: ${report.modules.length} modules found`);
+    return { report: report as AnalysisReport, cost: result.cost_usd };
   }
 
   /** Auto-answer AskUserQuestion from subprocesses (skills, plugins) */

@@ -106,6 +106,9 @@ export function validatePatchedPrompt(patchedPrompt: string, promptName: string)
     reviewer: ['"passed"', '"issues"', '"summary"'],
     executor: [],       // no JSON output format
     brain_system: [],   // no JSON output format
+    research: [],       // free-form markdown output
+    plan_markdown: ['"tasks"', '"reasoning"', '"markdown"'],
+    analysis: ['"title"', '"modules"', '"markdown"'],
   };
 
   const markers = markersByPrompt[promptName] ?? [];
