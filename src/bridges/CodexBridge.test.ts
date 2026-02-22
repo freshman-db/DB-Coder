@@ -28,6 +28,16 @@ class FakeChildProcess extends EventEmitter {
   }
 }
 
+class FakeChildProcessWithKillSpy extends FakeChildProcess {
+  readonly killSignals: Array<NodeJS.Signals | number | undefined> = [];
+
+  override kill(signal?: NodeJS.Signals | number): boolean {
+    this.killSignals.push(signal);
+    this.emit('close', null);
+    return true;
+  }
+}
+
 function createCodexConfig(): CodexConfig {
   return {
     model: 'gpt-5-codex',
@@ -61,14 +71,18 @@ async function withMockedSpawn(
   }
 }
 
+function getOutputFilePath(args: string[]): string {
+  const outputArgIndex = args.indexOf('-o');
+  assert.ok(outputArgIndex >= 0);
+  const outFile = args[outputArgIndex + 1];
+  assert.ok(outFile);
+  return outFile;
+}
+
 test('execute runs codex with expected args and parses JSON output', async () => {
   await withMockedSpawn((call) => {
     const child = new FakeChildProcess();
-    const outputArgIndex = call.args.indexOf('-o');
-    assert.ok(outputArgIndex >= 0);
-
-    const outFile = call.args[outputArgIndex + 1];
-    assert.ok(outFile);
+    const outFile = getOutputFilePath(call.args);
 
     setImmediate(() => {
       writeFileSync(outFile, JSON.stringify({ output: 'Implemented feature' }));
@@ -103,5 +117,89 @@ test('execute runs codex with expected args and parses JSON output', async () =>
     assert.equal(result.cost_usd, 0.42);
     assert.deepEqual(result.structured, { output: 'Implemented feature' });
     assert.ok(result.duration_ms >= 0);
+  });
+});
+
+test('execute returns failure result when codex exits with non-zero code', async () => {
+  await withMockedSpawn(() => {
+    const child = new FakeChildProcess();
+
+    setImmediate(() => {
+      child.stderr.write('invalid codex args');
+      child.stderr.end();
+      child.stdout.write(`${JSON.stringify({ type: 'turn.completed', total_cost_usd: 0.13 })}\n`);
+      child.stdout.end();
+      child.emit('close', 2);
+    });
+
+    return child as unknown as ChildProcess;
+  }, async () => {
+    const bridge = new CodexBridge(createCodexConfig());
+    const result = await bridge.execute('Implement endpoint', process.cwd());
+
+    assert.equal(result.success, false);
+    assert.equal(result.output, 'invalid codex args');
+    assert.equal(result.cost_usd, 0.13);
+    assert.ok(result.duration_ms >= 0);
+  });
+});
+
+test('execute catches child process errors and returns graceful failure result', async () => {
+  await withMockedSpawn(() => {
+    const child = new FakeChildProcess();
+
+    setImmediate(() => {
+      child.emit('error', new Error('spawn failed'));
+    });
+
+    return child as unknown as ChildProcess;
+  }, async () => {
+    const bridge = new CodexBridge(createCodexConfig());
+    const result = await bridge.execute('Implement endpoint', process.cwd());
+
+    assert.equal(result.success, false);
+    assert.match(result.output, /spawn failed/);
+    assert.equal(result.cost_usd, 0);
+    assert.ok(result.duration_ms >= 0);
+  });
+});
+
+test('execute returns raw output when output file is not valid JSON', async () => {
+  await withMockedSpawn((call) => {
+    const child = new FakeChildProcess();
+    const outFile = getOutputFilePath(call.args);
+
+    setImmediate(() => {
+      writeFileSync(outFile, 'not-json output from codex');
+      child.stdout.write('this line is not jsonl\n');
+      child.stdout.end();
+      child.emit('close', 0);
+    });
+
+    return child as unknown as ChildProcess;
+  }, async () => {
+    const bridge = new CodexBridge(createCodexConfig());
+    const result = await bridge.execute('Implement endpoint', process.cwd());
+
+    assert.equal(result.success, true);
+    assert.equal(result.output, 'not-json output from codex');
+    assert.equal(result.structured, undefined);
+    assert.equal(result.cost_usd, 0);
+  });
+});
+
+test('execute kills codex process on timeout', async () => {
+  const child = new FakeChildProcessWithKillSpy();
+
+  await withMockedSpawn(() => child as unknown as ChildProcess, async () => {
+    const bridge = new CodexBridge(createCodexConfig());
+    const result = await bridge.execute('Implement endpoint', process.cwd(), {
+      timeout: 25,
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(result.output, 'codex exec failed with exit code -1');
+    assert.equal(child.killSignals.length, 1);
+    assert.equal(child.killSignals[0], 'SIGTERM');
   });
 });
