@@ -186,6 +186,47 @@ test('String() coercion handles UUID', () => {
   assert.equal(escapeHtml(String(uuid)), uuid);
 });
 
+// ─── Static analysis: renderMarkdown sanitizes marked output with DOMPurify ───
+
+test('renderMarkdown requires DOMPurify before rendering marked HTML', () => {
+  const fn = extractFunction(appSource, 'renderMarkdown');
+  assert.ok(fn, 'renderMarkdown should exist in app.js');
+  assert.ok(
+    fn.includes("typeof DOMPurify !== 'undefined'"),
+    'renderMarkdown should check for DOMPurify availability',
+  );
+});
+
+test('renderMarkdown wraps marked.parse with DOMPurify.sanitize', () => {
+  const fn = extractFunction(appSource, 'renderMarkdown');
+  assert.ok(fn);
+  assert.ok(
+    fn.includes('DOMPurify.sanitize(marked.parse('),
+    'marked.parse() output must be wrapped in DOMPurify.sanitize()',
+  );
+});
+
+test('renderMarkdown falls back to escapeHtml when DOMPurify is unavailable', () => {
+  const fn = extractFunction(appSource, 'renderMarkdown');
+  assert.ok(fn);
+  // The fallback path should use escapeHtml (safe plain text rendering)
+  assert.ok(
+    fn.includes('escapeHtml(text)'),
+    'renderMarkdown should fall back to escapeHtml for plain text',
+  );
+});
+
+test('no direct marked.parse() calls outside renderMarkdown', () => {
+  // Remove the renderMarkdown function body from source, then check no marked.parse remains
+  const fn = extractFunction(appSource, 'renderMarkdown');
+  assert.ok(fn);
+  const sourceWithout = appSource.replace(fn, '/* renderMarkdown removed */');
+  assert.ok(
+    !sourceWithout.includes('marked.parse('),
+    'marked.parse() should only be called inside renderMarkdown, not elsewhere',
+  );
+});
+
 // ─── Helper to extract a function body by name from source ───
 
 function extractFunction(source: string, name: string): string | null {
