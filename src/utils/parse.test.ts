@@ -3,8 +3,18 @@ import test from 'node:test';
 
 import { extractJsonFromText, tryParseReview } from './parse.js';
 
-test('extractJsonFromText returns the first valid balanced JSON object', () => {
-  const input = 'note {not-json} and {"status":"ok","meta":{"count":2}} tail';
+test('extractJsonFromText parses clean JSON', () => {
+  const input = '{"status":"ok","count":2}';
+  const parsed = extractJsonFromText(input) as Record<string, unknown> | null;
+
+  assert.deepEqual(parsed, {
+    status: 'ok',
+    count: 2,
+  });
+});
+
+test('extractJsonFromText parses JSON with surrounding text', () => {
+  const input = 'prefix text {"status":"ok","meta":{"count":2}} suffix text';
   const parsed = extractJsonFromText(input) as Record<string, unknown> | null;
 
   assert.deepEqual(parsed, {
@@ -13,27 +23,29 @@ test('extractJsonFromText returns the first valid balanced JSON object', () => {
   });
 });
 
-test('extractJsonFromText handles braces inside JSON strings', () => {
-  const input = 'prefix {"message":"hello {world}","items":[1,2,3]} suffix';
+test('extractJsonFromText handles nested braces in objects and strings', () => {
+  const input = 'prefix {"outer":{"inner":{"value":1}},"message":"hello {world}"} suffix';
   const parsed = extractJsonFromText(input) as Record<string, unknown> | null;
 
   assert.deepEqual(parsed, {
+    outer: { inner: { value: 1 } },
     message: 'hello {world}',
-    items: [1, 2, 3],
   });
 });
 
-test('extractJsonFromText returns null for empty or non-string input', () => {
-  assert.equal(extractJsonFromText(''), null);
-  assert.equal(extractJsonFromText(undefined as unknown as string), null);
-});
-
-test('extractJsonFromText can match a later JSON object', () => {
+test('extractJsonFromText handles multiple JSON objects and matcher selection', () => {
   const input = [
     'metadata: {"requestId":"123"}',
     'payload:',
-    '{"projectHealth":87,"issues":[],"opportunities":[],"summary":"ok"}',
+    '{"projectHealth":87,"issues":[],"opportunities":[],"summary":"ok","nested":{"key":"value"}}',
   ].join('\n');
+
+  const first = extractJsonFromText(input) as Record<string, unknown> | null;
+
+  assert.deepEqual(first, {
+    requestId: '123',
+  });
+
   const parsed = extractJsonFromText(
     input,
     (value) => Boolean(value && typeof value === 'object' && !Array.isArray(value) && 'projectHealth' in value),
@@ -44,7 +56,24 @@ test('extractJsonFromText can match a later JSON object', () => {
     issues: [],
     opportunities: [],
     summary: 'ok',
+    nested: { key: 'value' },
   });
+});
+
+test('extractJsonFromText skips malformed JSON and falls back to later valid JSON', () => {
+  const input = 'note {"broken": } and {"status":"recovered","ok":true}';
+  const parsed = extractJsonFromText(input) as Record<string, unknown> | null;
+
+  assert.deepEqual(parsed, {
+    status: 'recovered',
+    ok: true,
+  });
+});
+
+test('extractJsonFromText returns null for empty, malformed, or non-string input', () => {
+  assert.equal(extractJsonFromText(''), null);
+  assert.equal(extractJsonFromText('note {"broken": } only'), null);
+  assert.equal(extractJsonFromText(undefined as unknown as string), null);
 });
 
 test('tryParseReview finds the review JSON object even when earlier JSON exists', () => {
