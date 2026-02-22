@@ -238,6 +238,33 @@ function renderPage(page, param) {
 }
 
 // ---- 仪表盘 ----
+function getPatrolStateDesc(patrolling, loopState, currentTaskId, scanInterval) {
+  if (!patrolling) {
+    return { title: '已停止', color: '', detail: '点击"开始巡逻"启动自动循环' };
+  }
+  const intervalMin = Math.round(scanInterval / 60);
+  const intervalStr = intervalMin >= 1 ? `${intervalMin}分钟` : `${scanInterval}秒`;
+  switch (loopState) {
+    case 'scanning':
+      return { title: '扫描中', color: 'blue', detail: '正在检测代码变更...' };
+    case 'planning':
+      return { title: '规划中', color: 'blue', detail: '正在分析问题并生成任务...' };
+    case 'executing':
+      return { title: '执行中', color: 'blue', detail: `正在执行任务 #${currentTaskId || ''}` };
+    case 'reviewing':
+      return { title: '审查中', color: 'orange', detail: 'Claude + Codex 双重代码审查' };
+    case 'reflecting':
+      return { title: '反思中', color: 'orange', detail: '总结经验，提取改进建议' };
+    case 'paused':
+      return { title: '已暂停', color: 'orange', detail: '巡逻暂停中' };
+    case 'error':
+      return { title: '出错', color: 'red', detail: '30秒后自动重试' };
+    case 'idle':
+    default:
+      return { title: '等待中', color: '', detail: `无变更，每 ${intervalStr} 扫描一次` };
+  }
+}
+
 async function renderDashboard() {
   const [status, cost, evoSummary] = await Promise.all([
     api('/status'), api('/cost'), api('/evolution/summary').catch(() => null),
@@ -260,6 +287,9 @@ async function renderDashboard() {
   state.paused = !!st.paused;
   updatePatrolBtn(patrolling);
 
+  const scanInterval = st.scanInterval || 300;
+  const patrolStateDesc = getPatrolStateDesc(patrolling, st.state, st.currentTaskId, scanInterval);
+
   const patrolBtn = patrolling
     ? `<button class="btn btn-sm btn-warning" onclick="stopPatrol()">停止巡逻</button>`
     : `<button class="btn btn-sm btn-primary" onclick="startPatrol()">开始巡逻</button>`;
@@ -268,8 +298,8 @@ async function renderDashboard() {
     <div class="cards-grid">
       <div class="card">
         <div class="card-label">巡逻状态</div>
-        <div class="card-value ${patrolling ? 'blue' : ''}">${patrolling ? '运行中' : '已停止'}</div>
-        <div class="card-sub">${patrolling ? st.state || '自动扫描与执行' : '等待指令'}</div>
+        <div class="card-value ${patrolStateDesc.color}">${patrolStateDesc.title}</div>
+        <div class="card-sub">${patrolStateDesc.detail}</div>
       </div>
       <div class="card">
         <div class="card-label">当前任务</div>

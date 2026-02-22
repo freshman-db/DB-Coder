@@ -83,7 +83,8 @@ route('GET', '/api/status', async (_req, res, ctx) => {
   const paused = ctx.loop.isPaused();
   const patrolling = ctx.loop.isRunning();
   const daily = await ctx.costTracker.getDailySummary();
-  json(res, { state, currentTaskId: taskId, paused, patrolling, dailyCosts: daily });
+  const scanInterval = ctx.config.values.brain.scanInterval;
+  json(res, { state, currentTaskId: taskId, paused, patrolling, scanInterval, dailyCosts: daily });
 });
 
 // --- Tasks ---
