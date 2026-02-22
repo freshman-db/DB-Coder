@@ -14,7 +14,7 @@ import type { Brain } from './Brain.js';
 import type { TaskQueue } from './TaskQueue.js';
 import type { PromptRegistry } from '../prompts/PromptRegistry.js';
 import { MainLoop, extractIssueCategories } from './MainLoop.js';
-import type { StatusSnapshot } from './types.js';
+import type { EvaluationResult, StatusSnapshot } from './types.js';
 import type { ReviewIssue } from '../bridges/CodingAgent.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import { runProcess } from '../utils/process.js';
@@ -64,6 +64,10 @@ type MainLoopExecutionInternals = {
     reviewRetries?: number;
   }>;
   reflectOnTask(...args: unknown[]): Promise<void>;
+};
+
+type MainLoopEvaluationInternals = {
+  evaluateTaskValue(task: Task, projectPath: string): Promise<EvaluationResult>;
 };
 
 type CycleConfigOverrides = {
@@ -301,6 +305,10 @@ function getMainLoopInternals(loop: MainLoop): MainLoopInternals {
 
 function getMainLoopExecutionInternals(loop: MainLoop): MainLoopExecutionInternals {
   return Object.getPrototypeOf(loop) as MainLoopExecutionInternals;
+}
+
+function getMainLoopEvaluationInternals(loop: MainLoop): MainLoopEvaluationInternals {
+  return loop as unknown as MainLoopEvaluationInternals;
 }
 
 type PromptDeltaInternals = {
@@ -1201,6 +1209,166 @@ describe('MainLoop runCycle integration', () => {
     assert.equal(evaluationEvents[0]?.task_id, 'task-rejected-1');
     assert.equal(evaluationEvents[0]?.passed, false);
     assert.equal(evaluationEvents[0]?.score.total, -2);
+  });
+
+  test('evaluation boundary total=0 rejects task — task marked pending_review, executeTask not called', async () => {
+    let getQueuedCalls = 0;
+    let getNextCalls = 0;
+    let executeTaskCalls = 0;
+    const updateTaskCalls: Array<{ taskId: string; patch: unknown }> = [];
+    const evaluationEvents: Array<{ task_id: string; passed: boolean; score: { total: number } }> = [];
+
+    const now = new Date();
+    const mockTask: Task = {
+      id: 'task-boundary-0',
+      project_path: '/tmp/db-coder-main-loop-test',
+      task_description: 'Task with neutral value should be reviewed',
+      phase: 'init',
+      priority: 2,
+      plan: null,
+      subtasks: [{ id: 'S1', description: 'Should not execute at total=0', executor: 'codex', status: 'pending' }],
+      review_results: [],
+      iteration: 0,
+      total_cost_usd: 0,
+      git_branch: null,
+      start_commit: null,
+      depends_on: [],
+      status: 'queued',
+      created_at: now,
+      updated_at: now,
+    };
+
+    const { loop } = createMainLoopForCycle({
+      brain: {
+        hasChanges: async () => false,
+      },
+      taskQueue: {
+        getQueued: async (projectPath: string) => {
+          getQueuedCalls++;
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return [mockTask];
+        },
+        getNext: async (projectPath: string) => {
+          getNextCalls++;
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return getNextCalls === 1 ? mockTask : null;
+        },
+      },
+      claude: {
+        plan: async () => ({
+          success: true,
+          output: JSON.stringify({
+            problemLegitimacy: 0,
+            solutionProportionality: 0,
+            expectedComplexity: 0,
+            historicalSuccess: 0,
+            reasoning: 'Boundary total should fail',
+          }),
+          cost_usd: 0,
+          duration_ms: 0,
+        }),
+      },
+      taskStore: {
+        updateTask: async (taskId: string, patch: unknown) => {
+          updateTaskCalls.push({ taskId, patch });
+        },
+        saveEvaluationEvent: async (event: unknown) => {
+          evaluationEvents.push(event as { task_id: string; passed: boolean; score: { total: number } });
+        },
+      },
+    });
+
+    const internals = getMainLoopInternals(loop);
+    const loopWithExecuteTask = loop as unknown as { executeTask(task: Task): Promise<void> };
+    const originalExecuteTask = loopWithExecuteTask.executeTask;
+    loopWithExecuteTask.executeTask = async () => {
+      executeTaskCalls++;
+    };
+
+    try {
+      internals.setRunning(true);
+      await loop.runCycle();
+    } finally {
+      internals.setRunning(false);
+      loopWithExecuteTask.executeTask = originalExecuteTask;
+    }
+
+    assert.equal(getQueuedCalls, 1);
+    assert.equal(getNextCalls, 2);
+    assert.equal(executeTaskCalls, 0);
+    assert.deepEqual(updateTaskCalls, [{
+      taskId: 'task-boundary-0',
+      patch: {
+        status: 'pending_review',
+        evaluation_score: {
+          problemLegitimacy: 0,
+          solutionProportionality: 0,
+          expectedComplexity: 0,
+          historicalSuccess: 0,
+          total: 0,
+        },
+        evaluation_reasoning: 'Boundary total should fail',
+      },
+    }]);
+    assert.equal(evaluationEvents.length, 1);
+    assert.equal(evaluationEvents[0]?.task_id, 'task-boundary-0');
+    assert.equal(evaluationEvents[0]?.passed, false);
+    assert.equal(evaluationEvents[0]?.score.total, 0);
+  });
+
+  test('evaluateTaskValue fail-open on claude.plan error and passes internal MCP server', async () => {
+    const now = new Date();
+    const mockTask: Task = {
+      id: 'task-eval-error-1',
+      project_path: '/tmp/db-coder-main-loop-test',
+      task_description: 'Evaluation should fail open on bridge error',
+      phase: 'init',
+      priority: 1,
+      plan: null,
+      subtasks: [{ id: 'S1', description: 'Subtask for evaluation context', executor: 'codex', status: 'pending' }],
+      review_results: [],
+      iteration: 0,
+      total_cost_usd: 0,
+      git_branch: null,
+      start_commit: null,
+      depends_on: [],
+      status: 'queued',
+      created_at: now,
+      updated_at: now,
+    };
+
+    let planCalls = 0;
+    let internalMcpServers: Record<string, unknown> | undefined;
+
+    const { loop } = createMainLoopForCycle({
+      claude: {
+        plan: async (_prompt: string, projectPath: string, options?: { internalMcpServers?: Record<string, unknown> }) => {
+          planCalls++;
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          internalMcpServers = options?.internalMcpServers;
+          throw new Error('claude plan exploded');
+        },
+      },
+    });
+
+    const evaluationInternals = getMainLoopEvaluationInternals(loop);
+    const result = await evaluationInternals.evaluateTaskValue(mockTask, '/tmp/db-coder-main-loop-test');
+
+    assert.equal(planCalls, 1);
+    assert.equal(result.passed, true);
+    assert.equal(result.score.problemLegitimacy, 0);
+    assert.equal(result.score.solutionProportionality, 0);
+    assert.equal(result.score.expectedComplexity, 0);
+    assert.equal(result.score.historicalSuccess, 0);
+    assert.equal(result.score.total, 1);
+    assert.equal(result.cost_usd, 0);
+    assert.ok(result.duration_ms >= 0);
+    assert.match(result.reasoning, /Evaluation error: Error: claude plan exploded/);
+    assert.ok(internalMcpServers, 'Expected internal MCP servers to be passed to claude.plan');
+    assert.ok(
+      internalMcpServers && Object.hasOwn(internalMcpServers, 'db-coder-system-data'),
+      'Expected db-coder-system-data internal MCP server',
+    );
   });
 });
 
