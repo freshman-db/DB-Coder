@@ -18,6 +18,8 @@ import type { StatusSnapshot } from './types.js';
 import type { ReviewIssue } from '../bridges/CodingAgent.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import { runProcess } from '../utils/process.js';
+import type { LogEntry } from '../utils/logger.js';
+import { log } from '../utils/logger.js';
 
 /** Helper to build a minimal ReviewIssue for testing */
 function issue(
@@ -597,6 +599,69 @@ describe('MainLoop runCycle integration', () => {
     assert.equal(executeSubtasksCalls, 1);
     assert.equal(runReviewCycleCalls, 1);
     assert.equal(reflectOnTaskCalls, 1);
+  });
+
+  test('scan finds no actionable items — planning skipped', async () => {
+    let createPlanCalls = 0;
+    let enqueueCalls = 0;
+    let getNextCalls = 0;
+    const logs: LogEntry[] = [];
+
+    const { loop } = createMainLoopForCycle({
+      brain: {
+        hasChanges: async (projectPath: string) => {
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return true;
+        },
+        scanProject: async (projectPath: string) => {
+          assert.equal(projectPath, '/tmp/db-coder-main-loop-test');
+          return {
+            analysis: {
+              issues: [],
+              opportunities: [],
+              projectHealth: 95,
+              summary: 'No actionable items found',
+            },
+            cost: 0,
+          };
+        },
+        createPlan: async () => {
+          createPlanCalls++;
+          return { plan: { tasks: [], reasoning: 'Should not run' }, cost: 0 };
+        },
+      },
+      taskQueue: {
+        enqueue: async () => {
+          enqueueCalls++;
+          return [];
+        },
+        getNext: async () => {
+          getNextCalls++;
+          return null;
+        },
+      },
+    });
+
+    const { states, remove } = collectStates(loop);
+    const removeLogListener = log.addListener(entry => {
+      logs.push(entry);
+    });
+
+    try {
+      await loop.runCycle();
+    } finally {
+      removeLogListener();
+      remove();
+    }
+
+    assert.equal(createPlanCalls, 0);
+    assert.equal(enqueueCalls, 0);
+    assert.equal(getNextCalls, 1);
+    assert.deepEqual(states.map(snapshot => snapshot.state), ['scanning', 'idle']);
+    assert.ok(
+      logs.some(entry => entry.level === 'info' && entry.message.includes('no actionable items')),
+      'Expected an info log mentioning no actionable items',
+    );
   });
 
   test('no changes and no queued tasks — returns idle immediately', async () => {
