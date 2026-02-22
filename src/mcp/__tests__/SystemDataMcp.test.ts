@@ -225,6 +225,7 @@ test('createSystemDataMcpServer registers all expected tools', () => {
   const { server } = createServer();
   assert.equal(server.type, 'sdk');
   assert.equal(server.name, 'db-coder-system-data');
+  assert.ok(server.instance);
 
   const runtime = server as SystemDataMcpRuntimeServer;
   const toolNames = Object.keys(runtime.instance._registeredTools).sort();
@@ -571,6 +572,16 @@ test('all SystemData MCP tools return tool errors when dependencies throw', asyn
         },
       },
       expectedError: /get_review_history failed: review event fetch failed/,
+    },
+    {
+      toolName: 'get_review_history',
+      args: {},
+      overrides: {
+        getRecurringIssueCategories: async () => {
+          throw new Error('issue category fetch failed');
+        },
+      },
+      expectedError: /get_review_history failed: issue category fetch failed/,
     },
     {
       toolName: 'get_task_outcomes',
