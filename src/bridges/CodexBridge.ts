@@ -218,22 +218,10 @@ function extractCost(events: JsonlEvent[], pricing?: TokenPricing): number {
     return textCost;
   }
 
-  // 3. Estimate from token usage in turn.completed events
-  if (pricing) {
-    let totalInput = 0, totalCached = 0, totalOutput = 0;
-    for (const e of events) {
-      if (e.type !== 'turn.completed' || typeof e.usage !== 'object' || !e.usage) continue;
-      const u = e.usage as Record<string, unknown>;
-      if (typeof u.input_tokens === 'number') totalInput += u.input_tokens;
-      if (typeof u.cached_input_tokens === 'number') totalCached += u.cached_input_tokens;
-      if (typeof u.output_tokens === 'number') totalOutput += u.output_tokens;
-    }
-    if (totalInput > 0 || totalOutput > 0) {
-      const nonCachedInput = Math.max(0, totalInput - totalCached);
-      return (nonCachedInput * pricing.inputPerMillion
-        + totalCached * pricing.cachedInputPerMillion
-        + totalOutput * pricing.outputPerMillion) / 1_000_000;
-    }
+  // 3. Estimate from token usage in turn.completed events.
+  const estimatedCost = estimateFromTokenUsage(events, pricing);
+  if (estimatedCost !== null) {
+    return estimatedCost;
   }
 
   return 0;
@@ -276,6 +264,28 @@ function extractFromEventText(events: JsonlEvent[]): number | null {
   if (lastTotalCost > 0) return lastTotalCost;
   if (lastPartialCost > 0) return lastPartialCost;
   return null;
+}
+
+function estimateFromTokenUsage(events: JsonlEvent[], pricing?: TokenPricing): number | null {
+  if (!pricing) return null;
+
+  let totalInput = 0;
+  let totalCached = 0;
+  let totalOutput = 0;
+
+  for (const event of events) {
+    if (event.type !== 'turn.completed' || typeof event.usage !== 'object' || event.usage === null) continue;
+    const usage = event.usage as Record<string, unknown>;
+    if (typeof usage.input_tokens === 'number' && Number.isFinite(usage.input_tokens)) totalInput += usage.input_tokens;
+    if (typeof usage.cached_input_tokens === 'number' && Number.isFinite(usage.cached_input_tokens)) totalCached += usage.cached_input_tokens;
+    if (typeof usage.output_tokens === 'number' && Number.isFinite(usage.output_tokens)) totalOutput += usage.output_tokens;
+  }
+
+  if (totalInput <= 0 && totalCached <= 0 && totalOutput <= 0) return null;
+  const nonCachedInput = Math.max(0, totalInput - totalCached);
+  return (nonCachedInput * pricing.inputPerMillion
+    + totalCached * pricing.cachedInputPerMillion
+    + totalOutput * pricing.outputPerMillion) / 1_000_000;
 }
 
 function extractCostFromEventText(event: JsonlEvent): { total: number | null; partial: number | null } {
