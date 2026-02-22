@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { ChatSession } from '../bridges/ClaudeBridge.js';
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { PlanWorkflow } from './PlanWorkflow.js';
 
 type SseListener = (event: string, data: string) => void;
@@ -21,6 +22,10 @@ type PlanWorkflowInternals = {
 
 type PlanWorkflowEmitter = {
   emit: (draftId: number, event: string, data: unknown) => void;
+};
+
+type PlanWorkflowHandler = {
+  handleSDKMessage: (draftId: number, msg: SDKMessage) => Promise<void>;
 };
 
 function getInternals(workflow: PlanWorkflow): PlanWorkflowInternals {
@@ -51,13 +56,17 @@ function createMockSession(options: {
 }
 
 function createWorkflow(overrides: {
-  addChatMessage?: (draftId: number, role: string, content: string) => Promise<unknown>;
+  addChatMessage?: (draftId: number, role: string, content: string, metadata?: unknown) => Promise<unknown>;
+  addDailyCost?: (cost: number) => Promise<void>;
+  updateChatSessionId?: (draftId: number, sessionId: string) => Promise<void>;
   getPlanDraft?: (draftId: number) => Promise<{ project_path: string } | null>;
   updateChatStatus?: (draftId: number, status: string) => Promise<void>;
   createChatSession?: () => ChatSession;
 } = {}): PlanWorkflow {
   const taskStore = {
     addChatMessage: overrides.addChatMessage ?? (async () => ({})),
+    addDailyCost: overrides.addDailyCost ?? (async () => {}),
+    updateChatSessionId: overrides.updateChatSessionId ?? (async () => {}),
     getPlanDraft: overrides.getPlanDraft ?? (async () => ({ project_path: '/tmp/project' })),
     updateChatStatus: overrides.updateChatStatus ?? (async () => {}),
   };
@@ -89,6 +98,45 @@ function createDeferred<T>(): {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+function createStreamEventMessage(text: string): SDKMessage {
+  return {
+    type: 'stream_event',
+    event: {
+      type: 'content_block_delta',
+      delta: {
+        type: 'text_delta',
+        text,
+      },
+    },
+    parent_tool_use_id: null,
+    uuid: 'stream-uuid',
+    session_id: 'stream-session',
+  } as unknown as SDKMessage;
+}
+
+function createResultMessage(data: {
+  result?: string;
+  total_cost_usd?: number;
+  session_id?: string;
+} = {}): SDKMessage {
+  return {
+    type: 'result',
+    subtype: 'success',
+    duration_ms: 1,
+    duration_api_ms: 1,
+    is_error: false,
+    num_turns: 1,
+    result: data.result ?? '',
+    stop_reason: null,
+    total_cost_usd: data.total_cost_usd ?? 0,
+    usage: {},
+    modelUsage: {},
+    permission_denials: [],
+    uuid: 'result-uuid',
+    session_id: data.session_id ?? 'result-session',
+  } as unknown as SDKMessage;
 }
 
 test('closeSession closes active chat session and clears listener map entry', () => {
@@ -295,4 +343,102 @@ test('processUserMessage creates one chat session when concurrent requests targe
   const activeSession = internals.chatSessions.get(21);
   assert.ok(activeSession);
   assert.deepEqual(sessionHistoryBySessionId.get(activeSession.sessionId), ['first', 'second']);
+});
+
+test('handleSDKMessage streams text deltas and emits accumulated assistant text', async () => {
+  const workflow = createWorkflow();
+  const emittedEvents: Array<{ event: string; payload: unknown }> = [];
+
+  workflow.addSSEListener(12, (event, data) => {
+    emittedEvents.push({ event, payload: JSON.parse(data) });
+  });
+
+  const handler = workflow as unknown as PlanWorkflowHandler;
+  await handler.handleSDKMessage(12, createStreamEventMessage('Hello'));
+  await handler.handleSDKMessage(12, createStreamEventMessage(' world'));
+
+  assert.deepEqual(emittedEvents, [
+    { event: 'assistant_text', payload: { text: 'Hello' } },
+    { event: 'assistant_text', payload: { text: 'Hello world' } },
+  ]);
+});
+
+test('handleSDKMessage persists successful result payload and marks ready status', async () => {
+  const addChatMessageCalls: Array<[number, string, string, unknown?]> = [];
+  const addDailyCostCalls: number[] = [];
+  const updateChatStatusCalls: Array<[number, string]> = [];
+  const updateChatSessionIdCalls: Array<[number, string]> = [];
+  const workflow = createWorkflow({
+    addChatMessage: async (draftId, role, content, metadata) => {
+      addChatMessageCalls.push([draftId, role, content, metadata]);
+      return {};
+    },
+    addDailyCost: async (cost) => {
+      addDailyCostCalls.push(cost);
+    },
+    updateChatStatus: async (draftId, status) => {
+      updateChatStatusCalls.push([draftId, status]);
+    },
+    updateChatSessionId: async (draftId, sessionId) => {
+      updateChatSessionIdCalls.push([draftId, sessionId]);
+    },
+  });
+  const internals = getInternals(workflow);
+  internals.chatSessions.set(13, createMockSession({ sessionId: 'session-13' }));
+
+  const emittedEvents: Array<{ event: string; payload: unknown }> = [];
+  workflow.addSSEListener(13, (event, data) => {
+    emittedEvents.push({ event, payload: JSON.parse(data) });
+  });
+
+  const handler = workflow as unknown as PlanWorkflowHandler;
+  await handler.handleSDKMessage(13, createResultMessage({
+    result: 'Prepared scope [READY_TO_PLAN]',
+    total_cost_usd: 1.25,
+  }));
+
+  assert.deepEqual(addChatMessageCalls, [[13, 'assistant', 'Prepared scope [READY_TO_PLAN]', { cost: 1.25 }]]);
+  assert.deepEqual(addDailyCostCalls, [1.25]);
+  assert.deepEqual(updateChatSessionIdCalls, [[13, 'session-13']]);
+  assert.deepEqual(updateChatStatusCalls, [[13, 'ready']]);
+  assert.deepEqual(emittedEvents, [
+    { event: 'message', payload: { role: 'assistant', content: 'Prepared scope [READY_TO_PLAN]' } },
+    { event: 'status', payload: { status: 'ready' } },
+  ]);
+});
+
+test('handleSDKMessage handles missing result fields with safe defaults', async () => {
+  const addChatMessageCalls: Array<[number, string, string, unknown?]> = [];
+  const addDailyCostCalls: number[] = [];
+  const updateChatStatusCalls: Array<[number, string]> = [];
+  const updateChatSessionIdCalls: Array<[number, string]> = [];
+  const workflow = createWorkflow({
+    addChatMessage: async (draftId, role, content, metadata) => {
+      addChatMessageCalls.push([draftId, role, content, metadata]);
+      return {};
+    },
+    addDailyCost: async (cost) => {
+      addDailyCostCalls.push(cost);
+    },
+    updateChatStatus: async (draftId, status) => {
+      updateChatStatusCalls.push([draftId, status]);
+    },
+    updateChatSessionId: async (draftId, sessionId) => {
+      updateChatSessionIdCalls.push([draftId, sessionId]);
+    },
+  });
+
+  const emittedEvents: Array<{ event: string; payload: unknown }> = [];
+  workflow.addSSEListener(14, (event, data) => {
+    emittedEvents.push({ event, payload: JSON.parse(data) });
+  });
+
+  const handler = workflow as unknown as PlanWorkflowHandler;
+  await handler.handleSDKMessage(14, { type: 'result' } as unknown as SDKMessage);
+
+  assert.deepEqual(addChatMessageCalls, []);
+  assert.deepEqual(addDailyCostCalls, [0]);
+  assert.deepEqual(updateChatSessionIdCalls, []);
+  assert.deepEqual(updateChatStatusCalls, [[14, 'chatting']]);
+  assert.deepEqual(emittedEvents, [{ event: 'status', payload: { status: 'chatting' } }]);
 });

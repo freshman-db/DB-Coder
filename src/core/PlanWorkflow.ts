@@ -9,6 +9,7 @@ import type { PlanRequest } from '../prompts/brain.js';
 import type { PlanDraft, ChatStatus } from '../memory/types.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { log } from '../utils/logger.js';
+import type { AgentResultMessage, AgentSystemPrompt } from '../types/agentSdk.js';
 
 export type { PlanRequest };
 
@@ -61,14 +62,10 @@ export class PlanWorkflow {
   }
 
   private startSession(draftId: number, projectPath: string): void {
-    const session = this.claude.createChatSession(
-      projectPath,
-      (msg: SDKMessage) => this.handleSDKMessage(draftId, msg),
-      {
-        systemPrompt: {
-          type: 'preset' as const,
-          preset: 'claude_code' as const,
-          append: `你是一个专业的代码架构师和需求分析师。你正在帮助用户梳理和细化一个编程任务的需求。
+    const systemPrompt: AgentSystemPrompt = {
+      type: 'preset',
+      preset: 'claude_code',
+      append: `你是一个专业的代码架构师和需求分析师。你正在帮助用户梳理和细化一个编程任务的需求。
 
 你的工作流程：
 1. 仔细理解用户的需求描述
@@ -78,7 +75,13 @@ export class PlanWorkflow {
 5. 当需求足够清晰时，输出 [READY_TO_PLAN] 标记，表示可以生成正式计划
 
 请用中文回复用户。每次回复都应该推进需求的梳理进度。`,
-        } as any,
+    };
+
+    const session = this.claude.createChatSession(
+      projectPath,
+      (msg: SDKMessage) => this.handleSDKMessage(draftId, msg),
+      {
+        systemPrompt,
       },
     );
     this.chatSessions.set(draftId, session);
@@ -87,7 +90,7 @@ export class PlanWorkflow {
   private async handleSDKMessage(draftId: number, msg: SDKMessage): Promise<void> {
     // Extract text deltas from stream events and emit accumulated text
     if (msg.type === 'stream_event') {
-      const event = (msg as any).event;
+      const event = msg.event;
       if (event?.type === 'content_block_delta' && event?.delta?.type === 'text_delta' && event.delta.text) {
         const accumulated = (this.streamingText.get(draftId) ?? '') + event.delta.text;
         this.streamingText.set(draftId, accumulated);
@@ -105,9 +108,9 @@ export class PlanWorkflow {
     // result message — one round of conversation done
     if (msg.type === 'result') {
       this.streamingText.delete(draftId);
-      const result = msg as any;
-      const text = result.result ?? '';
-      const cost = result.total_cost_usd ?? 0;
+      const resultMessage: AgentResultMessage = msg;
+      const text = resultMessage.result ?? '';
+      const cost = resultMessage.total_cost_usd ?? 0;
 
       // Save assistant message to DB
       if (text) {

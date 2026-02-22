@@ -7,6 +7,7 @@ import { buildCanUseTool, type QuestionHandler } from './MessageHandler.js';
 import { log } from '../utils/logger.js';
 import { tryParseReview } from '../utils/parse.js';
 import { AsyncChannel } from '../utils/AsyncChannel.js';
+import type { AgentResultMessage, AgentSystemPrompt } from '../types/agentSdk.js';
 
 export interface ChatSession {
   readonly sessionId: string;
@@ -85,10 +86,9 @@ export class ClaudeBridge implements CodingAgent {
         },
       })) {
         if (message.type === 'result') {
-          cost = (message as any).total_cost_usd ?? 0;
-          if ('result' in message) {
-            result = (message as any).result;
-          }
+          const resultMessage: AgentResultMessage = message;
+          cost = resultMessage.total_cost_usd ?? 0;
+          result = resultMessage.result ?? result;
         }
       }
 
@@ -136,10 +136,9 @@ export class ClaudeBridge implements CodingAgent {
         },
       })) {
         if (message.type === 'result') {
-          cost = (message as any).total_cost_usd ?? 0;
-          if ('result' in message) {
-            result = (message as any).result;
-          }
+          const resultMessage: AgentResultMessage = message;
+          cost = resultMessage.total_cost_usd ?? 0;
+          result = resultMessage.result ?? result;
         }
       }
 
@@ -190,10 +189,9 @@ Output your review as JSON: { "passed": boolean, "issues": [{ "severity": "criti
         },
       })) {
         if (message.type === 'result') {
-          cost = (message as any).total_cost_usd ?? 0;
-          if ('result' in message) {
-            result = (message as any).result;
-          }
+          const resultMessage: AgentResultMessage = message;
+          cost = resultMessage.total_cost_usd ?? 0;
+          result = resultMessage.result ?? result;
         }
       }
 
@@ -222,7 +220,7 @@ Output your review as JSON: { "passed": boolean, "issues": [{ "severity": "criti
   createChatSession(
     cwd: string,
     onMessage: (msg: SDKMessage) => void,
-    options?: { systemPrompt?: string },
+    options?: { systemPrompt?: AgentSystemPrompt },
   ): ChatSession {
     const channel = new AsyncChannel<SDKUserMessage>();
     const mcpServers = this.mcpDiscovery?.getServersForPhase('plan') ?? {};
