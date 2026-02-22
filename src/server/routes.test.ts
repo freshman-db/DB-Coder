@@ -33,6 +33,7 @@ function createContext(
       isPaused: () => false,
       isRunning: () => false,
       addStatusListener: () => () => {},
+      triggerScan: async () => {},
     } as unknown as RouteContext['loop'],
     taskStore: { createTask, getTask } as RouteContext['taskStore'],
     globalMemory: {} as RouteContext['globalMemory'],
@@ -99,6 +100,18 @@ function createGetRequest(url: string): PassThrough & {
   req.url = url;
   req.end();
   return req;
+}
+
+function createPostRequest(url: string, body?: string): IncomingMessage {
+  const req = createStreamRequest();
+  req.method = 'POST';
+  req.url = url;
+  if (body === undefined) {
+    req.end();
+  } else {
+    req.end(body);
+  }
+  return req as unknown as IncomingMessage;
 }
 
 function createMockResponse(): { response: ServerResponse; state: MockResponseState } {
@@ -616,6 +629,66 @@ test('GET /api/status/stream cleans up heartbeat and status listener when heartb
   } finally {
     intervalStub.restore();
   }
+});
+
+test('POST /api/control/scan accepts boundary depth values', async () => {
+  const triggeredDepths: string[] = [];
+  const ctx = {
+    ...createContext(),
+    loop: {
+      isRunning: () => false,
+      triggerScan: async (depth: 'quick' | 'normal' | 'deep') => {
+        triggeredDepths.push(depth);
+      },
+    } as unknown as RouteContext['loop'],
+  };
+
+  const quickState = await runRequest(createPostRequest('/api/control/scan', '{"depth":"quick"}'), ctx);
+  const deepState = await runRequest(createPostRequest('/api/control/scan', '{"depth":"deep"}'), ctx);
+
+  assert.equal(quickState.statusCode, 200);
+  assert.deepEqual(parseJsonBody(quickState), { triggered: true, depth: 'quick' });
+  assert.equal(deepState.statusCode, 200);
+  assert.deepEqual(parseJsonBody(deepState), { triggered: true, depth: 'deep' });
+  assert.deepEqual(triggeredDepths, ['quick', 'deep']);
+});
+
+test('POST /api/control/scan defaults depth to normal when omitted', async () => {
+  const triggeredDepths: string[] = [];
+  const ctx = {
+    ...createContext(),
+    loop: {
+      isRunning: () => false,
+      triggerScan: async (depth: 'quick' | 'normal' | 'deep') => {
+        triggeredDepths.push(depth);
+      },
+    } as unknown as RouteContext['loop'],
+  };
+
+  const state = await runRequest(createPostRequest('/api/control/scan', '{}'), ctx);
+
+  assert.equal(state.statusCode, 200);
+  assert.deepEqual(parseJsonBody(state), { triggered: true, depth: 'normal' });
+  assert.deepEqual(triggeredDepths, ['normal']);
+});
+
+test('POST /api/control/scan returns 400 for invalid depth values', async () => {
+  let triggerScanCalled = false;
+  const ctx = {
+    ...createContext(),
+    loop: {
+      isRunning: () => false,
+      triggerScan: async () => {
+        triggerScanCalled = true;
+      },
+    } as unknown as RouteContext['loop'],
+  };
+
+  const state = await runRequest(createPostRequest('/api/control/scan', '{"depth":"invalid"}'), ctx);
+
+  assert.equal(state.statusCode, 400);
+  assert.deepEqual(parseJsonBody(state), { error: 'Invalid depth' });
+  assert.equal(triggerScanCalled, false);
 });
 
 test('POST /api/tasks parses valid JSON from streamed chunks and creates the task', async () => {
