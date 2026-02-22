@@ -10,7 +10,7 @@ import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PluginMonitor } from '../plugins/PluginMonitor.js';
 import type { PromptRegistry } from '../prompts/PromptRegistry.js';
 import type { Task, SubTaskRecord, ReviewEvent } from '../memory/types.js';
-import type { MergedReviewResult, LoopState, PlanTask } from './types.js';
+import type { MergedReviewResult, LoopState } from './types.js';
 import type { AgentResult, ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
 import { executorPrompt } from '../prompts/executor.js';
 import { reviewerPrompt } from '../prompts/reviewer.js';
@@ -214,166 +214,21 @@ export class MainLoop {
 
     log.info(`Executing task [P${task.priority}]: ${task.task_description.slice(0, 80)}`);
 
-    // Save original branch
-    const originalBranch = await getCurrentBranch(projectPath).catch(() => 'main');
     const branchName = `${this.config.values.git.branchPrefix}${task.id.slice(0, 8)}`;
-    const startCommit = await getHeadCommit(projectPath).catch(() => '');
+    let originalBranch = 'main';
+    let startCommit = '';
 
     try {
-      // Create isolated branch
-      if (await branchExists(branchName, projectPath)) {
-        await switchBranch(branchName, projectPath);
-      } else {
-        await createBranch(branchName, projectPath);
-      }
+      ({ originalBranch, startCommit } = await this.prepareTaskBranch(task, branchName, projectPath));
 
-      await this.taskStore.updateTask(task.id, {
-        status: 'active',
-        phase: 'executing',
-        git_branch: branchName,
-        start_commit: startCommit,
-      });
+      const { subtasks, stuckAdjustments, aborted } = await this.executeSubtasks(task, branchName, projectPath);
+      if (aborted) return;
 
-      // Execute subtasks
-      const plan = task.plan as PlanTask | null;
-      const subtasks = task.subtasks as SubTaskRecord[];
-      const standards = await this.globalMemory.getRelevant('coding standards');
-      const stuckAdjustments: string[] = [];
-      const retryCounts = new Map<string, number>();
-      let stopSubtasks = false;
+      const reviewCycle = await this.runReviewCycle(task, startCommit, stuckAdjustments, projectPath);
+      if (reviewCycle.aborted) return;
+      const { reviewResult, reviewRetries } = reviewCycle;
 
-      for (const subtask of subtasks) {
-        if (subtask.status === 'done') continue;
-
-        while (true) {
-          if (!(await this.enforceBudget(task.id))) return;
-
-          subtask.status = 'running';
-          await this.taskStore.updateTask(task.id, { subtasks });
-
-          const result = await this.executeSubtask(task, subtask, standards, projectPath);
-
-          if (!(await this.enforceBudget(task.id))) {
-            subtask.status = 'failed';
-            subtask.result = 'Blocked: budget exceeded';
-            await this.taskStore.updateTask(task.id, { subtasks });
-            return;
-          }
-
-          if (result.success) {
-            subtask.status = 'done';
-            subtask.result = result.output.slice(0, 200);
-            const changedFiles = await getModifiedAndAddedFiles(projectPath).catch(() => []);
-            await commitAll(`db-coder: ${subtask.description.slice(0, 50)}`, projectPath, changedFiles).catch(() => {});
-            break;
-          }
-
-          subtask.status = 'failed';
-          subtask.result = result.output.slice(0, 200);
-          log.warn(`Subtask failed: ${subtask.description}`);
-          const handled = await this.handleRetry(
-            task,
-            subtask,
-            {
-              subtasks,
-              error: result.output,
-              stuckAdjustments,
-              retryCounts,
-              branchName,
-              projectPath,
-            },
-          );
-          if (!handled) {
-            stopSubtasks = true;
-            break;
-          }
-        }
-
-        await this.taskStore.updateTask(task.id, { subtasks });
-        if (stopSubtasks) break;
-      }
-
-      // REVIEW (dual review)
-      if (!(await this.enforceBudget(task.id))) return;
-
-      this.state = 'reviewing';
-      await this.taskStore.updateTask(task.id, { phase: 'reviewing' });
-
-      let reviewRetries = 0;
-      let changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
-      let { merged: reviewResult, decision: reviewDecision, cost_usd: reviewCost, duration_ms: reviewDuration } = await this.dualReview(task, changedFiles, reviewRetries);
-
-      await this.taskStore.updateTask(task.id, {
-        review_results: [...(task.review_results as unknown[] || []), reviewResult],
-      });
-
-      // Record initial review event
-      await this.saveReviewEvent(task.id, 0, reviewResult, null, reviewCost, reviewDuration);
-
-      // Fix-and-re-review loop (in-place, no task re-queue)
-      while (reviewDecision === 'retry') {
-        if (!(await this.enforceBudget(task.id))) return;
-
-        reviewRetries++;
-        log.info(`Review found issues (attempt ${reviewRetries}/${this.config.values.autonomy.maxRetries}). Fixing...`);
-
-        // Build rich fix prompt with full context
-        const fixPrompt = await this.buildFixPrompt(task, reviewResult, reviewRetries, stuckAdjustments);
-
-        // Adaptive agent routing: first try Codex, then escalate to Claude
-        const useClaudeForFix = reviewRetries > 1;
-        const fixAgent = useClaudeForFix ? this.claude : this.codex;
-        const fixAgentName = useClaudeForFix ? 'claude' : 'codex';
-        log.info(`Fix attempt ${reviewRetries} using ${fixAgentName}`);
-
-        await fixAgent.execute(fixPrompt, projectPath, {});
-        const changedFilesForCommit = await getModifiedAndAddedFiles(projectPath).catch(() => []);
-        await commitAll(
-          `db-coder: fix review issues (attempt ${reviewRetries}, ${fixAgentName})`,
-          projectPath,
-          changedFilesForCommit,
-        ).catch(() => {});
-
-        if (!(await this.enforceBudget(task.id))) return;
-
-        changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
-        ({ merged: reviewResult, decision: reviewDecision, cost_usd: reviewCost, duration_ms: reviewDuration } = await this.dualReview(task, changedFiles, reviewRetries));
-
-        // Record review event with fix agent info
-        await this.saveReviewEvent(task.id, reviewRetries, reviewResult, fixAgentName, reviewCost, reviewDuration);
-
-        await this.taskStore.updateTask(task.id, {
-          review_results: [...(task.review_results as unknown[] || []), reviewResult],
-        });
-      }
-
-      // REFLECT
-      this.state = 'reflecting';
-      await this.taskStore.updateTask(task.id, { phase: 'reflecting' });
-
-      const allResults = subtasks.map(st => `${st.description}: ${st.status} ${st.result ?? ''}`).join('\n');
-      const outcome = reviewResult.passed ? 'success' as const : 'blocked_max_retries' as const;
-      const retryContext = reviewRetries > 0 ? `\nReview retries: ${reviewRetries}. Stuck adjustments applied: ${stuckAdjustments.length}` : '';
-      const { reflection } = await this.brain.reflect(projectPath, task.task_description, allResults + retryContext, reviewResult.summary, outcome);
-
-      // EVOLVE: process adjustments from reflection
-      if (this.evolutionEngine && reflection.adjustments.length > 0) {
-        try {
-          await this.evolutionEngine.processAdjustments(projectPath, task.id, reflection.adjustments, outcome);
-        } catch (err) {
-          log.warn(`Evolution processAdjustments failed: ${err}`);
-        }
-      }
-
-      // Mark done
-      const finalStatus = reviewResult.passed ? 'done' : 'blocked';
-      await this.taskStore.updateTask(task.id, {
-        status: finalStatus as Task['status'],
-        phase: finalStatus === 'blocked' ? 'blocked' : 'done',
-        iteration: task.iteration + reviewRetries,
-      });
-
-      log.info(`Task ${reviewResult.passed ? 'completed' : 'blocked'}: ${task.task_description.slice(0, 60)}`);
+      await this.reflectOnTask(task, subtasks, reviewResult, reviewRetries, stuckAdjustments, projectPath);
 
       // Merge completed task branch back to main
       if (reviewResult.passed) {
@@ -420,6 +275,179 @@ export class MainLoop {
       await switchBranch(originalBranch, projectPath).catch(() => {});
       this.currentTaskId = null;
     }
+  }
+
+  private async prepareTaskBranch(
+    task: Task,
+    branchName: string,
+    projectPath: string,
+  ): Promise<{ originalBranch: string; startCommit: string }> {
+    const originalBranch = await getCurrentBranch(projectPath).catch(() => 'main');
+    const startCommit = await getHeadCommit(projectPath).catch(() => '');
+
+    if (await branchExists(branchName, projectPath)) {
+      await switchBranch(branchName, projectPath);
+    } else {
+      await createBranch(branchName, projectPath);
+    }
+
+    await this.taskStore.updateTask(task.id, {
+      status: 'active',
+      phase: 'executing',
+      git_branch: branchName,
+      start_commit: startCommit,
+    });
+
+    return { originalBranch, startCommit };
+  }
+
+  private async executeSubtasks(
+    task: Task,
+    branchName: string,
+    projectPath: string,
+  ): Promise<{ subtasks: SubTaskRecord[]; stuckAdjustments: string[]; aborted: boolean }> {
+    const subtasks = task.subtasks as SubTaskRecord[];
+    const standards = await this.globalMemory.getRelevant('coding standards');
+    const stuckAdjustments: string[] = [];
+    const retryCounts = new Map<string, number>();
+    let stopSubtasks = false;
+
+    for (const subtask of subtasks) {
+      if (subtask.status === 'done') continue;
+
+      while (true) {
+        if (!(await this.enforceBudget(task.id))) {
+          return { subtasks, stuckAdjustments, aborted: true };
+        }
+
+        subtask.status = 'running';
+        await this.taskStore.updateTask(task.id, { subtasks });
+        const result = await this.executeSubtask(task, subtask, standards, projectPath);
+
+        if (!(await this.enforceBudget(task.id))) {
+          subtask.status = 'failed';
+          subtask.result = 'Blocked: budget exceeded';
+          await this.taskStore.updateTask(task.id, { subtasks });
+          return { subtasks, stuckAdjustments, aborted: true };
+        }
+
+        if (result.success) {
+          subtask.status = 'done';
+          subtask.result = result.output.slice(0, 200);
+          const changedFiles = await getModifiedAndAddedFiles(projectPath).catch(() => []);
+          await commitAll(`db-coder: ${subtask.description.slice(0, 50)}`, projectPath, changedFiles).catch(() => {});
+          break;
+        }
+
+        subtask.status = 'failed';
+        subtask.result = result.output.slice(0, 200);
+        log.warn(`Subtask failed: ${subtask.description}`);
+        const handled = await this.handleRetry(task, subtask, {
+          subtasks,
+          error: result.output,
+          stuckAdjustments,
+          retryCounts,
+          branchName,
+          projectPath,
+        });
+        if (!handled) {
+          stopSubtasks = true;
+          break;
+        }
+      }
+
+      await this.taskStore.updateTask(task.id, { subtasks });
+      if (stopSubtasks) break;
+    }
+
+    return { subtasks, stuckAdjustments, aborted: false };
+  }
+
+  private async runReviewCycle(
+    task: Task,
+    startCommit: string,
+    stuckAdjustments: string[],
+    projectPath: string,
+  ): Promise<{ aborted: true } | { aborted: false; reviewResult: MergedReviewResult; reviewRetries: number }> {
+    if (!(await this.enforceBudget(task.id))) {
+      return { aborted: true };
+    }
+
+    this.state = 'reviewing';
+    await this.taskStore.updateTask(task.id, { phase: 'reviewing' });
+
+    let reviewRetries = 0;
+    let changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
+    let { merged: reviewResult, decision: reviewDecision, cost_usd: reviewCost, duration_ms: reviewDuration } = await this.dualReview(task, changedFiles, reviewRetries);
+
+    await this.taskStore.updateTask(task.id, {
+      review_results: [...(task.review_results as unknown[] || []), reviewResult],
+    });
+    await this.saveReviewEvent(task.id, 0, reviewResult, null, reviewCost, reviewDuration);
+
+    while (reviewDecision === 'retry') {
+      if (!(await this.enforceBudget(task.id))) {
+        return { aborted: true };
+      }
+
+      reviewRetries++;
+      log.info(`Review found issues (attempt ${reviewRetries}/${this.config.values.autonomy.maxRetries}). Fixing...`);
+      const fixPrompt = await this.buildFixPrompt(task, reviewResult, reviewRetries, stuckAdjustments);
+      const useClaudeForFix = reviewRetries > 1;
+      const fixAgent = useClaudeForFix ? this.claude : this.codex;
+      const fixAgentName = useClaudeForFix ? 'claude' : 'codex';
+      log.info(`Fix attempt ${reviewRetries} using ${fixAgentName}`);
+
+      await fixAgent.execute(fixPrompt, projectPath, {});
+      const changedFilesForCommit = await getModifiedAndAddedFiles(projectPath).catch(() => []);
+      await commitAll(`db-coder: fix review issues (attempt ${reviewRetries}, ${fixAgentName})`, projectPath, changedFilesForCommit).catch(() => {});
+      if (!(await this.enforceBudget(task.id))) {
+        return { aborted: true };
+      }
+
+      changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
+      ({ merged: reviewResult, decision: reviewDecision, cost_usd: reviewCost, duration_ms: reviewDuration } = await this.dualReview(task, changedFiles, reviewRetries));
+      await this.saveReviewEvent(task.id, reviewRetries, reviewResult, fixAgentName, reviewCost, reviewDuration);
+      await this.taskStore.updateTask(task.id, {
+        review_results: [...(task.review_results as unknown[] || []), reviewResult],
+      });
+    }
+
+    return { aborted: false, reviewResult, reviewRetries };
+  }
+
+  private async reflectOnTask(
+    task: Task,
+    subtasks: SubTaskRecord[],
+    reviewResult: MergedReviewResult,
+    reviewRetries: number,
+    stuckAdjustments: string[],
+    projectPath: string,
+  ): Promise<void> {
+    this.state = 'reflecting';
+    await this.taskStore.updateTask(task.id, { phase: 'reflecting' });
+
+    const allResults = subtasks.map(st => `${st.description}: ${st.status} ${st.result ?? ''}`).join('\n');
+    const outcome = reviewResult.passed ? 'success' as const : 'blocked_max_retries' as const;
+    const retryContext = reviewRetries > 0 ? `\nReview retries: ${reviewRetries}. Stuck adjustments applied: ${stuckAdjustments.length}` : '';
+    const { reflection } = await this.brain.reflect(projectPath, task.task_description, allResults + retryContext, reviewResult.summary, outcome);
+
+    if (this.evolutionEngine && reflection.adjustments.length > 0) {
+      try {
+        await this.evolutionEngine.processAdjustments(projectPath, task.id, reflection.adjustments, outcome);
+      } catch (err) {
+        log.warn(`Evolution processAdjustments failed: ${err}`);
+      }
+    }
+
+    const finalStatus = reviewResult.passed ? 'done' : 'blocked';
+    await this.taskStore.updateTask(task.id, {
+      status: finalStatus as Task['status'],
+      phase: finalStatus === 'blocked' ? 'blocked' : 'done',
+      iteration: task.iteration + reviewRetries,
+    });
+
+    log.info(`Task ${reviewResult.passed ? 'completed' : 'blocked'}: ${task.task_description.slice(0, 60)}`);
   }
 
   private async executeSubtask(
