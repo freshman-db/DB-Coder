@@ -18,7 +18,7 @@ function createValidConfig(): DbCoderConfig {
       sandbox: 'workspace-write',
       tokenPricing: { inputPerMillion: 2, cachedInputPerMillion: 0.5, outputPerMillion: 8 },
     },
-    autonomy: { level: 'full', maxRetries: 3, subtaskTimeout: 600 },
+    autonomy: { level: 'full', maxRetries: 3, retryBaseDelayMs: 1000, subtaskTimeout: 600 },
     routing: {
       scan: 'brain',
       plan: 'brain',
