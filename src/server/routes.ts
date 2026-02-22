@@ -43,6 +43,8 @@ const MAX_MEMORY_TITLE_LENGTH = 200;
 const MAX_MEMORY_TAG_LENGTH = 64;
 const MAX_MEMORY_TAG_COUNT = 20;
 const MAX_REQUEST_BODY_BYTES = 64 * 1024;
+const VALID_DEPTHS = ['quick', 'normal', 'deep'] as const;
+type ScanDepth = (typeof VALID_DEPTHS)[number];
 
 class HttpError extends Error {
   constructor(public readonly statusCode: number, message: string) {
@@ -244,8 +246,12 @@ route('POST', '/api/control/scan', async (req, res, ctx) => {
     return;
   }
   const body = await readBody(req);
-  const depth = (body as { depth?: string }).depth ?? 'normal';
-  ctx.loop.triggerScan(depth as 'quick' | 'normal' | 'deep').catch(err => log.error('Scan error', err));
+  const rawDepth = isRecord(body) ? body.depth : undefined;
+  const depth = rawDepth === undefined ? 'normal' : rawDepth;
+  if (typeof depth !== 'string' || !isScanDepth(depth)) {
+    throw new HttpError(400, 'Invalid depth');
+  }
+  ctx.loop.triggerScan(depth).catch(err => log.error('Scan error', err));
   json(res, { triggered: true, depth });
 });
 
@@ -807,4 +813,8 @@ function validateCreateMemoryBody(body: unknown): ValidationResult<CreateMemoryR
 
 function isMemoryCategory(value: string): value is MemoryCategory {
   return memoryCategories.some(category => category === value);
+}
+
+function isScanDepth(value: string): value is ScanDepth {
+  return VALID_DEPTHS.some(depth => depth === value);
 }
