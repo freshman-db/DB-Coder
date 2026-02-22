@@ -54,6 +54,7 @@ export class Server {
     const ctx = { loop, taskStore, globalMemory, costTracker, config, evolutionEngine: this.evolutionEngine, pluginMonitor: this.pluginMonitor, patrolManager: this.patrolManager, planWorkflow: this.planWorkflow };
 
     this.server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      this.setSecurityHeaders(res);
       try {
         if (!this.isAuthorizedApiRequest(req)) {
           req.resume();
@@ -85,6 +86,11 @@ export class Server {
         res.writeHead(500).end('Internal Server Error');
       }
     });
+  }
+
+  private setSecurityHeaders(res: ServerResponse): void {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   }
 
   private isApiRequest(req: IncomingMessage): boolean {
