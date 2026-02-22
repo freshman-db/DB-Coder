@@ -88,6 +88,28 @@ export function safeSseWrite(res: ServerResponse, data: string): boolean {
   }
 }
 
+interface StatusSseSnapshot {
+  state: ReturnType<MainLoop['getState']>;
+  currentTaskId: string | null;
+  patrolling: boolean;
+  paused: boolean;
+}
+
+interface StatusSsePayload extends StatusSseSnapshot {
+  currentTaskTitle: string | null;
+}
+
+async function resolveCurrentTaskTitle(taskStore: TaskStore, taskId: string | null): Promise<string | null> {
+  if (!taskId) {
+    return null;
+  }
+  try {
+    return (await taskStore.getTask(taskId))?.task_description ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // --- Status ---
 route('GET', '/api/status', async (_req, res, ctx) => {
   const state = ctx.loop.getState();
@@ -109,6 +131,62 @@ route('GET', '/api/status', async (_req, res, ctx) => {
     projectPath: ctx.config.projectPath,
     dailyCosts: daily,
   });
+});
+
+route('GET', '/api/status/stream', async (req, res, ctx) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+  });
+
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let removeListener = () => {};
+  let cleanedUp = false;
+  const cleanup = (): void => {
+    if (cleanedUp) {
+      return;
+    }
+    cleanedUp = true;
+    if (heartbeat !== undefined) {
+      clearInterval(heartbeat);
+    }
+    removeListener();
+  };
+
+  const pushStatus = async (snapshot: StatusSseSnapshot): Promise<void> => {
+    const payload: StatusSsePayload = {
+      ...snapshot,
+      currentTaskTitle: await resolveCurrentTaskTitle(ctx.taskStore, snapshot.currentTaskId),
+    };
+    if (!safeSseWrite(res, `event: status\ndata: ${JSON.stringify(payload)}\n\n`)) {
+      cleanup();
+    }
+  };
+
+  heartbeat = setInterval(() => {
+    if (!safeSseWrite(res, ': heartbeat\n\n')) {
+      cleanup();
+    }
+  }, 15000);
+
+  await pushStatus({
+    state: ctx.loop.getState(),
+    currentTaskId: ctx.loop.getCurrentTaskId(),
+    patrolling: ctx.loop.isRunning(),
+    paused: ctx.loop.isPaused(),
+  });
+
+  if (cleanedUp) {
+    return;
+  }
+
+  removeListener = ctx.loop.addStatusListener((snapshot) => {
+    void pushStatus(snapshot);
+  });
+
+  req.on('close', cleanup);
 });
 
 // --- Tasks ---

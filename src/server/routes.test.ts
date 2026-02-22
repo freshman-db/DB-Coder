@@ -32,6 +32,7 @@ function createContext(
       getCurrentTaskId: () => null,
       isPaused: () => false,
       isRunning: () => false,
+      addStatusListener: () => () => {},
     } as unknown as RouteContext['loop'],
     taskStore: { createTask, getTask } as RouteContext['taskStore'],
     globalMemory: {} as RouteContext['globalMemory'],
@@ -225,6 +226,27 @@ function stubHeartbeatInterval(): {
   };
 }
 
+interface StatusSsePayload {
+  state: string;
+  currentTaskId: string | null;
+  currentTaskTitle: string | null;
+  patrolling: boolean;
+  paused: boolean;
+}
+
+function parseStatusSsePayload(writeChunk: string | undefined): StatusSsePayload {
+  assert.ok(writeChunk, 'expected SSE write chunk');
+  const eventLine = writeChunk.split('\n').find(line => line.startsWith('event: '));
+  assert.equal(eventLine, 'event: status');
+  const dataLine = writeChunk.split('\n').find(line => line.startsWith('data: '));
+  assert.ok(dataLine, 'expected SSE data line');
+  return JSON.parse(dataLine.slice('data: '.length)) as StatusSsePayload;
+}
+
+async function waitForSseWrite(): Promise<void> {
+  await new Promise<void>(resolve => setImmediate(resolve));
+}
+
 test('safeSseWrite returns true and writes data when response is open', () => {
   let writes = '';
   const response = {
@@ -361,6 +383,239 @@ test('GET /api/status returns null currentTaskTitle when task lookup misses', as
 
   assert.equal(state.statusCode, 200);
   assert.equal(parseJsonBody(state).currentTaskTitle, null);
+});
+
+test('GET /api/status/stream sends initial and subsequent status events with task titles', async () => {
+  const req = createGetRequest('/api/status/stream');
+  const { response, state } = createSseResponse();
+  const intervalStub = stubHeartbeatInterval();
+  const requestedTaskIds: string[] = [];
+  let removeCalls = 0;
+  let listener: ((snapshot: {
+    state: string;
+    currentTaskId: string | null;
+    patrolling: boolean;
+    paused: boolean;
+  }) => void) | undefined;
+
+  const ctx = {
+    ...createContext(defaultCreateTask, async (taskId) => {
+      requestedTaskIds.push(taskId);
+      return { task_description: `Title for ${taskId}` };
+    }),
+    loop: {
+      getState: () => 'scanning',
+      getCurrentTaskId: () => 'task-1',
+      isPaused: () => false,
+      isRunning: () => true,
+      addStatusListener: (statusListener: (snapshot: {
+        state: string;
+        currentTaskId: string | null;
+        patrolling: boolean;
+        paused: boolean;
+      }) => void): (() => void) => {
+        listener = statusListener;
+        return () => {
+          removeCalls += 1;
+        };
+      },
+    } as unknown as RouteContext['loop'],
+  };
+
+  try {
+    const handled = await handleRequest(req as unknown as IncomingMessage, response, ctx);
+    assert.equal(handled, true);
+    assert.equal(state.statusCode, 200);
+    assert.equal(state.headers['Content-Type'], 'text/event-stream');
+    assert.ok(listener, 'expected status listener registration');
+
+    assert.deepEqual(parseStatusSsePayload(state.writes[0]), {
+      state: 'scanning',
+      currentTaskId: 'task-1',
+      currentTaskTitle: 'Title for task-1',
+      patrolling: true,
+      paused: false,
+    });
+
+    listener!({
+      state: 'executing',
+      currentTaskId: 'task-2',
+      patrolling: true,
+      paused: false,
+    });
+    await waitForSseWrite();
+
+    assert.deepEqual(parseStatusSsePayload(state.writes[1]), {
+      state: 'executing',
+      currentTaskId: 'task-2',
+      currentTaskTitle: 'Title for task-2',
+      patrolling: true,
+      paused: false,
+    });
+    assert.deepEqual(requestedTaskIds, ['task-1', 'task-2']);
+
+    req.emit('close');
+    assert.equal(intervalStub.getClearCallCount(), 1);
+    assert.equal(removeCalls, 1);
+  } finally {
+    intervalStub.restore();
+  }
+});
+
+test('GET /api/status/stream returns null title when task lookup throws', async () => {
+  const req = createGetRequest('/api/status/stream');
+  const { response, state } = createSseResponse();
+  const intervalStub = stubHeartbeatInterval();
+  let listener: ((snapshot: {
+    state: string;
+    currentTaskId: string | null;
+    patrolling: boolean;
+    paused: boolean;
+  }) => void) | undefined;
+
+  const ctx = {
+    ...createContext(defaultCreateTask, async () => {
+      throw new Error('task lookup failed');
+    }),
+    loop: {
+      getState: () => 'planning',
+      getCurrentTaskId: () => 'task-1',
+      isPaused: () => false,
+      isRunning: () => true,
+      addStatusListener: (statusListener: (snapshot: {
+        state: string;
+        currentTaskId: string | null;
+        patrolling: boolean;
+        paused: boolean;
+      }) => void): (() => void) => {
+        listener = statusListener;
+        return () => {};
+      },
+    } as unknown as RouteContext['loop'],
+  };
+
+  try {
+    const handled = await handleRequest(req as unknown as IncomingMessage, response, ctx);
+    assert.equal(handled, true);
+    assert.ok(listener, 'expected status listener registration');
+
+    assert.equal(parseStatusSsePayload(state.writes[0]).currentTaskTitle, null);
+
+    listener!({
+      state: 'executing',
+      currentTaskId: 'task-2',
+      patrolling: true,
+      paused: false,
+    });
+    await waitForSseWrite();
+
+    assert.equal(parseStatusSsePayload(state.writes[1]).currentTaskTitle, null);
+    req.emit('close');
+  } finally {
+    intervalStub.restore();
+  }
+});
+
+test('GET /api/status/stream skips task lookup when currentTaskId is null', async () => {
+  const req = createGetRequest('/api/status/stream');
+  const { response, state } = createSseResponse();
+  const intervalStub = stubHeartbeatInterval();
+  let getTaskCalls = 0;
+  let listener: ((snapshot: {
+    state: string;
+    currentTaskId: string | null;
+    patrolling: boolean;
+    paused: boolean;
+  }) => void) | undefined;
+
+  const ctx = {
+    ...createContext(defaultCreateTask, async () => {
+      getTaskCalls += 1;
+      return { task_description: 'should-not-be-called' };
+    }),
+    loop: {
+      getState: () => 'idle',
+      getCurrentTaskId: () => null,
+      isPaused: () => false,
+      isRunning: () => false,
+      addStatusListener: (statusListener: (snapshot: {
+        state: string;
+        currentTaskId: string | null;
+        patrolling: boolean;
+        paused: boolean;
+      }) => void): (() => void) => {
+        listener = statusListener;
+        return () => {};
+      },
+    } as unknown as RouteContext['loop'],
+  };
+
+  try {
+    const handled = await handleRequest(req as unknown as IncomingMessage, response, ctx);
+    assert.equal(handled, true);
+    assert.ok(listener, 'expected status listener registration');
+
+    assert.equal(parseStatusSsePayload(state.writes[0]).currentTaskTitle, null);
+    assert.equal(getTaskCalls, 0);
+
+    listener!({
+      state: 'idle',
+      currentTaskId: null,
+      patrolling: false,
+      paused: false,
+    });
+    await waitForSseWrite();
+
+    assert.equal(parseStatusSsePayload(state.writes[1]).currentTaskTitle, null);
+    assert.equal(getTaskCalls, 0);
+    req.emit('close');
+  } finally {
+    intervalStub.restore();
+  }
+});
+
+test('GET /api/status/stream cleans up heartbeat and status listener when heartbeat write is unsafe', async () => {
+  const req = createGetRequest('/api/status/stream');
+  const { response } = createSseResponse();
+  const intervalStub = stubHeartbeatInterval();
+  let removeCalls = 0;
+
+  const ctx = {
+    ...createContext(),
+    loop: {
+      getState: () => 'idle',
+      getCurrentTaskId: () => null,
+      isPaused: () => false,
+      isRunning: () => false,
+      addStatusListener: (_statusListener: (snapshot: {
+        state: string;
+        currentTaskId: string | null;
+        patrolling: boolean;
+        paused: boolean;
+      }) => void): (() => void) => {
+        return () => {
+          removeCalls += 1;
+        };
+      },
+    } as unknown as RouteContext['loop'],
+  };
+
+  try {
+    const handled = await handleRequest(req as unknown as IncomingMessage, response, ctx);
+    assert.equal(handled, true);
+
+    response.destroyed = true;
+    intervalStub.trigger();
+
+    assert.equal(intervalStub.getClearCallCount(), 1);
+    assert.equal(removeCalls, 1);
+
+    req.emit('close');
+    assert.equal(intervalStub.getClearCallCount(), 1);
+    assert.equal(removeCalls, 1);
+  } finally {
+    intervalStub.restore();
+  }
 });
 
 test('POST /api/tasks parses valid JSON from streamed chunks and creates the task', async () => {
