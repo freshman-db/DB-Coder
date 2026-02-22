@@ -255,6 +255,55 @@ test('review parses valid review JSON and tags issues as codex-sourced', async (
   });
 });
 
+test('execute extracts structured total cost from direct and usage fields', async () => {
+  await withMockedSpawn((call) => {
+    const child = new FakeChildProcess();
+    const outFile = getOutputFilePath(call.args);
+
+    setImmediate(() => {
+      writeFileSync(outFile, JSON.stringify({ output: 'done' }));
+      child.stdout.write(`${JSON.stringify({ type: 'message', cost: 0.02 })}\n`);
+      child.stdout.write(`${JSON.stringify({ type: 'turn.completed', usage: { total_cost: 0.11 } })}\n`);
+      child.stdout.write(`${JSON.stringify({ type: 'message', total_cost_usd: 0.15 })}\n`);
+      child.stdout.write(`${JSON.stringify({ type: 'message', usage: { cost: 0.5 } })}\n`);
+      child.stdout.end();
+      child.emit('close', 0);
+    });
+
+    return child as unknown as ChildProcess;
+  }, async () => {
+    const bridge = new CodexBridge(createCodexConfig());
+    const result = await bridge.execute('Implement endpoint', process.cwd());
+
+    assert.equal(result.success, true);
+    assert.equal(result.cost_usd, 0.15);
+  });
+});
+
+test('execute falls back to last structured partial cost when no total is present', async () => {
+  await withMockedSpawn((call) => {
+    const child = new FakeChildProcess();
+    const outFile = getOutputFilePath(call.args);
+
+    setImmediate(() => {
+      writeFileSync(outFile, JSON.stringify({ output: 'done' }));
+      child.stdout.write(`${JSON.stringify({ type: 'message', total_cost_usd: 0 })}\n`);
+      child.stdout.write(`${JSON.stringify({ type: 'turn.completed', usage: { cost: 0.03 } })}\n`);
+      child.stdout.write(`${JSON.stringify({ type: 'message', cost: 0.05 })}\n`);
+      child.stdout.end();
+      child.emit('close', 0);
+    });
+
+    return child as unknown as ChildProcess;
+  }, async () => {
+    const bridge = new CodexBridge(createCodexConfig());
+    const result = await bridge.execute('Implement endpoint', process.cwd());
+
+    assert.equal(result.success, true);
+    assert.equal(result.cost_usd, 0.05);
+  });
+});
+
 for (const costCase of [
   { name: 'Cost: $0.0123', content: 'Cost: $0.0123', expectedCost: 0.0123 },
   { name: 'total_cost: 0.05', content: 'total_cost: 0.05', expectedCost: 0.05 },
@@ -282,3 +331,79 @@ for (const costCase of [
     });
   });
 }
+
+test('execute scans all event text and prefers total cost over partial cost', async () => {
+  await withMockedSpawn((call) => {
+    const child = new FakeChildProcess();
+    const outFile = getOutputFilePath(call.args);
+
+    setImmediate(() => {
+      writeFileSync(outFile, JSON.stringify({ output: 'done' }));
+      child.stdout.write(`${JSON.stringify({ type: 'message', content: 'cost: 0.02' })}\n`);
+      child.stdout.write(`${JSON.stringify({ type: 'message', content: 'Cost: $0.03' })}\n`);
+      child.stdout.write(`${JSON.stringify({ type: 'message', content: 'total_cost: 0.07' })}\n`);
+      child.stdout.write(`${JSON.stringify({ type: 'message', content: 'cost: 0.11' })}\n`);
+      child.stdout.end();
+      child.emit('close', 0);
+    });
+
+    return child as unknown as ChildProcess;
+  }, async () => {
+    const bridge = new CodexBridge(createCodexConfig());
+    const result = await bridge.execute('Implement endpoint', process.cwd());
+
+    assert.equal(result.success, true);
+    assert.equal(result.cost_usd, 0.07);
+  });
+});
+
+test('execute estimates cost from turn.completed token usage when pricing is configured', async () => {
+  await withMockedSpawn((call) => {
+    const child = new FakeChildProcess();
+    const outFile = getOutputFilePath(call.args);
+
+    setImmediate(() => {
+      writeFileSync(outFile, JSON.stringify({ output: 'done' }));
+      child.stdout.write(`${JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 2000, cached_input_tokens: 500, output_tokens: 1000 } })}\n`);
+      child.stdout.end();
+      child.emit('close', 0);
+    });
+
+    return child as unknown as ChildProcess;
+  }, async () => {
+    const bridge = new CodexBridge({
+      ...createCodexConfig(),
+      tokenPricing: {
+        inputPerMillion: 10,
+        cachedInputPerMillion: 1,
+        outputPerMillion: 20,
+      },
+    });
+    const result = await bridge.execute('Implement endpoint', process.cwd());
+
+    assert.equal(result.success, true);
+    assert.ok(Math.abs(result.cost_usd - 0.0355) < 1e-9);
+  });
+});
+
+test('execute keeps cost at zero without pricing even when usage tokens are present', async () => {
+  await withMockedSpawn((call) => {
+    const child = new FakeChildProcess();
+    const outFile = getOutputFilePath(call.args);
+
+    setImmediate(() => {
+      writeFileSync(outFile, JSON.stringify({ output: 'done' }));
+      child.stdout.write(`${JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 2000, cached_input_tokens: 500, output_tokens: 1000 } })}\n`);
+      child.stdout.end();
+      child.emit('close', 0);
+    });
+
+    return child as unknown as ChildProcess;
+  }, async () => {
+    const bridge = new CodexBridge(createCodexConfig());
+    const result = await bridge.execute('Implement endpoint', process.cwd());
+
+    assert.equal(result.success, true);
+    assert.equal(result.cost_usd, 0);
+  });
+});

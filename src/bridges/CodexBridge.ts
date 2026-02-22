@@ -206,65 +206,71 @@ ${prompt}`;
 }
 
 function extractCost(events: JsonlEvent[], pricing?: TokenPricing): number {
-  // 1. Search for explicit cost fields in events, preferring total cost fields.
+  return extractFromStructuredFields(events)
+    ?? extractFromEventText(events)
+    ?? estimateFromTokenUsage(events, pricing)
+    ?? 0;
+}
+
+function extractFromStructuredFields(events: JsonlEvent[]): number | null {
   let lastTotalCost = 0;
   let lastPartialCost = 0;
 
-  for (const e of events) {
-    const directTotal = firstPositiveNumber([e.total_cost_usd, e.total_cost]);
-    if (directTotal !== null) {
-      lastTotalCost = directTotal;
-    }
+  for (const event of events) {
+    const directTotal = firstPositiveNumber([event.total_cost_usd, event.total_cost]);
+    if (directTotal !== null) lastTotalCost = directTotal;
 
-    const directPartial = firstPositiveNumber([e.cost]);
-    if (directPartial !== null) {
-      lastPartialCost = directPartial;
-    }
+    const directPartial = firstPositiveNumber([event.cost]);
+    if (directPartial !== null) lastPartialCost = directPartial;
 
-    if (typeof e.usage === 'object' && e.usage !== null) {
-      const u = e.usage as Record<string, unknown>;
-      const usageTotal = firstPositiveNumber([u.total_cost_usd, u.total_cost]);
-      if (usageTotal !== null) {
-        lastTotalCost = usageTotal;
-      }
-
-      const usagePartial = firstPositiveNumber([u.cost]);
-      if (usagePartial !== null) {
-        lastPartialCost = usagePartial;
-      }
-    }
-
-    const textCosts = extractCostFromEventText(e);
-    if (textCosts.total !== null) {
-      lastTotalCost = textCosts.total;
-    }
-    if (textCosts.partial !== null) {
-      lastPartialCost = textCosts.partial;
-    }
+    if (typeof event.usage !== 'object' || event.usage === null) continue;
+    const usage = event.usage as Record<string, unknown>;
+    const usageTotal = firstPositiveNumber([usage.total_cost_usd, usage.total_cost]);
+    if (usageTotal !== null) lastTotalCost = usageTotal;
+    const usagePartial = firstPositiveNumber([usage.cost]);
+    if (usagePartial !== null) lastPartialCost = usagePartial;
   }
 
   if (lastTotalCost > 0) return lastTotalCost;
   if (lastPartialCost > 0) return lastPartialCost;
+  return null;
+}
 
-  // 2. Estimate from token usage in turn.completed events
-  if (pricing) {
-    let totalInput = 0, totalCached = 0, totalOutput = 0;
-    for (const e of events) {
-      if (e.type !== 'turn.completed' || typeof e.usage !== 'object' || !e.usage) continue;
-      const u = e.usage as Record<string, unknown>;
-      if (typeof u.input_tokens === 'number') totalInput += u.input_tokens;
-      if (typeof u.cached_input_tokens === 'number') totalCached += u.cached_input_tokens;
-      if (typeof u.output_tokens === 'number') totalOutput += u.output_tokens;
-    }
-    if (totalInput > 0 || totalOutput > 0) {
-      const nonCachedInput = Math.max(0, totalInput - totalCached);
-      return (nonCachedInput * pricing.inputPerMillion
-        + totalCached * pricing.cachedInputPerMillion
-        + totalOutput * pricing.outputPerMillion) / 1_000_000;
-    }
+function extractFromEventText(events: JsonlEvent[]): number | null {
+  let lastTotalCost = 0;
+  let lastPartialCost = 0;
+
+  for (const event of events) {
+    const costs = extractCostFromEventText(event);
+    if (costs.total !== null) lastTotalCost = costs.total;
+    if (costs.partial !== null) lastPartialCost = costs.partial;
   }
 
-  return 0;
+  if (lastTotalCost > 0) return lastTotalCost;
+  if (lastPartialCost > 0) return lastPartialCost;
+  return null;
+}
+
+function estimateFromTokenUsage(events: JsonlEvent[], pricing?: TokenPricing): number | null {
+  if (!pricing) return null;
+
+  let totalInput = 0;
+  let totalCached = 0;
+  let totalOutput = 0;
+
+  for (const event of events) {
+    if (event.type !== 'turn.completed' || typeof event.usage !== 'object' || event.usage === null) continue;
+    const usage = event.usage as Record<string, unknown>;
+    if (typeof usage.input_tokens === 'number' && Number.isFinite(usage.input_tokens)) totalInput += usage.input_tokens;
+    if (typeof usage.cached_input_tokens === 'number' && Number.isFinite(usage.cached_input_tokens)) totalCached += usage.cached_input_tokens;
+    if (typeof usage.output_tokens === 'number' && Number.isFinite(usage.output_tokens)) totalOutput += usage.output_tokens;
+  }
+
+  if (totalInput <= 0 && totalCached <= 0 && totalOutput <= 0) return null;
+  const nonCachedInput = Math.max(0, totalInput - totalCached);
+  return (nonCachedInput * pricing.inputPerMillion
+    + totalCached * pricing.cachedInputPerMillion
+    + totalOutput * pricing.outputPerMillion) / 1_000_000;
 }
 
 function extractCostFromEventText(event: JsonlEvent): { total: number | null; partial: number | null } {
