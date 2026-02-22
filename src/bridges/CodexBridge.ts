@@ -3,7 +3,7 @@ import type { CodexConfig, TokenPricing } from '../config/types.js';
 import { runProcess, spawnWithJsonl, type JsonlEvent } from '../utils/process.js';
 import { log } from '../utils/logger.js';
 import { tryParseReview } from '../utils/parse.js';
-import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -36,6 +36,50 @@ export class CodexBridge implements CodingAgent {
     }
   }
 
+  private async invokeCodex(
+    args: string[],
+    cwd: string,
+    opts?: {
+      timeout?: number;
+      onEvent?: (event: JsonlEvent) => void;
+      outFilePrefix?: string;
+    },
+  ): Promise<{
+    output: string;
+    events: JsonlEvent[];
+    exitCode: number;
+    stderr: string;
+  }> {
+    const outFile = join(tmpdir(), `${opts?.outFilePrefix ?? 'codex'}-${Date.now()}.json`);
+    const jsonFlagIndex = args.indexOf('--json');
+    const invokeArgs = jsonFlagIndex >= 0
+      ? [...args.slice(0, jsonFlagIndex + 1), '-o', outFile, ...args.slice(jsonFlagIndex + 1)]
+      : [...args, '-o', outFile];
+
+    const { exitCode, events, stderr } = await spawnWithJsonl('codex', invokeArgs, {
+      cwd,
+      ...(opts?.timeout && { timeout: opts.timeout }),
+      ...(opts?.onEvent && { onEvent: opts.onEvent }),
+    });
+
+    if (exitCode !== 0) {
+      log.warn('CodexBridge invokeCodex: non-zero exit code', { exitCode, stderr: stderr?.slice(0, 500) });
+    }
+
+    let output = '';
+    try {
+      output = readFileSync(outFile, 'utf-8');
+      unlinkSync(outFile);
+    } catch (err) {
+      log.debug('CodexBridge invokeCodex output file read failed', {
+        error: err,
+        inputPreview: String(args.at(-1) ?? '').slice(0, 200),
+      });
+    }
+
+    return { output, events, exitCode, stderr };
+  }
+
   async execute(prompt: string, cwd: string, options?: {
     systemPrompt?: string;
     maxTurns?: number;
@@ -44,14 +88,12 @@ export class CodexBridge implements CodingAgent {
     sandboxOverride?: CodexConfig['sandbox'];
   }): Promise<AgentResult> {
     const start = Date.now();
-    const outFile = join(tmpdir(), `codex-${Date.now()}.json`);
 
     try {
       const args = [
         'exec',
         ...this.sandboxArgs(options?.sandboxOverride),
         '--json',
-        '-o', outFile,
       ];
 
       if (options?.systemPrompt) {
@@ -60,9 +102,9 @@ export class CodexBridge implements CodingAgent {
 
       args.push(prompt);
 
-      const { exitCode, events, stderr } = await spawnWithJsonl('codex', args, {
-        cwd,
-        ...(options?.timeout && { timeout: options.timeout }),
+      const { output, exitCode, events, stderr } = await this.invokeCodex(args, cwd, {
+        timeout: options?.timeout,
+        outFilePrefix: 'codex',
         onEvent: (event) => {
           if (event.type === 'message' || event.type === 'function_call') {
             log.debug(`Codex: ${event.type}`, event);
@@ -70,21 +112,8 @@ export class CodexBridge implements CodingAgent {
         },
       });
 
-      // Read output file for final result
-      let output = '';
-      try {
-        output = readFileSync(outFile, 'utf-8');
-        unlinkSync(outFile);
-      } catch (err) {
-        log.debug('CodexBridge execute output file read failed', {
-          error: err,
-          inputPreview: prompt.slice(0, 200),
-        });
-      }
-
       // Non-zero exit code means Codex CLI itself failed (bad flags, crash, etc.)
       if (exitCode !== 0) {
-        log.warn('CodexBridge execute: non-zero exit code', { exitCode, stderr: stderr?.slice(0, 500) });
         return {
           success: false,
           output: stderr || `codex exec failed with exit code ${exitCode}`,
@@ -138,7 +167,6 @@ export class CodexBridge implements CodingAgent {
 
   async review(prompt: string, cwd: string): Promise<ReviewResult> {
     const start = Date.now();
-    const outFile = join(tmpdir(), `codex-review-${Date.now()}.json`);
 
     try {
       const reviewPrompt = `Review the uncommitted code changes in this repository.
@@ -148,32 +176,19 @@ Output your review as JSON: { "passed": boolean, "issues": [{ "severity": "criti
 ${prompt}`;
 
       // Reviews are read-only — enforce workspace-read regardless of config
-      const args = ['exec', ...this.sandboxArgs('workspace-read'), '--json', '-o', outFile, reviewPrompt];
-
-      const { exitCode, events, stderr } = await spawnWithJsonl('codex', args, {
-        cwd,
+      const args = ['exec', ...this.sandboxArgs('workspace-read'), '--json', reviewPrompt];
+      const { output, exitCode, events, stderr } = await this.invokeCodex(args, cwd, {
+        outFilePrefix: 'codex-review',
       });
 
       // Non-zero exit code means the CLI invocation itself failed
       if (exitCode !== 0) {
-        log.warn('CodexBridge review: non-zero exit code', { exitCode, stderr: stderr?.slice(0, 500) });
         return {
           passed: false,
           issues: [{ severity: 'critical', description: `codex exec failed (exit ${exitCode}): ${stderr?.slice(0, 300) ?? 'unknown error'}`, source: 'codex' }],
           summary: `Codex review failed with exit code ${exitCode}`,
           cost_usd: extractCost(events),
         };
-      }
-
-      let output = '';
-      try {
-        output = readFileSync(outFile, 'utf-8');
-        unlinkSync(outFile);
-      } catch (err) {
-        log.debug('CodexBridge review output file read failed', {
-          error: err,
-          inputPreview: reviewPrompt.slice(0, 200),
-        });
       }
 
       const cost = extractCost(events, this.config.tokenPricing);
