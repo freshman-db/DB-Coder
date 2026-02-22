@@ -76,6 +76,18 @@ function route(method: string, path: string, handler: RouteHandler): void {
   routes.push({ method, pattern: new RegExp(`^${pattern}$`), paramNames, handler });
 }
 
+export function safeSseWrite(res: ServerResponse, data: string): boolean {
+  if (res.writableEnded || res.destroyed) {
+    return false;
+  }
+  try {
+    res.write(data);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // --- Status ---
 route('GET', '/api/status', async (_req, res, ctx) => {
   const state = ctx.loop.getState();
@@ -161,18 +173,33 @@ route('GET', '/api/logs', async (req, res, ctx) => {
       'Access-Control-Allow-Origin': '*',
     });
 
-    const heartbeat = setInterval(() => {
-      res.write(': heartbeat\n\n');
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let removeListener = () => {};
+    let cleanedUp = false;
+    const cleanup = (): void => {
+      if (cleanedUp) {
+        return;
+      }
+      cleanedUp = true;
+      if (heartbeat !== undefined) {
+        clearInterval(heartbeat);
+      }
+      removeListener();
+    };
+
+    heartbeat = setInterval(() => {
+      if (!safeSseWrite(res, ': heartbeat\n\n')) {
+        cleanup();
+      }
     }, 15000);
 
-    const removeListener = log.addListener((entry: LogEntry) => {
-      res.write(`data: ${JSON.stringify(entry)}\n\n`);
+    removeListener = log.addListener((entry: LogEntry) => {
+      if (!safeSseWrite(res, `data: ${JSON.stringify(entry)}\n\n`)) {
+        cleanup();
+      }
     });
 
-    req.on('close', () => {
-      clearInterval(heartbeat);
-      removeListener();
-    });
+    req.on('close', cleanup);
   } else {
     // Return recent logs (read from file)
     json(res, { message: 'Use ?follow=true for SSE stream' });
@@ -401,11 +428,32 @@ route('GET', '/api/plans/:id/stream', async (req, res, ctx, params) => {
     'Access-Control-Allow-Origin': '*',
   });
 
-  const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 15000);
-  const remove = ctx.planWorkflow.addSSEListener(id, (event, data) => {
-    res.write(`event: ${event}\ndata: ${data}\n\n`);
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let remove = () => {};
+  let cleanedUp = false;
+  const cleanup = (): void => {
+    if (cleanedUp) {
+      return;
+    }
+    cleanedUp = true;
+    if (heartbeat !== undefined) {
+      clearInterval(heartbeat);
+    }
+    remove();
+  };
+
+  heartbeat = setInterval(() => {
+    if (!safeSseWrite(res, ': heartbeat\n\n')) {
+      cleanup();
+    }
+  }, 15000);
+
+  remove = ctx.planWorkflow.addSSEListener(id, (event, data) => {
+    if (!safeSseWrite(res, `event: ${event}\ndata: ${data}\n\n`)) {
+      cleanup();
+    }
   });
-  req.on('close', () => { clearInterval(heartbeat); remove(); });
+  req.on('close', cleanup);
 });
 
 route('POST', '/api/plans/:id/generate', async (req, res, ctx, params) => {
