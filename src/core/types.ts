@@ -47,4 +47,5 @@ export interface ExtractedExperience {
   tags: string[];
 }
 
-export type LoopState = 'idle' | 'scanning' | 'planning' | 'executing' | 'reviewing' | 'reflecting' | 'paused' | 'error';
+export type LoopState = 'idle' | 'scanning' | 'planning' | 'executing' | 'reviewing' | 'reflecting' | 'paused' | 'error'
+  | 'researching' | 'awaiting_approval' | 'analyzing';

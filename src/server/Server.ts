@@ -9,6 +9,9 @@ import type { CostTracker } from '../utils/cost.js';
 import type { Config } from '../config/Config.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PluginMonitor } from '../plugins/PluginMonitor.js';
+import type { PatrolManager } from '../core/ModeManager.js';
+import type { PlanWorkflow } from '../core/PlanWorkflow.js';
+import type { AnalysisWorkflow } from '../core/AnalysisWorkflow.js';
 import { handleRequest } from './routes.js';
 import { log } from '../utils/logger.js';
 
@@ -37,6 +40,9 @@ export class Server {
     private costTracker: CostTracker,
     private evolutionEngine?: EvolutionEngine,
     private pluginMonitor?: PluginMonitor,
+    private patrolManager?: PatrolManager,
+    private planWorkflow?: PlanWorkflow,
+    private analysisWorkflow?: AnalysisWorkflow,
   ) {
     // Web files directory (relative to compiled output)
     const thisDir = fileURLToPath(new URL('.', import.meta.url));
@@ -47,7 +53,7 @@ export class Server {
       this.webDir = join(thisDir, '..', '..', 'src', 'web');
     }
 
-    const ctx = { loop, taskStore, globalMemory, costTracker, config, evolutionEngine: this.evolutionEngine, pluginMonitor: this.pluginMonitor };
+    const ctx = { loop, taskStore, globalMemory, costTracker, config, evolutionEngine: this.evolutionEngine, pluginMonitor: this.pluginMonitor, patrolManager: this.patrolManager, planWorkflow: this.planWorkflow, analysisWorkflow: this.analysisWorkflow };
 
     this.server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       try {
@@ -142,7 +148,13 @@ export class Server {
 
   stop(): Promise<void> {
     return new Promise((resolve) => {
+      // Stop accepting new connections
       this.server.close(() => resolve());
+      // Force-close idle connections after a short timeout so SSE streams don't block shutdown
+      setTimeout(() => {
+        this.server.closeAllConnections();
+        resolve();
+      }, 2000);
     });
   }
 

@@ -13,6 +13,9 @@ import { TaskQueue } from './core/TaskQueue.js';
 import { MainLoop } from './core/MainLoop.js';
 import { CostTracker } from './utils/cost.js';
 import { Server } from './server/Server.js';
+import { PlanWorkflow } from './core/PlanWorkflow.js';
+import { AnalysisWorkflow } from './core/AnalysisWorkflow.js';
+import { PatrolManager } from './core/ModeManager.js';
 import { McpDiscovery } from './mcp/McpDiscovery.js';
 import { TrendAnalyzer } from './evolution/TrendAnalyzer.js';
 import { EvolutionEngine } from './evolution/EvolutionEngine.js';
@@ -79,14 +82,28 @@ program
     mainLoop.setEvolutionEngine(evolutionEngine);
     mainLoop.setPluginMonitor(pluginMonitor);
     mainLoop.setPromptRegistry(promptRegistry);
-    const server = new Server(config, mainLoop, taskStore, globalMemory, costTracker, evolutionEngine, pluginMonitor);
+
+    // Create workflow instances
+    const planWorkflow = new PlanWorkflow(brain, claudeBridge, codexBridge, taskStore, taskQueue, config, globalMemory);
+    const analysisWorkflow = new AnalysisWorkflow(brain, claudeBridge, taskStore, config);
+
+    // Create patrol manager
+    const patrolManager = new PatrolManager(mainLoop);
+
+    const server = new Server(config, mainLoop, taskStore, globalMemory, costTracker, evolutionEngine, pluginMonitor, patrolManager, planWorkflow, analysisWorkflow);
 
     // Global error handlers
     process.on('unhandledRejection', (err) => { log.error('Unhandled rejection', err); });
     process.on('uncaughtException', (err) => { log.error('Uncaught exception', err); });
 
-    // Graceful shutdown
+    // Graceful shutdown (with re-entry guard and force-exit on second signal)
+    let shuttingDown = false;
     const shutdown = async () => {
+      if (shuttingDown) {
+        log.info('Force exit');
+        process.exit(1);
+      }
+      shuttingDown = true;
       log.info('Shutting down...');
       await mainLoop.stop();
       await server.stop();
@@ -98,9 +115,9 @@ program
     process.on('SIGTERM', shutdown);
     process.on('SIGINT', shutdown);
 
-    // Start server and main loop
+    // Start server only — default to idle mode, user selects mode via API/UI
     await server.start();
-    mainLoop.start().catch(err => log.error('MainLoop error', err));
+    log.info('db-coder ready. Awaiting mode selection via Web UI or API.');
   });
 
 // --- Client commands ---

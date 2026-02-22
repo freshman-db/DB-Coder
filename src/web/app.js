@@ -162,6 +162,10 @@ const routes = [
   { pattern: /^#\/history$/, page: 'history', title: '历史记录' },
   { pattern: /^#\/logs$/, page: 'logs', title: '运行日志' },
   { pattern: /^#\/memory$/, page: 'memory', title: '记忆检索' },
+  { pattern: /^#\/plans$/, page: 'plans', title: '计划审批' },
+  { pattern: /^#\/plans\/(.+)$/, page: 'planDetail', title: '计划详情' },
+  { pattern: /^#\/analysis$/, page: 'analysis', title: '代码分析' },
+  { pattern: /^#\/analysis\/(.+)$/, page: 'analysisDetail', title: '分析报告' },
   { pattern: /^#\/plugins$/, page: 'plugins', title: '插件管理' },
   { pattern: /^#\/evolution$/, page: 'evolution', title: '进化分析' },
   { pattern: /^#\/settings$/, page: 'settings', title: '系统设置' },
@@ -192,7 +196,12 @@ function navigate() {
 function updateNav(page) {
   $$('.nav-item').forEach((item) => {
     const p = item.dataset.page;
-    item.classList.toggle('active', p === page || (page === 'taskDetail' && p === 'tasks'));
+    item.classList.toggle('active',
+      p === page
+      || (page === 'taskDetail' && p === 'tasks')
+      || (page === 'planDetail' && p === 'plans')
+      || (page === 'analysisDetail' && p === 'analysis')
+    );
   });
 }
 
@@ -217,6 +226,10 @@ function renderPage(page, param) {
     history: renderHistory,
     logs: renderLogs,
     memory: renderMemory,
+    plans: renderPlans,
+    planDetail: () => renderPlanDetail(param),
+    analysis: renderAnalysis,
+    analysisDetail: () => renderAnalysisDetail(param),
     plugins: renderPlugins,
     evolution: renderEvolution,
     settings: renderSettings,
@@ -235,6 +248,7 @@ async function renderDashboard() {
   const st = status || {};
   const co = cost || {};
   const stInfo = getStatus(st.state);
+  const patrolling = !!st.patrolling;
 
   // Extract today's cost from daily costs array (sorted by date DESC, [0] = most recent)
   const dailyCostsArr = Array.isArray(co.costs) ? co.costs : Array.isArray(st.dailyCosts) ? st.dailyCosts : [];
@@ -247,12 +261,16 @@ async function renderDashboard() {
   state.paused = !!st.paused;
   updatePauseBtn();
 
+  const patrolBtn = patrolling
+    ? `<button class="btn btn-sm btn-warning" onclick="stopPatrol()">停止巡逻</button>`
+    : `<button class="btn btn-sm btn-primary" onclick="startPatrol()">开始巡逻</button>`;
+
   content.innerHTML = `
     <div class="cards-grid">
       <div class="card">
-        <div class="card-label">运行状态</div>
-        <div class="card-value ${stInfo.badge === 'running' ? 'blue' : stInfo.badge === 'paused' ? 'orange' : ''}">${stInfo.label}</div>
-        <div class="card-sub">${st.paused ? '已暂停' : '正常运行'}</div>
+        <div class="card-label">巡逻状态</div>
+        <div class="card-value ${patrolling ? 'blue' : ''}">${patrolling ? '运行中' : '已停止'}</div>
+        <div class="card-sub">${patrolling ? st.state || '自动扫描与执行' : '等待指令'}</div>
       </div>
       <div class="card">
         <div class="card-label">当前任务</div>
@@ -268,6 +286,24 @@ async function renderDashboard() {
         <div class="card-label">健康评分</div>
         <div class="card-value ${healthColor}">${healthScore}</div>
         <div class="card-sub">综合运行质量</div>
+      </div>
+    </div>
+
+    <div class="cards-grid" style="margin-bottom:20px;">
+      <div class="card mode-card" style="cursor:default;">
+        <div class="card-label">巡逻模式</div>
+        <div class="card-sub" style="margin:8px 0;">自动 scan → plan → execute → review 循环</div>
+        ${patrolBtn}
+      </div>
+      <div class="card mode-card" style="cursor:pointer;" onclick="location.hash='#/plans'">
+        <div class="card-label">计划</div>
+        <div class="card-sub" style="margin:8px 0;">需求输入 → 深度研究 → 生成计划 → 审批</div>
+        <button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); showPlanForm()">新建计划</button>
+      </div>
+      <div class="card mode-card" style="cursor:pointer;" onclick="location.hash='#/analysis'">
+        <div class="card-label">分析</div>
+        <div class="card-sub" style="margin:8px 0;">按模块深度分析代码库</div>
+        <button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); showAnalysisForm()">发起分析</button>
       </div>
     </div>
 
@@ -310,6 +346,97 @@ async function renderDashboard() {
     updatePauseBtn();
     updateConnection(true);
   }, 10000);
+}
+
+// ---- Patrol control ----
+async function startPatrol() {
+  const result = await api('/patrol/start', { method: 'POST' });
+  if (result?.ok) {
+    toast('巡逻已启动');
+    renderDashboard();
+  }
+}
+
+async function stopPatrol() {
+  toast('正在停止巡逻...');
+  const result = await api('/patrol/stop', { method: 'POST' });
+  if (result?.ok) {
+    toast('巡逻已停止');
+    renderDashboard();
+  }
+}
+
+function showPlanForm() {
+  const overlay = $('#modalOverlay');
+  const modal = overlay.querySelector('.modal');
+  modal.querySelector('.modal-header h3').textContent = '新建计划';
+  modal.querySelector('.modal-body').innerHTML = `
+    <div class="form-group">
+      <label for="planDesc">需求描述</label>
+      <textarea id="planDesc" class="form-input" rows="4" placeholder="描述你希望实现的功能或改进..."></textarea>
+    </div>
+    <div class="form-group">
+      <label for="planGoals">目标 (可选, 每行一个)</label>
+      <textarea id="planGoals" class="form-input" rows="2" placeholder="例如：提升性能\n改善用户体验"></textarea>
+    </div>
+    <div class="form-group">
+      <label for="planConstraints">约束 (可选, 每行一个)</label>
+      <textarea id="planConstraints" class="form-input" rows="2" placeholder="例如：不能修改 API 接口\n保持向后兼容"></textarea>
+    </div>
+    <div class="form-group">
+      <label for="planModules">目标模块 (可选, 每行一个)</label>
+      <textarea id="planModules" class="form-input" rows="2" placeholder="例如：src/core/\nsrc/server/"></textarea>
+    </div>
+  `;
+  const submitBtn = modal.querySelector('#modalSubmit');
+  submitBtn.textContent = '提交计划';
+  submitBtn.onclick = async () => {
+    const desc = $('#planDesc')?.value?.trim();
+    if (!desc) { toast('请填写需求描述', 'error'); return; }
+    const goals = $('#planGoals')?.value?.split('\n').map(s => s.trim()).filter(Boolean) || [];
+    const constraints = $('#planConstraints')?.value?.split('\n').map(s => s.trim()).filter(Boolean) || [];
+    const targetModules = $('#planModules')?.value?.split('\n').map(s => s.trim()).filter(Boolean) || [];
+    const body = { description: desc };
+    if (goals.length) body.goals = goals;
+    if (constraints.length) body.constraints = constraints;
+    if (targetModules.length) body.targetModules = targetModules;
+    const result = await api('/plans', { method: 'POST', body: JSON.stringify(body) });
+    if (result) {
+      toast('计划生成已启动，请稍候查看');
+      overlay.classList.remove('show');
+      location.hash = '#/plans';
+    }
+  };
+  overlay.classList.add('show');
+}
+
+function showAnalysisForm() {
+  const overlay = $('#modalOverlay');
+  const modal = overlay.querySelector('.modal');
+  modal.querySelector('.modal-header h3').textContent = '发起代码分析';
+  modal.querySelector('.modal-body').innerHTML = `
+    <div class="form-group">
+      <label for="analysisPath">模块路径</label>
+      <input id="analysisPath" class="form-input" placeholder="例如：src/core/ 或留空分析整个项目">
+    </div>
+    <div class="form-group">
+      <label><input type="checkbox" id="analysisProject"> 分析整个项目</label>
+    </div>
+  `;
+  const submitBtn = modal.querySelector('#modalSubmit');
+  submitBtn.textContent = '开始分析';
+  submitBtn.onclick = async () => {
+    const isProject = $('#analysisProject')?.checked;
+    const modulePath = $('#analysisPath')?.value?.trim() || '';
+    const body = isProject ? { type: 'project' } : { modulePath };
+    const result = await api('/analysis', { method: 'POST', body: JSON.stringify(body) });
+    if (result) {
+      toast('代码分析已启动，请稍候查看');
+      overlay.classList.remove('show');
+      location.hash = '#/analysis';
+    }
+  };
+  overlay.classList.add('show');
 }
 
 function renderTaskRow(t) {
@@ -899,7 +1026,7 @@ async function renderSettings() {
       ${configRow('系统状态', getStatus(config.state).label)}
       ${configRow('是否暂停', config.paused ? '是' : '否')}
       ${configRow('当前任务', config.currentTaskId || '无')}
-      ${configRow('运行模式', config.mode || '-')}
+      ${configRow('巡逻', config.patrolling ? '运行中' : '已停止')}
     </div>
 
     <div class="config-block">
@@ -1028,6 +1155,184 @@ async function submitTask() {
     toast('任务创建成功');
     location.hash = '#/tasks';
   }
+}
+
+// ---- 计划审批页面 ----
+const planStatusLabels = {
+  draft: { label: '草案', badge: 'pending' },
+  approved: { label: '已批准', badge: 'done' },
+  rejected: { label: '已拒绝', badge: 'failed' },
+  expired: { label: '已过期', badge: 'paused' },
+};
+
+async function renderPlans() {
+  const content = $('#content');
+  const drafts = await api('/plans');
+
+  content.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+      <h2 style="margin:0;">计划审批</h2>
+      <button class="btn btn-primary" onclick="showPlanForm()">+ 新建计划</button>
+    </div>
+    <div class="list-container" id="planList">
+      ${!drafts || drafts.length === 0 ? '<div class="empty-state"><p>暂无计划草案</p></div>' :
+        drafts.map(d => {
+          const st = planStatusLabels[d.status] || planStatusLabels.draft;
+          const taskCount = d.plan?.tasks?.length ?? 0;
+          return `
+            <div class="list-item" onclick="location.hash='#/plans/${d.id}'">
+              <span class="badge badge-${st.badge}">${st.label}</span>
+              <span class="list-item-title" style="flex:1;">${escapeHtml((d.markdown || d.reasoning || '').split('\n')[0].slice(0, 80) || '计划 #' + d.id)}</span>
+              <span style="color:var(--text-muted);font-size:12px;">${taskCount} 任务</span>
+              <span style="color:var(--text-muted);font-size:12px;min-width:50px;text-align:right;">$${Number(d.cost_usd || 0).toFixed(2)}</span>
+              <span style="color:var(--text-muted);font-size:12px;min-width:70px;text-align:right;">${timeAgo(d.created_at)}</span>
+            </div>`;
+        }).join('')}
+    </div>
+  `;
+
+}
+
+async function renderPlanDetail(id) {
+  const content = $('#content');
+  const draft = await api(`/plans/${id}`);
+  if (!draft) { content.innerHTML = '<div class="empty-state"><p>计划不存在</p></div>'; return; }
+
+  const st = planStatusLabels[draft.status] || planStatusLabels.draft;
+  const tasks = draft.plan?.tasks || [];
+
+  content.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+      <div>
+        <a href="#/plans" style="font-size:12px;color:var(--text-muted);">&larr; 返回列表</a>
+        <h2 style="margin:4px 0 0;">计划 #${draft.id} <span class="badge badge-${st.badge}">${st.label}</span></h2>
+      </div>
+      <div style="display:flex;gap:8px;">
+        ${draft.status === 'draft' ? `
+          <button class="btn btn-success" onclick="approvePlan(${draft.id})">批准</button>
+          <button class="btn btn-warning" onclick="rejectPlan(${draft.id})">拒绝</button>
+        ` : ''}
+        ${draft.status === 'approved' ? `
+          <button class="btn btn-primary" onclick="executePlan(${draft.id})">执行计划</button>
+        ` : ''}
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:16px;padding:16px;">
+      <div class="card-label">分析摘要</div>
+      <div style="white-space:pre-wrap;font-size:13px;max-height:200px;overflow-y:auto;">${escapeHtml(draft.analysis_summary || '无').slice(0, 2000)}</div>
+    </div>
+    <div class="card" style="margin-bottom:16px;padding:16px;">
+      <div class="card-label">计划内容</div>
+      <div style="white-space:pre-wrap;font-size:13px;" id="planMarkdown">${escapeHtml(draft.markdown || draft.reasoning || '无')}</div>
+    </div>
+    <div class="card" style="padding:16px;">
+      <div class="card-label">任务列表 (${tasks.length})</div>
+      <div class="list-container">
+        ${tasks.map((t, i) => `
+          <div class="list-item" style="cursor:default;">
+            <span style="color:var(--text-muted);font-size:12px;min-width:30px;">#${i + 1}</span>
+            <span class="list-item-title" style="flex:1;">${escapeHtml(t.description || '')}</span>
+            <span class="badge badge-${t.priority <= 1 ? 'high' : t.priority === 2 ? 'medium' : 'low'}">${t.executor || 'auto'}</span>
+            <span style="color:var(--text-muted);font-size:12px;">${t.estimatedComplexity || ''}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+    <div style="margin-top:12px;color:var(--text-muted);font-size:12px;">
+      费用: $${Number(draft.cost_usd || 0).toFixed(4)} | 创建: ${timeAgo(draft.created_at)}
+      ${draft.reviewed_at ? ' | 审核: ' + timeAgo(draft.reviewed_at) : ''}
+    </div>
+  `;
+}
+
+async function approvePlan(id) {
+  const result = await api(`/plans/${id}/approve`, { method: 'POST', body: '{}' });
+  if (result?.ok) {
+    toast('计划已批准');
+    renderPlanDetail(id);
+  }
+}
+
+async function rejectPlan(id) {
+  const result = await api(`/plans/${id}/reject`, { method: 'POST', body: '{}' });
+  if (result?.ok) {
+    toast('计划已拒绝');
+    renderPlanDetail(id);
+  }
+}
+
+async function executePlan(id) {
+  const result = await api(`/plans/${id}/execute`, { method: 'POST', body: '{}' });
+  if (result?.ok) {
+    toast('计划任务已加入队列');
+    location.hash = '#/tasks';
+  }
+}
+
+// ---- 代码分析页面 ----
+async function renderAnalysis() {
+  const content = $('#content');
+  const reports = await api('/analysis');
+
+  content.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+      <h2 style="margin:0;">代码分析</h2>
+      <button class="btn btn-primary" onclick="showAnalysisForm()">+ 发起分析</button>
+    </div>
+    <div class="list-container" id="analysisList">
+      ${!reports || reports.length === 0 ? '<div class="empty-state"><p>暂无分析报告</p></div>' :
+        reports.map(r => `
+          <div class="list-item" onclick="location.hash='#/analysis/${r.id}'">
+            <span class="list-item-title" style="flex:1;">${escapeHtml(r.title || '分析 #' + r.id)}</span>
+            <span style="color:var(--text-muted);font-size:12px;">${r.modules?.length ?? 0} 模块</span>
+            <span style="color:var(--text-muted);font-size:12px;min-width:80px;">${escapeHtml(r.module_path || '.')}</span>
+            <span style="color:var(--text-muted);font-size:12px;min-width:50px;text-align:right;">$${Number(r.cost_usd || 0).toFixed(2)}</span>
+            <span style="color:var(--text-muted);font-size:12px;min-width:70px;text-align:right;">${timeAgo(r.created_at)}</span>
+          </div>
+        `).join('')}
+    </div>
+  `;
+
+}
+
+async function renderAnalysisDetail(id) {
+  const content = $('#content');
+  const report = await api(`/analysis/${id}`);
+  if (!report) { content.innerHTML = '<div class="empty-state"><p>报告不存在</p></div>'; return; }
+
+  const modules = report.modules || [];
+  const complexityColors = { low: 'green', medium: 'orange', high: 'red' };
+
+  content.innerHTML = `
+    <div style="margin-bottom:16px;">
+      <a href="#/analysis" style="font-size:12px;color:var(--text-muted);">&larr; 返回列表</a>
+      <h2 style="margin:4px 0 0;">${escapeHtml(report.title || '分析报告 #' + report.id)}</h2>
+      <div style="color:var(--text-muted);font-size:12px;">模块: ${escapeHtml(report.module_path || '.')} | 费用: $${Number(report.cost_usd || 0).toFixed(4)} | ${timeAgo(report.created_at)}</div>
+    </div>
+    <div class="card" style="margin-bottom:16px;padding:16px;">
+      <div class="card-label">摘要</div>
+      <div style="white-space:pre-wrap;font-size:13px;">${escapeHtml(report.summary || '无')}</div>
+    </div>
+    <div class="card" style="margin-bottom:16px;padding:16px;">
+      <div class="card-label">详细报告</div>
+      <div style="white-space:pre-wrap;font-size:13px;max-height:500px;overflow-y:auto;">${escapeHtml(report.markdown || '无')}</div>
+    </div>
+    ${modules.length > 0 ? `
+    <div class="card" style="padding:16px;">
+      <div class="card-label">模块列表 (${modules.length})</div>
+      <div class="list-container">
+        ${modules.map(m => `
+          <div class="list-item" style="cursor:default;">
+            <span class="badge badge-${m.type === 'class' ? 'running' : m.type === 'function' ? 'pending' : 'done'}">${m.type}</span>
+            <span class="list-item-title" style="flex:1;">${escapeHtml(m.name)}</span>
+            <span style="color:var(--text-muted);font-size:12px;">${escapeHtml(m.path)}</span>
+            <span style="color:${complexityColors[m.complexity] || 'inherit'};font-size:12px;">${m.complexity}</span>
+            <span style="color:var(--text-muted);font-size:12px;">${m.lines}L</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>` : ''}
+  `;
 }
 
 // ---- 移动端菜单 ----

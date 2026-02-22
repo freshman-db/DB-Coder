@@ -10,7 +10,7 @@ import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PluginMonitor } from '../plugins/PluginMonitor.js';
 import type { PromptRegistry } from '../prompts/PromptRegistry.js';
 import type { Task, SubTaskRecord, ReviewEvent } from '../memory/types.js';
-import type { MergedReviewResult, LoopState } from './types.js';
+import type { MergedReviewResult, LoopState, ProjectAnalysis } from './types.js';
 import type { AgentResult, ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
 import { executorPrompt } from '../prompts/executor.js';
 import { reviewerPrompt } from '../prompts/reviewer.js';
@@ -29,6 +29,9 @@ export class MainLoop {
   private paused = false;
   private currentTaskId: string | null = null;
   private lockFile: string;
+
+  private stoppedPromise: Promise<void> | null = null;
+  private stoppedResolve: (() => void) | null = null;
 
   private evolutionEngine?: EvolutionEngine;
   private pluginMonitor?: PluginMonitor;
@@ -54,6 +57,7 @@ export class MainLoop {
   getState(): LoopState { return this.state; }
   getCurrentTaskId(): string | null { return this.currentTaskId; }
   isPaused(): boolean { return this.paused; }
+  isRunning(): boolean { return this.running; }
 
   setEvolutionEngine(engine: EvolutionEngine): void {
     this.evolutionEngine = engine;
@@ -75,6 +79,7 @@ export class MainLoop {
     }
 
     this.running = true;
+    this.stoppedPromise = new Promise<void>(resolve => { this.stoppedResolve = resolve; });
     log.info('Main loop started');
 
     // Recover zombie tasks left in 'active' state from a previous crash
@@ -118,11 +123,25 @@ export class MainLoop {
       this.running = false;
       this.state = 'idle';
       log.info('Main loop stopped');
+      this.stoppedResolve?.();
+      this.stoppedResolve = null;
+      this.stoppedPromise = null;
     }
   }
 
   async stop(): Promise<void> {
     this.running = false;
+  }
+
+  /** Wait for start() to fully exit (including finally block). Use after stop(). */
+  async waitForStopped(timeoutMs = 120_000): Promise<void> {
+    if (!this.stoppedPromise) return;
+    const timeout = new Promise<void>((_, reject) =>
+      setTimeout(() => reject(new Error('Timeout waiting for MainLoop to stop')), timeoutMs),
+    );
+    await Promise.race([this.stoppedPromise, timeout]).catch(err => {
+      log.warn(`${err}`);
+    });
   }
 
   pause(): void {
@@ -165,28 +184,30 @@ export class MainLoop {
       }
       log.info(`No new changes but ${queued.length} queued tasks.`);
     } else {
-      const { analysis, cost } = await this.brain.scanProject(projectPath, 'normal');
-
-      // EVOLVE: assess goal progress after scan
-      if (this.evolutionEngine) {
-        try {
-          const lastScan = await this.taskStore.getLastScan(projectPath);
-          await this.evolutionEngine.assessGoalProgress(projectPath, analysis, lastScan?.id ?? null);
-          await this.evolutionEngine.applyPendingProposals(projectPath);
-        } catch (err) {
-          log.warn(`Evolution goal assessment failed: ${err}`);
-        }
-      }
+      const { analysis } = await this.brain.scanProject(projectPath, 'normal');
 
       // PLAN
       if (analysis.issues.length > 0 || analysis.opportunities.length > 0) {
         this.state = 'planning';
-        const { plan, cost: planCost } = await this.brain.createPlan(projectPath, analysis);
+        const { plan } = await this.brain.createPlan(projectPath, analysis);
 
         if (plan.tasks.length > 0) {
           await this.taskQueue.enqueue(projectPath, plan);
           log.info(`Planned ${plan.tasks.length} new tasks`);
         }
+      }
+    }
+
+    // EVOLVE: assess goal progress (use fresh scan or last saved scan)
+    if (this.evolutionEngine) {
+      try {
+        const lastScan = await this.taskStore.getLastScan(projectPath);
+        if (lastScan) {
+          await this.evolutionEngine.assessGoalProgress(projectPath, lastScan.result, lastScan.id);
+          await this.evolutionEngine.applyPendingProposals(projectPath);
+        }
+      } catch (err) {
+        log.warn(`Evolution goal assessment failed: ${err}`);
       }
     }
 
@@ -204,8 +225,11 @@ export class MainLoop {
     this.state = 'idle';
   }
 
-  /** Run a single manually-triggered scan */
+  /** Run a single manually-triggered scan (not allowed while patrol loop is running) */
   async triggerScan(depth: 'quick' | 'normal' | 'deep' = 'normal'): Promise<void> {
+    if (this.running) {
+      throw new Error('Cannot trigger manual scan while patrol loop is running');
+    }
     this.state = 'scanning';
     try {
       await this.brain.scanProject(this.config.projectPath, depth);
@@ -227,6 +251,29 @@ export class MainLoop {
 
     try {
       ({ originalBranch, startCommit } = await this.prepareTaskBranch(task, branchName, projectPath));
+
+      // Auto-decompose: if task has no subtasks, use Brain to generate them
+      if (!task.subtasks || (task.subtasks as SubTaskRecord[]).length === 0) {
+        log.info('Task has no subtasks, auto-decomposing...');
+        const analysis: ProjectAnalysis = {
+          issues: [{ type: 'feature', severity: 'medium', description: task.task_description, suggestion: '' }],
+          opportunities: [],
+          projectHealth: 50,
+          summary: task.task_description,
+        };
+        const { plan } = await this.brain.createPlan(projectPath, analysis);
+        const planTask = plan.tasks[0];
+        if (planTask?.subtasks?.length) {
+          const subtaskRecords: SubTaskRecord[] = planTask.subtasks.map(st => ({
+            id: st.id, description: st.description, executor: st.executor, status: 'pending' as const,
+          }));
+          task.subtasks = subtaskRecords;
+          await this.taskStore.updateTask(task.id, { subtasks: subtaskRecords, plan: planTask });
+        } else {
+          task.subtasks = [{ id: 'S1', description: task.task_description, executor: 'codex', status: 'pending' }];
+          await this.taskStore.updateTask(task.id, { subtasks: task.subtasks });
+        }
+      }
 
       const { subtasks, stuckAdjustments, aborted } = await this.executeSubtasks(task, branchName, projectPath);
       if (aborted) return;

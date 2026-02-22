@@ -6,6 +6,10 @@ import type { CostTracker } from '../utils/cost.js';
 import type { Config } from '../config/Config.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PluginMonitor } from '../plugins/PluginMonitor.js';
+import type { PatrolManager } from '../core/ModeManager.js';
+import type { PlanWorkflow } from '../core/PlanWorkflow.js';
+import type { AnalysisWorkflow } from '../core/AnalysisWorkflow.js';
+import type { PlanRequest } from '../prompts/brain.js';
 import { log, type LogEntry } from '../utils/logger.js';
 import { isRecord } from '../utils/parse.js';
 
@@ -17,6 +21,9 @@ interface RouteContext {
   config: Config;
   evolutionEngine?: EvolutionEngine;
   pluginMonitor?: PluginMonitor;
+  patrolManager?: PatrolManager;
+  planWorkflow?: PlanWorkflow;
+  analysisWorkflow?: AnalysisWorkflow;
 }
 
 type RouteHandler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext, params: Record<string, string>) => Promise<void>;
@@ -76,8 +83,9 @@ route('GET', '/api/status', async (_req, res, ctx) => {
   const state = ctx.loop.getState();
   const taskId = ctx.loop.getCurrentTaskId();
   const paused = ctx.loop.isPaused();
+  const patrolling = ctx.loop.isRunning();
   const daily = await ctx.costTracker.getDailySummary();
-  json(res, { state, currentTaskId: taskId, paused, dailyCosts: daily });
+  json(res, { state, currentTaskId: taskId, paused, patrolling, dailyCosts: daily });
 });
 
 // --- Tasks ---
@@ -130,9 +138,12 @@ route('POST', '/api/control/resume', async (_req, res, ctx) => {
 });
 
 route('POST', '/api/control/scan', async (req, res, ctx) => {
+  if (ctx.loop.isRunning()) {
+    json(res, { error: 'Cannot trigger manual scan while patrol is running' }, 409);
+    return;
+  }
   const body = await readBody(req);
   const depth = (body as { depth?: string }).depth ?? 'normal';
-  // Trigger scan asynchronously
   ctx.loop.triggerScan(depth as 'quick' | 'normal' | 'deep').catch(err => log.error('Scan error', err));
   json(res, { triggered: true, depth });
 });
@@ -325,6 +336,126 @@ route('POST', '/api/plugins/:name/disable', async (_req, res, ctx, params) => {
   if (!ctx.pluginMonitor) { json(res, { error: 'Plugin monitor not available' }, 503); return; }
   const ok = await ctx.pluginMonitor.disablePlugin(params.name);
   json(res, { ok, plugin: params.name }, ok ? 200 : 500);
+});
+
+// --- Patrol Control ---
+route('POST', '/api/patrol/start', async (_req, res, ctx) => {
+  if (!ctx.patrolManager) { json(res, { error: 'Patrol manager not available' }, 503); return; }
+  try {
+    await ctx.patrolManager.startPatrol();
+    json(res, { ok: true, patrolling: true });
+  } catch (err) {
+    if (err instanceof Error) { json(res, { error: err.message }, 409); return; }
+    throw err;
+  }
+});
+
+route('POST', '/api/patrol/stop', async (_req, res, ctx) => {
+  if (!ctx.patrolManager) { json(res, { error: 'Patrol manager not available' }, 503); return; }
+  try {
+    await ctx.patrolManager.stopPatrol();
+    json(res, { ok: true, patrolling: false });
+  } catch (err) {
+    if (err instanceof Error) { json(res, { error: err.message }, 400); return; }
+    throw err;
+  }
+});
+
+// --- Plans (independent operations, no mode check) ---
+route('POST', '/api/plans', async (req, res, ctx) => {
+  if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
+  const body = await readBody(req) as Record<string, unknown>;
+  const description = body.description;
+  if (typeof description !== 'string' || description.trim().length === 0) {
+    json(res, { error: 'description is required' }, 400);
+    return;
+  }
+  const request: PlanRequest = {
+    description: description.trim(),
+    goals: Array.isArray(body.goals) ? body.goals.filter((g): g is string => typeof g === 'string') : undefined,
+    constraints: Array.isArray(body.constraints) ? body.constraints.filter((c): c is string => typeof c === 'string') : undefined,
+    targetModules: Array.isArray(body.targetModules) ? body.targetModules.filter((m): m is string => typeof m === 'string') : undefined,
+  };
+  const submitPromise = ctx.planWorkflow.submitRequest(ctx.config.projectPath, request);
+  json(res, { ok: true, message: 'Plan generation started' }, 202);
+  submitPromise.catch(err => log.error('Plan submission failed', err));
+});
+
+route('GET', '/api/plans', async (req, res, ctx) => {
+  const url = new URL(req.url ?? '', `http://${req.headers.host}`);
+  const status = url.searchParams.get('status') as import('../memory/types.js').PlanReviewStatus | null;
+  const drafts = await ctx.taskStore.listPlanDrafts(ctx.config.projectPath, status ?? undefined);
+  json(res, drafts);
+});
+
+route('GET', '/api/plans/:id', async (_req, res, ctx, params) => {
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  const draft = await ctx.taskStore.getPlanDraft(id);
+  if (!draft) { json(res, { error: 'not found' }, 404); return; }
+  json(res, draft);
+});
+
+route('POST', '/api/plans/:id/approve', async (req, res, ctx, params) => {
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  const body = await readBody(req) as Record<string, unknown>;
+  const annotations = Array.isArray(body.annotations) ? body.annotations : undefined;
+  await ctx.taskStore.updatePlanDraftStatus(id, 'approved', annotations);
+  json(res, { ok: true, status: 'approved' });
+});
+
+route('POST', '/api/plans/:id/reject', async (_req, res, ctx, params) => {
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  await ctx.taskStore.updatePlanDraftStatus(id, 'rejected');
+  json(res, { ok: true, status: 'rejected' });
+});
+
+route('POST', '/api/plans/:id/revise', async (_req, res, ctx, params) => {
+  if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  const revisePromise = ctx.planWorkflow.revisePlan(id);
+  json(res, { ok: true, message: 'Plan revision started' }, 202);
+  revisePromise.catch(err => log.error('Plan revision failed', err));
+});
+
+route('POST', '/api/plans/:id/execute', async (_req, res, ctx, params) => {
+  if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  try {
+    await ctx.planWorkflow.executeApprovedPlan(id);
+    json(res, { ok: true, message: 'Plan tasks enqueued' });
+  } catch (err) {
+    if (err instanceof Error) { json(res, { error: err.message }, 400); return; }
+    throw err;
+  }
+});
+
+// --- Analysis (independent operation, no mode check) ---
+route('POST', '/api/analysis', async (req, res, ctx) => {
+  if (!ctx.analysisWorkflow) { json(res, { error: 'Analysis workflow not available' }, 503); return; }
+  const body = await readBody(req) as Record<string, unknown>;
+  const modulePath = typeof body.modulePath === 'string' ? body.modulePath : '';
+  const isProject = body.type === 'project';
+  const analysisPromise = ctx.analysisWorkflow.analyzeModule(ctx.config.projectPath, isProject ? '.' : modulePath);
+  json(res, { ok: true, message: 'Analysis started' }, 202);
+  analysisPromise.catch(err => log.error('Analysis failed', err));
+});
+
+route('GET', '/api/analysis', async (_req, res, ctx) => {
+  const reports = await ctx.taskStore.listAnalysisReports(ctx.config.projectPath);
+  json(res, reports);
+});
+
+route('GET', '/api/analysis/:id', async (_req, res, ctx, params) => {
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) { json(res, { error: 'Invalid report ID' }, 400); return; }
+  const report = await ctx.taskStore.getAnalysisReport(id);
+  if (!report) { json(res, { error: 'not found' }, 404); return; }
+  json(res, report);
 });
 
 // --- Route matching ---
