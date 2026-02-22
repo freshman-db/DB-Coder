@@ -86,6 +86,7 @@ export class Brain implements QuestionHandler {
       maxTurns: depth === 'deep' ? 30 : depth === 'normal' ? 20 : 10,
     });
 
+    log.debug(`Scan output length: ${result.output.length} chars, success: ${result.success}`);
     const analysis = parseAnalysis(result.output);
     const commitHash = await getHeadCommit(projectPath).catch(() => 'unknown');
 
@@ -99,7 +100,7 @@ export class Brain implements QuestionHandler {
       cost_usd: result.cost_usd,
     });
 
-    log.info(`Scan complete. Health: ${analysis.projectHealth}/100, Issues: ${analysis.issues.length}`);
+    log.info(`Scan complete. Health: ${analysis.projectHealth}/100, Issues: ${analysis.issues.length}, Opportunities: ${analysis.opportunities.length}`);
     return { analysis, cost: result.cost_usd };
   }
 
@@ -315,11 +316,18 @@ export class Brain implements QuestionHandler {
   }
 }
 
+/** Strip markdown code fences (```json ... ```) so the JSON parser can find the object. */
+function stripCodeFences(text: string): string {
+  return text.replace(/```(?:json|JSON)?\s*\n?([\s\S]*?)```/g, '$1');
+}
+
 function extractObjectByKey(text: string, requiredKey: string): Record<string, unknown> | null {
-  const parsed = extractJsonFromText(
-    text,
-    (value) => isRecord(value) && Object.prototype.hasOwnProperty.call(value, requiredKey),
-  );
+  const matcher = (value: unknown) => isRecord(value) && Object.prototype.hasOwnProperty.call(value, requiredKey);
+  // Try raw text first, then with code fences stripped
+  let parsed = extractJsonFromText(text, matcher);
+  if (!isRecord(parsed)) {
+    parsed = extractJsonFromText(stripCodeFences(text), matcher);
+  }
   return isRecord(parsed) ? parsed : null;
 }
 
@@ -336,6 +344,7 @@ export function parseAnalysis(output: string): ProjectAnalysis {
       featureGaps: Array.isArray(parsed.featureGaps) ? parsed.featureGaps : undefined,
     };
   }
+  log.warn(`parseAnalysis: failed to extract JSON from scan output (${output.length} chars). Using fallback. First 300 chars: ${output.slice(0, 300)}`);
   return {
     issues: [],
     opportunities: [],
@@ -352,6 +361,7 @@ export function parsePlan(output: string): TaskPlan {
       reasoning: (parsed.reasoning as string) ?? '',
     };
   }
+  log.warn(`parsePlan: failed to extract JSON from plan output (${output.length} chars). First 300 chars: ${output.slice(0, 300)}`);
   return { tasks: [], reasoning: output.slice(0, 500) };
 }
 

@@ -187,7 +187,8 @@ export class MainLoop {
       const { analysis } = await this.brain.scanProject(projectPath, 'normal');
 
       // PLAN
-      if (analysis.issues.length > 0 || analysis.opportunities.length > 0) {
+      const actionableItems = analysis.issues.length + analysis.opportunities.length;
+      if (actionableItems > 0) {
         this.state = 'planning';
         const { plan } = await this.brain.createPlan(projectPath, analysis);
 
@@ -195,6 +196,8 @@ export class MainLoop {
           await this.taskQueue.enqueue(projectPath, plan);
           log.info(`Planned ${plan.tasks.length} new tasks`);
         }
+      } else {
+        log.info(`Scan found no actionable items (health: ${analysis.projectHealth}/100). Skipping planning.`);
       }
     }
 

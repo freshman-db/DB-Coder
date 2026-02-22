@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { resolve } from 'node:path';
 import { Command } from 'commander';
 import { Config } from './config/Config.js';
 import { Client } from './client/Client.js';
@@ -34,7 +35,7 @@ program
   .description('Start the db-coder service')
   .option('-p, --project <path>', 'Project path', process.cwd())
   .action(async (opts) => {
-    const projectPath = opts.project;
+    const projectPath = resolve(opts.project);
     log.info(`Starting db-coder for project: ${projectPath}`);
 
     const config = new Config(projectPath);
