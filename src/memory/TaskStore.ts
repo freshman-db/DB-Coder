@@ -1,6 +1,15 @@
 import type postgres from 'postgres';
 import type { Task, TaskLog, TaskStatus, ScanResult, ReviewEvent, RecurringIssueCategory, PlanDraft, PlanReviewStatus, PlanDraftAnnotation, ChatMessage, ChatStatus } from './types.js';
 import type { Adjustment, AdjustmentCategory, AdjustmentStatus, GoalProgress, ConfigProposal, ProposalStatus, PromptVersion, PromptName, PromptPatch, PromptMetrics, PromptVersionStatus } from '../evolution/types.js';
+import type {
+  BaselineMetricsJson,
+  ChatMessageMetadata,
+  ConfigProposalValue,
+  PatchSetJson,
+  ReviewAnnotationsJson,
+  ScanResultJson,
+  TaskPlanJson,
+} from './schemas.js';
 import { closeDb, getDb } from '../db.js';
 import { log } from '../utils/logger.js';
 
@@ -396,7 +405,7 @@ export class TaskStore {
     await sql`
       INSERT INTO scan_results (project_path, commit_hash, depth, result, health_score, cost_usd)
       VALUES (${scan.project_path}, ${scan.commit_hash}, ${scan.depth},
-              ${sql.json(scan.result as any)}, ${scan.health_score}, ${scan.cost_usd})
+              ${sql.json(scan.result as ScanResultJson & postgres.JSONValue)}, ${scan.health_score}, ${scan.cost_usd})
     `;
   }
 
@@ -526,8 +535,8 @@ export class TaskStore {
     const sql = this.getSql();
     const [row] = await sql<ConfigProposal[]>`
       INSERT INTO config_proposals (project_path, field_path, current_value, proposed_value, reason, confidence)
-      VALUES (${cp.project_path}, ${cp.field_path}, ${sql.json(cp.current_value as any)},
-              ${sql.json(cp.proposed_value as any)}, ${cp.reason}, ${cp.confidence})
+      VALUES (${cp.project_path}, ${cp.field_path}, ${sql.json(cp.current_value as ConfigProposalValue)},
+              ${sql.json(cp.proposed_value as ConfigProposalValue)}, ${cp.reason}, ${cp.confidence})
       RETURNING *
     `;
     return row;
@@ -568,7 +577,7 @@ export class TaskStore {
     await sql`
       INSERT INTO review_events (task_id, attempt, passed, must_fix_count, should_fix_count, issue_categories, fix_agent, duration_ms, cost_usd)
       VALUES (${event.task_id}, ${event.attempt}, ${event.passed}, ${event.must_fix_count},
-              ${event.should_fix_count}, ${sql.json(event.issue_categories as any)},
+              ${event.should_fix_count}, ${sql.json(event.issue_categories)},
               ${event.fix_agent}, ${event.duration_ms}, ${event.cost_usd})
     `;
   }
@@ -628,8 +637,8 @@ export class TaskStore {
     const [row] = await sql<PromptVersion[]>`
       INSERT INTO prompt_versions (project_path, prompt_name, version, patches, rationale, confidence, baseline_metrics)
       VALUES (${pv.project_path}, ${pv.prompt_name}, ${pv.version},
-              ${sql.json(pv.patches as any)}, ${pv.rationale}, ${pv.confidence},
-              ${pv.baseline_metrics ? sql.json(pv.baseline_metrics as any) : null})
+              ${sql.json(pv.patches as PatchSetJson & postgres.JSONValue)}, ${pv.rationale}, ${pv.confidence},
+              ${pv.baseline_metrics ? sql.json(pv.baseline_metrics as BaselineMetricsJson & postgres.JSONValue) : null})
       RETURNING *
     `;
     return row;
@@ -732,7 +741,7 @@ export class TaskStore {
     const sql = this.getSql();
     const [row] = await sql<PlanDraft[]>`
       INSERT INTO plan_drafts (project_path, plan, analysis_summary, reasoning, markdown, scan_id, cost_usd)
-      VALUES (${draft.project_path}, ${sql.json(draft.plan as any)}, ${draft.analysis_summary},
+      VALUES (${draft.project_path}, ${sql.json(draft.plan as TaskPlanJson & postgres.JSONValue)}, ${draft.analysis_summary},
               ${draft.reasoning}, ${draft.markdown}, ${draft.scan_id ?? null}, ${draft.cost_usd ?? 0})
       RETURNING *
     `;
@@ -768,7 +777,7 @@ export class TaskStore {
     if (annotations) {
       await sql`
         UPDATE plan_drafts
-        SET status = ${status}, annotations = ${sql.json(annotations as any)}, reviewed_at = NOW()
+        SET status = ${status}, annotations = ${sql.json(annotations as ReviewAnnotationsJson & postgres.JSONValue)}, reviewed_at = NOW()
         WHERE id = ${id}
       `;
     } else {
@@ -796,7 +805,7 @@ export class TaskStore {
     const sql = this.getSql();
     const [row] = await sql<ChatMessage[]>`
       INSERT INTO plan_chat_messages (session_id, role, content, metadata)
-      VALUES (${sessionId}, ${role}, ${content}, ${sql.json((metadata ?? {}) as any)})
+      VALUES (${sessionId}, ${role}, ${content}, ${sql.json((metadata ?? {}) as ChatMessageMetadata)})
       RETURNING *
     `;
     return row;
@@ -834,7 +843,7 @@ export class TaskStore {
     const sql = this.getSql();
     await sql`
       UPDATE plan_drafts
-      SET plan = ${sql.json(data.plan as any)},
+      SET plan = ${sql.json(data.plan as TaskPlanJson & postgres.JSONValue)},
           markdown = ${data.markdown},
           reasoning = ${data.reasoning},
           cost_usd = ${data.cost_usd}
