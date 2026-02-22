@@ -225,13 +225,21 @@ function renderPage(page, param) {
 
 // ---- 仪表盘 ----
 async function renderDashboard() {
-  const [status, cost] = await Promise.all([api('/status'), api('/cost')]);
+  const [status, cost, evoSummary] = await Promise.all([
+    api('/status'), api('/cost'), api('/evolution/summary').catch(() => null),
+  ]);
   const content = $('#content');
 
   const st = status || {};
   const co = cost || {};
   const stInfo = getStatus(st.state);
-  const healthScore = st.healthScore ?? '-';
+
+  // Extract today's cost from daily costs array (sorted by date DESC, [0] = most recent)
+  const dailyCostsArr = Array.isArray(co.costs) ? co.costs : Array.isArray(st.dailyCosts) ? st.dailyCosts : [];
+  const todayCost = dailyCostsArr.length > 0 ? Number(dailyCostsArr[0].total_cost_usd || 0) : 0;
+
+  // Health score from evolution trend data
+  const healthScore = evoSummary?.trends?.health?.current ?? '-';
   const healthColor = healthScore >= 80 ? 'green' : healthScore >= 50 ? 'orange' : 'red';
 
   state.paused = !!st.paused;
@@ -251,8 +259,8 @@ async function renderDashboard() {
       </div>
       <div class="card">
         <div class="card-label">今日费用</div>
-        <div class="card-value green">$${(co.dailyCost ?? st.dailyCosts ?? 0).toFixed(2)}</div>
-        <div class="card-sub">会话累计 $${(co.sessionCost ?? 0).toFixed(2)}</div>
+        <div class="card-value green">$${todayCost.toFixed(2)}</div>
+        <div class="card-sub">会话累计 $${Number(co.sessionCost ?? 0).toFixed(2)}</div>
       </div>
       <div class="card">
         <div class="card-label">健康评分</div>
@@ -381,7 +389,7 @@ async function renderTaskDetail(id) {
       </div>
       <div class="meta-item">
         <div class="meta-label">费用</div>
-        <div class="meta-value">$${(task.total_cost_usd ?? 0).toFixed(4)}</div>
+        <div class="meta-value">$${Number(task.total_cost_usd ?? 0).toFixed(4)}</div>
       </div>
       <div class="meta-item">
         <div class="meta-label">创建时间</div>
@@ -824,7 +832,8 @@ async function renderSettings() {
   }
 
   const config = status.config || status;
-  const costs = cost?.costs || {};
+  const costsArr = Array.isArray(cost?.costs) ? cost.costs : Array.isArray(config.dailyCosts) ? config.dailyCosts : [];
+  const settingsTodayCost = costsArr.length > 0 ? Number(costsArr[0].total_cost_usd || 0) : 0;
 
   content.innerHTML = `
     <div class="config-block">
@@ -837,9 +846,9 @@ async function renderSettings() {
 
     <div class="config-block">
       <h3>费用统计</h3>
-      ${configRow('今日费用', `$${(cost?.dailyCost ?? config.dailyCosts ?? 0).toFixed(4)}`)}
-      ${configRow('会话费用', `$${(cost?.sessionCost ?? 0).toFixed(4)}`)}
-      ${Object.entries(costs).map(([k, v]) => configRow(k, `$${Number(v).toFixed(4)}`)).join('')}
+      ${configRow('今日费用', `$${settingsTodayCost.toFixed(4)}`)}
+      ${configRow('会话费用', `$${Number(cost?.sessionCost ?? 0).toFixed(4)}`)}
+      ${costsArr.map(c => configRow(c.date, `$${Number(c.total_cost_usd || 0).toFixed(4)} (${c.task_count} 任务)`)).join('')}
     </div>
 
     <div class="config-block">
