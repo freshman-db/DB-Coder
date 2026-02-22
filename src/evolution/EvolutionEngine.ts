@@ -20,6 +20,38 @@ const CATEGORY_KEYWORDS: Record<AdjustmentCategory, string[]> = {
 // Config fields safe for auto-update
 const SAFE_CONFIG_FIELDS = new Set(['brain.scanInterval', 'autonomy.subtaskTimeout']);
 
+interface GoalKeywordRule {
+  goalIndicators: string[];
+  taskKeywords: string[];
+}
+
+const GOAL_KEYWORD_RULES: GoalKeywordRule[] = [
+  {
+    goalIndicators: ['代码质量', '类型', '编码规范', 'quality', 'lint'],
+    taskKeywords: ['type', '类型', 'lint', '编码'],
+  },
+  {
+    goalIndicators: ['代码重复', '重复模式', 'dedup', 'duplicate', 'extract'],
+    taskKeywords: ['extract', '重复', 'dedup', 'duplicat'],
+  },
+  {
+    goalIndicators: ['简化', '嵌套', '复杂代码', 'simplify', 'refactor'],
+    taskKeywords: ['simplify', '简化', '嵌套', 'refactor'],
+  },
+  {
+    goalIndicators: ['测试覆盖', '测试', 'coverage', 'test'],
+    taskKeywords: ['test', '测试', 'coverage'],
+  },
+  {
+    goalIndicators: ['开发功能', '功能', 'feature'],
+    taskKeywords: ['feature', '功能', 'add'],
+  },
+];
+
+const GOAL_FALLBACK_KEYWORDS = Array.from(
+  new Set(GOAL_KEYWORD_RULES.flatMap(rule => rule.taskKeywords.map(keyword => keyword.toLowerCase()))),
+);
+
 interface MetaReflectData {
   reviewEvents: ReviewEvent[];
   recentTasks: Task[];
@@ -134,10 +166,12 @@ export class EvolutionEngine {
       if (goal.status === 'done' || goal.status === 'paused') continue;
 
       // Estimate progress from related completed tasks and health score
-      const relatedTasks = await this.taskStore.listTasks(projectPath, 'done');
-      const relevantCount = relatedTasks.filter(t =>
-        t.task_description.toLowerCase().includes(goal.description.toLowerCase().split(' ')[0])
-      ).length;
+      const relatedTasks = await this.taskStore.listTasks(projectPath, 'done') ?? [];
+      const goalKeywords = this.extractGoalKeywords(goal.description ?? '');
+      const relevantCount = relatedTasks.filter(t => {
+        const taskDescription = t?.task_description?.toLowerCase() ?? '';
+        return goalKeywords.some(keyword => taskDescription.includes(keyword));
+      }).length;
 
       // Simple heuristic: each relevant completed task adds ~15% progress, capped at 100
       const taskProgress = Math.min(100, relevantCount * 15);
@@ -578,6 +612,36 @@ Output as JSON:
     }
 
     return bestCategory;
+  }
+
+  private extractGoalKeywords(description: string): string[] {
+    const normalizedDescription = description?.toLowerCase() ?? '';
+    if (!normalizedDescription) return [];
+
+    const keywords = new Set<string>();
+
+    for (const rule of GOAL_KEYWORD_RULES) {
+      if (rule.goalIndicators.some(indicator => normalizedDescription.includes(indicator))) {
+        for (const keyword of rule.taskKeywords) {
+          keywords.add(keyword.toLowerCase());
+        }
+      }
+    }
+
+    const tokens = normalizedDescription
+      .split(/[\s,:：，。；;、()（）]+/)
+      .map(token => token.trim())
+      .filter(token => token.length >= 2);
+
+    for (const token of tokens) {
+      for (const fallbackKeyword of GOAL_FALLBACK_KEYWORDS) {
+        if (token.includes(fallbackKeyword)) {
+          keywords.add(fallbackKeyword);
+        }
+      }
+    }
+
+    return Array.from(keywords);
   }
 
   private async buildGoalContext(projectPath: string): Promise<string> {
