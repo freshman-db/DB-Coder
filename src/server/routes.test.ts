@@ -11,7 +11,7 @@ import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { CostTracker } from '../utils/cost.js';
 import { log } from '../utils/logger.js';
-import { createSseStream } from './routes.js';
+import { createSseStream, emitSseEvent } from './routes.js';
 import { Server } from './Server.js';
 
 type RequestListener = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
@@ -461,6 +461,38 @@ test('createSseStream writes SSE headers and event payloads', () => {
   const wroteEvent = stream.write('status', { ok: true });
   assert.equal(wroteEvent, true);
   assert.equal(state.body, 'event: status\ndata: {"ok":true}\n\n');
+
+  stream.cleanup();
+});
+
+test('emitSseEvent broadcasts shutdown notifications to active streams', () => {
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token: 'token',
+  });
+  const { response, state } = createMockResponse();
+  const stream = createSseStream(req, response);
+
+  const recipients = emitSseEvent('shutdown', { reason: 'systemd-stop' });
+  assert.equal(recipients >= 1, true);
+  assert.equal(state.body.includes('event: shutdown'), true);
+  assert.equal(state.body.includes('data: {"reason":"systemd-stop"}'), true);
+
+  stream.cleanup();
+});
+
+test('emitSseEvent falls back to message event when event name is blank', () => {
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token: 'token',
+  });
+  const { response, state } = createMockResponse();
+  const stream = createSseStream(req, response);
+
+  emitSseEvent('  ', { ok: true });
+  assert.equal(state.body.includes('event: message'), true);
 
   stream.cleanup();
 });

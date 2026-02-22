@@ -23,6 +23,7 @@ import { PromptRegistry } from './prompts/PromptRegistry.js';
 import { PluginMonitor } from './plugins/PluginMonitor.js';
 import { log, type LogEntry } from './utils/logger.js';
 import { validateConfigForStartup } from './startup/configValidation.js';
+import { wireGracefulShutdown } from './startup/gracefulShutdown.js';
 
 const program = new Command()
   .name('db-coder')
@@ -94,24 +95,12 @@ program
     process.on('unhandledRejection', (err) => { log.error('Unhandled rejection', err); });
     process.on('uncaughtException', (err) => { log.error('Uncaught exception', err); });
 
-    // Graceful shutdown (with re-entry guard and force-exit on second signal)
-    let shuttingDown = false;
-    const shutdown = async () => {
-      if (shuttingDown) {
-        log.info('Force exit');
-        process.exit(1);
-      }
-      shuttingDown = true;
-      log.info('Shutting down...');
-      await mainLoop.stop();
-      await server.stop();
-      await globalMemory.close();
-      await taskStore.close();
-      await log.shutdown();
-      process.exit(0);
-    };
-    process.on('SIGTERM', shutdown);
-    process.on('SIGINT', shutdown);
+    wireGracefulShutdown({
+      mainLoop,
+      server,
+      taskStore,
+      globalMemory,
+    });
 
     // Start server only — default to idle mode, user selects mode via API/UI
     await server.start();

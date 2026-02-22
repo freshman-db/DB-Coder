@@ -111,6 +111,18 @@ const SSE_CONNECTION_TIMEOUT_MS = 30 * 60 * 1_000;
 const SSE_MAX_CONNECTIONS_PER_ENDPOINT = 50;
 const SSE_WARN_CONNECTION_THRESHOLD = Math.floor(SSE_MAX_CONNECTIONS_PER_ENDPOINT * 0.8);
 const sseConnectionsByEndpoint = new Map<string, Set<symbol>>();
+const activeSseStreams = new Set<SseStream>();
+
+export function emitSseEvent(event: string, data: unknown): number {
+  const normalizedEvent = typeof event === 'string' && event.trim().length > 0 ? event.trim() : 'message';
+  let recipients = 0;
+  for (const stream of Array.from(activeSseStreams)) {
+    if (stream.write(normalizedEvent, data)) {
+      recipients += 1;
+    }
+  }
+  return recipients;
+}
 
 function reserveSseConnection(endpoint: string, res: ServerResponse): (() => void) | null {
   const normalizedEndpoint = endpoint.trim();
@@ -173,12 +185,16 @@ export function createSseStream(req: IncomingMessage, res: ServerResponse, optio
 
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  let streamRef: SseStream | null = null;
   let cleanedUp = false;
   const cleanup = (): void => {
     if (cleanedUp) {
       return;
     }
     cleanedUp = true;
+    if (streamRef) {
+      activeSseStreams.delete(streamRef);
+    }
     if (heartbeat !== undefined) {
       clearInterval(heartbeat);
       heartbeat = undefined;
@@ -229,8 +245,9 @@ export function createSseStream(req: IncomingMessage, res: ServerResponse, optio
   }, connectionTimeoutMs);
 
   req.on('close', cleanup);
-
-  return { write, cleanup };
+  streamRef = { write, cleanup };
+  activeSseStreams.add(streamRef);
+  return streamRef;
 }
 
 interface StatusSseSnapshot {
