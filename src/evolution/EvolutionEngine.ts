@@ -303,6 +303,7 @@ Output as JSON:
 
     try {
       const result = await claude.plan(metaPrompt, projectPath, { maxTurns: 5 });
+      if (result.cost_usd > 0) await this.taskStore.addDailyCost(result.cost_usd);
       const parsed = this.parseMetaReflectOutput(result.output);
       if (!parsed) {
         log.info('Meta-reflect: no actionable patches proposed');

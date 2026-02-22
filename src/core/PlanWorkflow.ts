@@ -76,7 +76,7 @@ export class PlanWorkflow {
     return draft.id;
   }
 
-  private startSession(draftId: number, projectPath: string): void {
+  private startSession(draftId: number, projectPath: string, resume?: string): void {
     const internalMcpServer = createInternalMcpServer({
       projectPath,
       taskStore: this.taskStore,
@@ -111,6 +111,7 @@ export class PlanWorkflow {
         internalMcpServers: {
           'db-coder-tools': internalMcpServer,
         },
+        ...(resume && { resume }),
       },
     );
     this.chatSessions.set(draftId, session);
@@ -336,9 +337,24 @@ export class PlanWorkflow {
 
   // === Process lifecycle ===
 
-  closeSession(draftId: number): void {
+  async resumeSession(draftId: number): Promise<void> {
+    if (this.chatSessions.has(draftId)) {
+      throw new Error('Session is already active');
+    }
+    const draft = await this.taskStore.getPlanDraft(draftId) as PlanDraft | null;
+    if (!draft) throw new Error('Plan draft not found');
+    if (!draft.chat_session_id) throw new Error('No session ID to resume');
+
+    this.startSession(draftId, draft.project_path, draft.chat_session_id);
+    await this.taskStore.updateChatStatus(draftId, 'chatting');
+    this.emit(draftId, 'status', { status: 'chatting' });
+    log.info(`Plan chat session resumed: #${draftId} (session=${draft.chat_session_id})`);
+  }
+
+  async closeSession(draftId: number): Promise<void> {
     this.chatSessions.get(draftId)?.close();
     this.chatSessions.delete(draftId);
+    await this.taskStore.updateChatStatus(draftId, 'closed');
     this.emit(draftId, 'status', { status: 'closed' });
     this.sseListeners.delete(draftId);
   }

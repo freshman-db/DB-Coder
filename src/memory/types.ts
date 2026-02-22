@@ -124,7 +124,7 @@ export interface AnalysisItem {
 }
 
 export type PlanReviewStatus = 'draft' | 'approved' | 'rejected' | 'expired';
-export type ChatStatus = 'chatting' | 'researching' | 'generating' | 'ready' | 'error';
+export type ChatStatus = 'chatting' | 'researching' | 'generating' | 'ready' | 'error' | 'closed';
 
 export interface PlanDraftAnnotation {
   task_index: number;

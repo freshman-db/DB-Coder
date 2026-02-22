@@ -1160,6 +1160,7 @@ const chatStatusLabels = {
   generating: { label: '生成计划中', badge: 'running' },
   ready: { label: '计划就绪', badge: 'done' },
   error: { label: '出错', badge: 'failed' },
+  closed: { label: '已结束', badge: 'done' },
 };
 
 async function renderPlans() {
@@ -1208,7 +1209,7 @@ async function renderPlanDetail(id) {
 
   // Chat-based sessions show chat UI; legacy drafts show plan detail
   const isChatSession = !!draft.chat_status;
-  const isInChat = isChatSession && ['chatting', 'researching', 'generating'].includes(draft.chat_status);
+  const isInChat = isChatSession && ['chatting', 'researching', 'generating', 'closed'].includes(draft.chat_status);
 
   if (isInChat) {
     renderChatView(id, draft);
@@ -1225,20 +1226,23 @@ async function renderChatView(id, draft) {
   const content = $('#content');
   const chatSt = chatStatusLabels[draft.chat_status] || chatStatusLabels.chatting;
 
+  const isClosed = draft.chat_status === 'closed';
   content.innerHTML = `
     <div class="chat-container">
       <div class="chat-status-bar">
         <a href="#/plans" style="font-size:12px;color:var(--text-muted);text-decoration:none;">&larr; 返回列表</a>
         <span style="flex:1;"></span>
         <span class="badge badge-${chatSt.badge}" id="chatStatusBadge">${chatSt.label}</span>
-        <button class="btn btn-sm btn-success" id="btnGeneratePlan" style="display:none;" onclick="generatePlanFromChat(${id})">生成计划</button>
-        <button class="btn btn-sm btn-secondary" onclick="closeChatSession(${id})">关闭会话</button>
+        ${isClosed ? '' : `<button class="btn btn-sm btn-success" id="btnGeneratePlan" style="display:none;" onclick="generatePlanFromChat(${id})">生成计划</button>
+        <button class="btn btn-sm btn-secondary" onclick="closeChatSession(${id})">关闭会话</button>`}
       </div>
       <div class="chat-messages" id="chatMessages"></div>
-      <div class="chat-input-area">
+      ${isClosed
+        ? `<div style="padding:12px;text-align:center;color:var(--text-muted);font-size:13px;">会话已结束 <button class="btn btn-sm btn-primary" onclick="resumeChatSession(${id})" style="margin-left:8px;">恢复对话</button></div>`
+        : `<div class="chat-input-area">
         <textarea class="chat-input" id="chatInput" placeholder="描述你的需求，或继续对话..." rows="2"></textarea>
         <button class="btn btn-primary chat-send-btn" id="chatSendBtn" onclick="sendChatMessage(${id})">发送</button>
-      </div>
+      </div>`}
     </div>
   `;
 
@@ -1482,6 +1486,14 @@ async function closeChatSession(draftId) {
   await api(`/plans/${draftId}/close`, { method: 'POST', body: '{}' });
   toast('会话已关闭');
   location.hash = '#/plans';
+}
+
+async function resumeChatSession(draftId) {
+  const result = await api(`/plans/${draftId}/resume`, { method: 'POST', body: '{}' });
+  if (result?.ok) {
+    toast('会话已恢复');
+    renderPlanDetail(draftId);
+  }
 }
 
 async function approvePlan(id) {

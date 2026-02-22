@@ -62,7 +62,7 @@ export class CodexBridge implements CodingAgent {
 
       const { exitCode, events, stderr } = await spawnWithJsonl('codex', args, {
         cwd,
-        timeout: options?.timeout ?? 600_000,
+        ...(options?.timeout && { timeout: options.timeout }),
         onEvent: (event) => {
           if (event.type === 'message' || event.type === 'function_call') {
             log.debug(`Codex: ${event.type}`, event);
@@ -152,7 +152,6 @@ ${prompt}`;
 
       const { exitCode, events, stderr } = await spawnWithJsonl('codex', args, {
         cwd,
-        timeout: 300_000,
       });
 
       // Non-zero exit code means the CLI invocation itself failed

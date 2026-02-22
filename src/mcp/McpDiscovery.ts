@@ -19,7 +19,7 @@ const DEFAULT_PHASE_ROUTING: Record<string, Phase[]> = {
   playwright:   ['execute', 'review'],
   github:       ['execute'],
   greptile:     ['review'],
-  'mcp-search': [],  // claude-mem: subprocesses use their own memory system
+  'mcp-search': ['scan', 'plan', 'execute', 'review'],
 };
 
 /** Plugins with dangerous side effects — never load into subprocesses */

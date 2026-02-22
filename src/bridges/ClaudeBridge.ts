@@ -226,6 +226,7 @@ Output your review as JSON: { "passed": boolean, "issues": [{ "severity": "criti
     options?: {
       systemPrompt?: AgentSystemPrompt;
       internalMcpServers?: Record<string, McpServerConfig>;
+      resume?: string;
     },
   ): ChatSession {
     const channel = new AsyncChannel<SDKUserMessage>();
@@ -248,6 +249,7 @@ Output your review as JSON: { "passed": boolean, "issues": [{ "severity": "criti
         includePartialMessages: true,
         ...(Object.keys(mcpServers).length > 0 && { mcpServers }),
         ...(plugins.length > 0 && { plugins }),
+        ...(options?.resume && { resume: options.resume }),
       },
     });
 

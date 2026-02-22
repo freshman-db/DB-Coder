@@ -235,13 +235,15 @@ export class MainLoop {
       }
       log.info(`No new changes but ${queued.length} queued tasks.`);
     } else {
-      const { analysis } = await this.brain.scanProject(projectPath, 'normal');
+      const { analysis, cost: scanCost } = await this.brain.scanProject(projectPath, 'normal');
+      if (scanCost > 0) await this.taskStore.addDailyCost(scanCost);
 
       // PLAN
       const actionableItems = analysis.issues.length + analysis.opportunities.length;
       if (actionableItems > 0) {
         this.setState('planning');
-        const { plan } = await this.brain.createPlan(projectPath, analysis);
+        const { plan, cost: planCost } = await this.brain.createPlan(projectPath, analysis);
+        if (planCost > 0) await this.taskStore.addDailyCost(planCost);
 
         if (plan.tasks.length > 0) {
           await this.taskQueue.enqueue(projectPath, plan);
@@ -286,7 +288,8 @@ export class MainLoop {
     }
     this.setState('scanning');
     try {
-      await this.brain.scanProject(this.config.projectPath, depth);
+      const { cost } = await this.brain.scanProject(this.config.projectPath, depth);
+      if (cost > 0) await this.taskStore.addDailyCost(cost);
     } finally {
       this.setState('idle');
     }
@@ -315,7 +318,8 @@ export class MainLoop {
           projectHealth: 50,
           summary: task.task_description,
         };
-        const { plan } = await this.brain.createPlan(projectPath, analysis);
+        const { plan, cost: decomposeCost } = await this.brain.createPlan(projectPath, analysis);
+        if (decomposeCost > 0) await this.costTracker.addCost(task.id, decomposeCost);
         const planTask = plan.tasks[0];
         if (planTask?.subtasks?.length) {
           const subtaskRecords: SubTaskRecord[] = planTask.subtasks.map(st => ({
@@ -383,10 +387,11 @@ export class MainLoop {
       }
       // Reflect on failure to extract lessons
       try {
-        const { reflection } = await this.brain.reflect(
+        const { reflection, cost: reflectCost } = await this.brain.reflect(
           projectPath, task.task_description,
           `Execution crashed: ${err}`, 'Task failed with exception', 'failed',
         );
+        if (reflectCost > 0) await this.costTracker.addCost(task.id, reflectCost);
         if (this.evolutionEngine && reflection.adjustments.length > 0) {
           await this.evolutionEngine.processAdjustments(projectPath, task.id, reflection.adjustments, 'failed');
         }
@@ -553,7 +558,8 @@ export class MainLoop {
     const allResults = subtasks.map(st => `${st.description}: ${st.status} ${st.result ?? ''}`).join('\n');
     const outcome = reviewResult.passed ? 'success' as const : 'blocked_max_retries' as const;
     const retryContext = reviewRetries > 0 ? `\nReview retries: ${reviewRetries}. Stuck adjustments applied: ${stuckAdjustments.length}` : '';
-    const { reflection } = await this.brain.reflect(projectPath, task.task_description, allResults + retryContext, reviewResult.summary, outcome);
+    const { reflection, cost: reflectCost } = await this.brain.reflect(projectPath, task.task_description, allResults + retryContext, reviewResult.summary, outcome);
+    if (reflectCost > 0) await this.costTracker.addCost(task.id, reflectCost);
 
     if (this.evolutionEngine && reflection.adjustments.length > 0) {
       try {
@@ -703,13 +709,14 @@ export class MainLoop {
 
     if (iteration < maxRetries && iteration === 2) {
       log.info('Stuck: asking Brain to reflect and adjust');
-      const { reflection } = await this.brain.reflect(
+      const { reflection, cost: reflectCost } = await this.brain.reflect(
         this.config.projectPath,
         task.task_description,
         `Subtask "${subtask.description}" failed: ${error}`,
         'Failed during execution',
         'blocked_stuck',
       );
+      if (reflectCost > 0) await this.costTracker.addCost(task.id, reflectCost);
       if (reflection.adjustments.length > 0) {
         log.info(`Brain suggests: ${reflection.adjustments.join(', ')}`);
         // Inject adjustments into task-level context for immediate use
@@ -736,11 +743,12 @@ export class MainLoop {
     // Max retries reached: reflect then skip
     log.warn(`Stuck: skipping subtask "${subtask.description}" after ${iteration} attempts (max: ${maxRetries})`);
     try {
-      const { reflection } = await this.brain.reflect(
+      const { reflection, cost: reflectCost } = await this.brain.reflect(
         this.config.projectPath, task.task_description,
         `Subtask "${subtask.description}" failed ${iteration} times: ${error}`,
         'Permanently stuck — giving up', 'blocked_stuck',
       );
+      if (reflectCost > 0) await this.costTracker.addCost(task.id, reflectCost);
       if (reflection.adjustments.length > 0) {
         stuckAdjustments.push(...reflection.adjustments);
       }

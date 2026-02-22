@@ -559,8 +559,21 @@ route('POST', '/api/plans/:id/close', async (_req, res, ctx, params) => {
   if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
   const id = parseInt(params.id, 10);
   if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
-  ctx.planWorkflow.closeSession(id);
+  await ctx.planWorkflow.closeSession(id);
   json(res, { ok: true });
+});
+
+route('POST', '/api/plans/:id/resume', async (_req, res, ctx, params) => {
+  if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
+  const id = parseInt(params.id, 10);
+  if (isNaN(id)) { json(res, { error: 'Invalid plan ID' }, 400); return; }
+  try {
+    await ctx.planWorkflow.resumeSession(id);
+    json(res, { ok: true });
+  } catch (err) {
+    if (err instanceof Error) { json(res, { error: err.message }, 400); return; }
+    throw err;
+  }
 });
 
 route('GET', '/api/plans', async (req, res, ctx) => {

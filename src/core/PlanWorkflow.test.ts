@@ -200,7 +200,7 @@ function createPlanDraft(overrides: Partial<PlanDraft> = {}): PlanDraft {
   };
 }
 
-test('closeSession closes active chat session and clears listener map entry', () => {
+test('closeSession closes active chat session and clears listener map entry', async () => {
   let closeCalled = false;
   const workflow = createWorkflow();
   const internals = getInternals(workflow);
@@ -212,7 +212,7 @@ test('closeSession closes active chat session and clears listener map entry', ()
     emittedEvents.push({ event, payload: JSON.parse(data) });
   });
 
-  workflow.closeSession(42);
+  await workflow.closeSession(42);
 
   assert.equal(closeCalled, true);
   assert.equal(internals.chatSessions.has(42), false);
@@ -220,7 +220,7 @@ test('closeSession closes active chat session and clears listener map entry', ()
   assert.deepEqual(emittedEvents, [{ event: 'status', payload: { status: 'closed' } }]);
 });
 
-test('closeSession clears stale SSE listeners even when no chat session exists', () => {
+test('closeSession clears stale SSE listeners even when no chat session exists', async () => {
   const workflow = createWorkflow();
   const internals = getInternals(workflow);
   const receivedEvents: string[] = [];
@@ -230,13 +230,13 @@ test('closeSession clears stale SSE listeners even when no chat session exists',
   });
   assert.equal(internals.sseListeners.has(77), true);
 
-  workflow.closeSession(77);
+  await workflow.closeSession(77);
 
   assert.equal(internals.sseListeners.has(77), false);
   assert.deepEqual(receivedEvents, ['status']);
 });
 
-test('closeSession removes SSE listener map entries and prevents callbacks after cleanup', () => {
+test('closeSession removes SSE listener map entries and prevents callbacks after cleanup', async () => {
   const workflow = createWorkflow();
   const internals = getInternals(workflow);
   const receivedEvents: string[] = [];
@@ -247,7 +247,7 @@ test('closeSession removes SSE listener map entries and prevents callbacks after
 
   assert.equal(internals.sseListeners.size, 1);
 
-  workflow.closeSession(88);
+  await workflow.closeSession(88);
 
   assert.equal(internals.sseListeners.size, 0);
   assert.deepEqual(receivedEvents, ['status']);
