@@ -17,6 +17,7 @@ type SSEListener = (event: string, data: string) => void;
 export class PlanWorkflow {
   private chatSessions = new Map<number, ChatSession>();
   private sseListeners = new Map<number, Set<SSEListener>>();
+  private streamingText = new Map<number, string>();
 
   constructor(
     private brain: Brain,
@@ -83,23 +84,26 @@ export class PlanWorkflow {
   }
 
   private async handleSDKMessage(draftId: number, msg: SDKMessage): Promise<void> {
-    // Forward stream events (partial text) to SSE
+    // Extract text deltas from stream events and emit accumulated text
     if (msg.type === 'stream_event') {
-      this.emit(draftId, 'partial', msg);
+      const event = (msg as any).event;
+      if (event?.type === 'content_block_delta' && event?.delta?.type === 'text_delta' && event.delta.text) {
+        const accumulated = (this.streamingText.get(draftId) ?? '') + event.delta.text;
+        this.streamingText.set(draftId, accumulated);
+        this.emit(draftId, 'assistant_text', { text: accumulated });
+      }
       return;
     }
 
-    // assistant complete message — extract text
+    // assistant complete message — reset streaming accumulator
     if (msg.type === 'assistant') {
-      const text = extractAssistantText(msg);
-      if (text) {
-        this.emit(draftId, 'assistant_text', { text });
-      }
+      this.streamingText.delete(draftId);
       return;
     }
 
     // result message — one round of conversation done
     if (msg.type === 'result') {
+      this.streamingText.delete(draftId);
       const result = msg as any;
       const text = result.result ?? '';
       const cost = result.total_cost_usd ?? 0;
@@ -129,38 +133,30 @@ export class PlanWorkflow {
   }
 
   async processUserMessage(draftId: number, userMessage: string): Promise<void> {
-    try {
-      // Save user message to DB
-      await this.taskStore.addChatMessage(draftId, 'user', userMessage);
-      this.emit(draftId, 'message', { role: 'user', content: userMessage });
+    // Save user message to DB
+    await this.taskStore.addChatMessage(draftId, 'user', userMessage);
+    this.emit(draftId, 'message', { role: 'user', content: userMessage });
 
-      // Get or start ChatSession
-      let session = this.chatSessions.get(draftId);
-      if (!session) {
-        const draft = await this.taskStore.getPlanDraft(draftId);
-        if (!draft) throw new Error(`Plan draft #${draftId} not found`);
-        this.startSession(draftId, draft.project_path);
-        session = this.chatSessions.get(draftId)!;
-      }
-
-      // Update status
-      await this.taskStore.updateChatStatus(draftId, 'researching');
-      this.emit(draftId, 'status', { status: 'researching' });
-
-      // Push message to channel — Claude processes it automatically
-      session.channel.push({
-        type: 'user',
-        message: { role: 'user', content: userMessage },
-        parent_tool_use_id: null,
-        session_id: session.sessionId || '',
-      });
-    } catch (err) {
-      // No active chat process means listeners cannot be naturally released.
-      if (!this.chatSessions.has(draftId)) {
-        this.sseListeners.delete(draftId);
-      }
-      throw err;
+    // Get or start ChatSession
+    let session = this.chatSessions.get(draftId);
+    if (!session) {
+      const draft = await this.taskStore.getPlanDraft(draftId);
+      if (!draft) throw new Error(`Plan draft #${draftId} not found`);
+      this.startSession(draftId, draft.project_path);
+      session = this.chatSessions.get(draftId)!;
     }
+
+    // Update status
+    await this.taskStore.updateChatStatus(draftId, 'researching');
+    this.emit(draftId, 'status', { status: 'researching' });
+
+    // Push message to channel — Claude processes it automatically
+    session.channel.push({
+      type: 'user',
+      message: { role: 'user', content: userMessage },
+      parent_tool_use_id: null,
+      session_id: session.sessionId || '',
+    });
   }
 
   async generatePlan(draftId: number, projectPath: string): Promise<void> {
@@ -267,8 +263,8 @@ export class PlanWorkflow {
   closeSession(draftId: number): void {
     this.chatSessions.get(draftId)?.close();
     this.chatSessions.delete(draftId);
-    this.sseListeners.delete(draftId);
     this.emit(draftId, 'status', { status: 'closed' });
+    this.sseListeners.delete(draftId);
   }
 
   shutdown(): void {
@@ -276,11 +272,4 @@ export class PlanWorkflow {
       this.closeSession(id);
     }
   }
-}
-
-function extractAssistantText(msg: any): string {
-  return (msg.message?.content ?? [])
-    .filter((b: any) => b.type === 'text')
-    .map((b: any) => b.text)
-    .join('');
 }

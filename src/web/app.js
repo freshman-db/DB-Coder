@@ -108,6 +108,13 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+function renderMarkdown(text) {
+  if (typeof marked !== 'undefined' && marked.parse) {
+    try { return marked.parse(text, { breaks: true }); } catch { /* fall through */ }
+  }
+  return escapeHtml(text).replace(/\n/g, '<br>');
+}
+
 const statusMap = {
   pending: { icon: '○', badge: 'pending', label: '等待中' },
   queued: { icon: '◎', badge: 'pending', label: '排队中' },
@@ -1305,9 +1312,10 @@ function appendChatBubble(role, content) {
   if (!container) return;
   const bubble = document.createElement('div');
   bubble.className = `chat-bubble ${role}`;
+  const rendered = role === 'user' ? escapeHtml(content) : renderMarkdown(content);
   bubble.innerHTML = `
     <div class="chat-bubble-role">${role === 'user' ? '你' : role === 'assistant' ? 'Claude' : '系统'}</div>
-    <div class="chat-bubble-content">${escapeHtml(content)}</div>
+    <div class="chat-bubble-content">${rendered}</div>
   `;
   container.appendChild(bubble);
   container.scrollTop = container.scrollHeight;
@@ -1335,7 +1343,7 @@ function finalizeStreamingBubble(text) {
   if (bubble) {
     bubble.classList.remove('streaming');
     const contentEl = bubble.querySelector('.chat-bubble-content');
-    if (contentEl && text) contentEl.textContent = text;
+    if (contentEl && text) contentEl.innerHTML = renderMarkdown(text);
   }
 }
 
@@ -1399,15 +1407,11 @@ function handleChatSSEEvent(event, payload, draftId) {
     if (data.role === 'assistant') {
       finalizeStreamingBubble(data.content);
     }
-  } else if (event === 'partial') {
-    getOrCreateStreamingBubble();
-    const container = $('#chatMessages');
-    if (container) container.scrollTop = container.scrollHeight;
   } else if (event === 'assistant_text') {
     const bubble = getOrCreateStreamingBubble();
     if (bubble) {
       const contentEl = bubble.querySelector('.chat-bubble-content');
-      if (contentEl) contentEl.textContent = data.text;
+      if (contentEl) contentEl.innerHTML = renderMarkdown(data.text);
       const container = $('#chatMessages');
       if (container) container.scrollTop = container.scrollHeight;
     }

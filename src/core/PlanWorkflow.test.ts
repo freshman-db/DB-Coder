@@ -18,6 +18,10 @@ type PlanWorkflowInternals = {
   sseListeners: Map<number, Set<SseListener>>;
 };
 
+type PlanWorkflowEmitter = {
+  emit: (draftId: number, event: string, data: unknown) => void;
+};
+
 function getInternals(workflow: PlanWorkflow): PlanWorkflowInternals {
   return workflow as unknown as PlanWorkflowInternals;
 }
@@ -79,9 +83,9 @@ test('closeSession closes active chat session and clears listener map entry', ()
 
   internals.chatSessions.set(42, createMockSession({ onClose: () => { closeCalled = true; } }));
 
-  let eventCount = 0;
-  workflow.addSSEListener(42, () => {
-    eventCount += 1;
+  const emittedEvents: Array<{ event: string; payload: unknown }> = [];
+  workflow.addSSEListener(42, (event, data) => {
+    emittedEvents.push({ event, payload: JSON.parse(data) });
   });
 
   workflow.closeSession(42);
@@ -89,19 +93,23 @@ test('closeSession closes active chat session and clears listener map entry', ()
   assert.equal(closeCalled, true);
   assert.equal(internals.chatSessions.has(42), false);
   assert.equal(internals.sseListeners.has(42), false);
-  assert.equal(eventCount, 0);
+  assert.deepEqual(emittedEvents, [{ event: 'status', payload: { status: 'closed' } }]);
 });
 
 test('closeSession clears stale SSE listeners even when no chat session exists', () => {
   const workflow = createWorkflow();
   const internals = getInternals(workflow);
+  const receivedEvents: string[] = [];
 
-  workflow.addSSEListener(77, () => {});
+  workflow.addSSEListener(77, event => {
+    receivedEvents.push(event);
+  });
   assert.equal(internals.sseListeners.has(77), true);
 
   workflow.closeSession(77);
 
   assert.equal(internals.sseListeners.has(77), false);
+  assert.deepEqual(receivedEvents, ['status']);
 });
 
 test('closeSession removes SSE listener map entries and prevents callbacks after cleanup', () => {
@@ -118,8 +126,11 @@ test('closeSession removes SSE listener map entries and prevents callbacks after
   workflow.closeSession(88);
 
   assert.equal(internals.sseListeners.size, 0);
+  assert.deepEqual(receivedEvents, ['status']);
 
-  (workflow as unknown as { emit: (draftId: number, event: string, data: unknown) => void }).emit(
+  receivedEvents.length = 0;
+
+  (workflow as unknown as PlanWorkflowEmitter).emit(
     88,
     'status',
     { status: 'chatting' },
@@ -170,15 +181,18 @@ test('processUserMessage sends user message through existing chat session', asyn
   ]);
 });
 
-test('processUserMessage clears listeners when persisting the user message fails before session creation', async () => {
+test('processUserMessage keeps listeners when persisting the user message fails before session creation', async () => {
   const workflow = createWorkflow({
     addChatMessage: async () => {
       throw new Error('insert failed');
     },
   });
   const internals = getInternals(workflow);
+  const receivedEvents: string[] = [];
 
-  workflow.addSSEListener(9, () => {});
+  workflow.addSSEListener(9, event => {
+    receivedEvents.push(event);
+  });
   assert.equal(internals.sseListeners.has(9), true);
 
   await assert.rejects(
@@ -187,16 +201,22 @@ test('processUserMessage clears listeners when persisting the user message fails
   );
 
   assert.equal(internals.chatSessions.has(9), false);
-  assert.equal(internals.sseListeners.has(9), false);
+  assert.equal(internals.sseListeners.has(9), true);
+
+  (workflow as unknown as PlanWorkflowEmitter).emit(9, 'status', { status: 'chatting' });
+  assert.deepEqual(receivedEvents, ['status']);
 });
 
-test('processUserMessage clears listeners when draft lookup fails for a new session', async () => {
+test('processUserMessage keeps listeners when draft lookup fails for a new session', async () => {
   const workflow = createWorkflow({
     getPlanDraft: async () => null,
   });
   const internals = getInternals(workflow);
+  const receivedEvents: string[] = [];
 
-  workflow.addSSEListener(11, () => {});
+  workflow.addSSEListener(11, event => {
+    receivedEvents.push(event);
+  });
   assert.equal(internals.sseListeners.has(11), true);
 
   await assert.rejects(
@@ -205,5 +225,9 @@ test('processUserMessage clears listeners when draft lookup fails for a new sess
   );
 
   assert.equal(internals.chatSessions.has(11), false);
-  assert.equal(internals.sseListeners.has(11), false);
+  assert.equal(internals.sseListeners.has(11), true);
+  assert.deepEqual(receivedEvents, ['message']);
+
+  (workflow as unknown as PlanWorkflowEmitter).emit(11, 'status', { status: 'chatting' });
+  assert.deepEqual(receivedEvents, ['message', 'status']);
 });
