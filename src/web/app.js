@@ -1589,7 +1589,9 @@ function init() {
 
   // 按钮事件
   $('#menuToggle').addEventListener('click', toggleSidebar);
-  // Patrol button uses onclick in HTML; updatePatrolBtn sets initial state
+  // Topbar buttons (no inline onclick — CSP-friendly)
+  $('#btnPatrol').addEventListener('click', togglePatrol);
+  $('#btnNewChat').addEventListener('click', startNewChat);
   updatePatrolBtn(false);
 
   // 模态框事件
