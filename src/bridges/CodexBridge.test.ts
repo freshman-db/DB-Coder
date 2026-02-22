@@ -331,3 +331,28 @@ for (const costCase of [
     });
   });
 }
+
+test('execute scans all event text and prefers total cost over partial cost', async () => {
+  await withMockedSpawn((call) => {
+    const child = new FakeChildProcess();
+    const outFile = getOutputFilePath(call.args);
+
+    setImmediate(() => {
+      writeFileSync(outFile, JSON.stringify({ output: 'done' }));
+      child.stdout.write(`${JSON.stringify({ type: 'message', content: 'cost: 0.02' })}\n`);
+      child.stdout.write(`${JSON.stringify({ type: 'message', content: 'Cost: $0.03' })}\n`);
+      child.stdout.write(`${JSON.stringify({ type: 'message', content: 'total_cost: 0.07' })}\n`);
+      child.stdout.write(`${JSON.stringify({ type: 'message', content: 'cost: 0.11' })}\n`);
+      child.stdout.end();
+      child.emit('close', 0);
+    });
+
+    return child as unknown as ChildProcess;
+  }, async () => {
+    const bridge = new CodexBridge(createCodexConfig());
+    const result = await bridge.execute('Implement endpoint', process.cwd());
+
+    assert.equal(result.success, true);
+    assert.equal(result.cost_usd, 0.07);
+  });
+});

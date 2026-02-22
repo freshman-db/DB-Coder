@@ -213,21 +213,10 @@ function extractCost(events: JsonlEvent[], pricing?: TokenPricing): number {
   }
 
   // 2. Search for explicit cost text in event payloads.
-  let lastTotalCost = 0;
-  let lastPartialCost = 0;
-
-  for (const event of events) {
-    const textCosts = extractCostFromEventText(event);
-    if (textCosts.total !== null) {
-      lastTotalCost = textCosts.total;
-    }
-    if (textCosts.partial !== null) {
-      lastPartialCost = textCosts.partial;
-    }
+  const textCost = extractFromEventText(events);
+  if (textCost !== null) {
+    return textCost;
   }
-
-  if (lastTotalCost > 0) return lastTotalCost;
-  if (lastPartialCost > 0) return lastPartialCost;
 
   // 3. Estimate from token usage in turn.completed events
   if (pricing) {
@@ -267,6 +256,21 @@ function extractFromStructuredFields(events: JsonlEvent[]): number | null {
     if (usageTotal !== null) lastTotalCost = usageTotal;
     const usagePartial = firstPositiveNumber([usage.cost]);
     if (usagePartial !== null) lastPartialCost = usagePartial;
+  }
+
+  if (lastTotalCost > 0) return lastTotalCost;
+  if (lastPartialCost > 0) return lastPartialCost;
+  return null;
+}
+
+function extractFromEventText(events: JsonlEvent[]): number | null {
+  let lastTotalCost = 0;
+  let lastPartialCost = 0;
+
+  for (const event of events) {
+    const costs = extractCostFromEventText(event);
+    if (costs.total !== null) lastTotalCost = costs.total;
+    if (costs.partial !== null) lastPartialCost = costs.partial;
   }
 
   if (lastTotalCost > 0) return lastTotalCost;
