@@ -691,6 +691,25 @@ test('POST /api/control/scan returns 400 for invalid depth values', async () => 
   assert.equal(triggerScanCalled, false);
 });
 
+test('POST /api/control/scan returns 400 for non-string depth values', async () => {
+  let triggerScanCalled = false;
+  const ctx = {
+    ...createContext(),
+    loop: {
+      isRunning: () => false,
+      triggerScan: async () => {
+        triggerScanCalled = true;
+      },
+    } as unknown as RouteContext['loop'],
+  };
+
+  const state = await runRequest(createPostRequest('/api/control/scan', '{"depth":1}'), ctx);
+
+  assert.equal(state.statusCode, 400);
+  assert.deepEqual(parseJsonBody(state), { error: 'Invalid depth' });
+  assert.equal(triggerScanCalled, false);
+});
+
 test('POST /api/tasks parses valid JSON from streamed chunks and creates the task', async () => {
   let callCount = 0;
   const ctx = createContext(async (projectPath, description, priority) => {

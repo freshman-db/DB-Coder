@@ -198,3 +198,21 @@ test('security headers are included when API request exceeds body limit', async 
   assert.equal(state.body, 'Payload Too Large');
   assertSecurityHeaders(state);
 });
+
+test('security headers are included on API preflight responses', async () => {
+  const server = createServer('secret-token');
+  const listener = getRequestListener(server);
+  const { response, state } = createMockResponse();
+
+  await listener(
+    createMockRequest({
+      method: 'OPTIONS',
+      url: '/api/status',
+      headers: { host: 'localhost' },
+    }),
+    response,
+  );
+
+  assert.equal(state.statusCode, 204);
+  assertSecurityHeaders(state);
+});
