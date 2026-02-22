@@ -146,6 +146,75 @@ test('GracefulShutdown.shutdown marks active task interrupted and runs cleanup s
   assert.deepEqual(processRef.exitCodes, [0]);
 });
 
+test('GracefulShutdown calls server.close(), clears timers, and resolves before force-exit timeout', async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  const forceExitTimerHandle = { id: 'force-exit-timer', unref: () => {} } as unknown as ReturnType<typeof setTimeout>;
+  const serverIntervalHandle = { id: 'server-interval' } as unknown as ReturnType<typeof setInterval>;
+  let forceExitTimeoutDelay: number | undefined;
+  let clearForceExitTimerCalls = 0;
+  let clearServerIntervalCalls = 0;
+  let serverCloseCalls = 0;
+
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void, delay?: number): ReturnType<typeof setTimeout> => {
+    void callback;
+    forceExitTimeoutDelay = delay;
+    return forceExitTimerHandle;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((timer: ReturnType<typeof setTimeout> | undefined): void => {
+    if (timer === forceExitTimerHandle) {
+      clearForceExitTimerCalls += 1;
+    }
+  }) as typeof clearTimeout;
+  globalThis.setInterval = ((callback: (...args: unknown[]) => void): ReturnType<typeof setInterval> => {
+    void callback;
+    return serverIntervalHandle;
+  }) as typeof setInterval;
+  globalThis.clearInterval = ((timer: ReturnType<typeof setInterval> | undefined): void => {
+    if (timer === serverIntervalHandle) {
+      clearServerIntervalCalls += 1;
+    }
+  }) as typeof clearInterval;
+
+  try {
+    const { shutdown, processRef } = createShutdown({
+      server: {
+        close: async () => {
+          serverCloseCalls += 1;
+          const serverInterval = setInterval(() => undefined, 1_000);
+          clearInterval(serverInterval);
+        },
+      },
+      forceExitTimeoutMs: 25,
+    });
+
+    let timeoutGuard: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      shutdown.shutdown('SIGTERM').then(() => 'resolved' as const),
+      new Promise<'timed_out'>((resolve) => {
+        timeoutGuard = originalSetTimeout(() => resolve('timed_out'), 50);
+      }),
+    ]);
+    if (timeoutGuard !== undefined) {
+      originalClearTimeout(timeoutGuard);
+    }
+
+    assert.equal(outcome, 'resolved');
+    assert.equal(serverCloseCalls, 1);
+    assert.equal(forceExitTimeoutDelay, 25);
+    assert.equal(clearForceExitTimerCalls, 1);
+    assert.equal(clearServerIntervalCalls, 1);
+    assert.deepEqual(processRef.exitCodes, [0]);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
+
 test('GracefulShutdown enforces force-exit timeout when server close hangs', async () => {
   const neverResolves = new Promise<void>(() => {});
   const { shutdown, processRef } = createShutdown({
