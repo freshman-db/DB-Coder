@@ -10,7 +10,7 @@ import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PluginMonitor } from '../plugins/PluginMonitor.js';
 import type { Task, SubTaskRecord, ReviewEvent } from '../memory/types.js';
 import type { MergedReviewResult, LoopState, PlanTask } from './types.js';
-import type { ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
+import type { AgentResult, ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
 import { executorPrompt } from '../prompts/executor.js';
 import { reviewerPrompt } from '../prompts/reviewer.js';
 import { buildAgentGuidance } from '../prompts/agents.js';
@@ -68,6 +68,16 @@ export class MainLoop {
 
     this.running = true;
     log.info('Main loop started');
+
+    // Recover zombie tasks left in 'active' state from a previous crash
+    try {
+      const recovered = await this.taskStore.recoverActiveTasks(this.config.projectPath);
+      if (recovered > 0) {
+        log.warn(`Recovered ${recovered} active task(s) back to queued`);
+      }
+    } catch (err) {
+      log.warn(`Failed to recover active tasks: ${err}`);
+    }
 
     try {
       while (this.running) {
@@ -221,58 +231,55 @@ export class MainLoop {
       const subtasks = task.subtasks as SubTaskRecord[];
       const standards = await this.globalMemory.getRelevant('coding standards');
       const stuckAdjustments: string[] = [];
+      const retryCounts = new Map<string, number>();
+      let stopSubtasks = false;
 
       for (const subtask of subtasks) {
         if (subtask.status === 'done') continue;
-        if (!(await this.enforceBudget(task.id))) return;
 
-        subtask.status = 'running';
-        await this.taskStore.updateTask(task.id, { subtasks });
+        while (true) {
+          if (!(await this.enforceBudget(task.id))) return;
 
-        const agent = subtask.executor === 'claude' ? this.claude : this.codex;
-        const mcpNames = subtask.executor === 'claude' ? this.claude.getMcpServerNames('execute') : [];
-        const prompt = executorPrompt(task.task_description, subtask.description, standards, '', mcpNames);
-
-        const result = await agent.execute(prompt, projectPath, {
-          timeout: this.config.values.autonomy.subtaskTimeout * 1000,
-        });
-
-        // Track cost
-        if (result.cost_usd > 0) {
-          await this.costTracker.addCost(task.id, result.cost_usd);
-        }
-
-        await this.taskStore.addLog({
-          task_id: task.id,
-          phase: 'execute',
-          agent: subtask.executor,
-          input_summary: subtask.description.slice(0, 200),
-          output_summary: result.output.slice(0, 500),
-          cost_usd: result.cost_usd,
-          duration_ms: result.duration_ms,
-        });
-
-        if (!(await this.enforceBudget(task.id))) {
-          subtask.status = 'failed';
-          subtask.result = 'Blocked: budget exceeded';
+          subtask.status = 'running';
           await this.taskStore.updateTask(task.id, { subtasks });
-          return;
-        }
 
-        if (result.success) {
-          subtask.status = 'done';
-          subtask.result = result.output.slice(0, 200);
-          await commitAll(`db-coder: ${subtask.description.slice(0, 50)}`, projectPath).catch(() => {});
-        } else {
+          const result = await this.executeSubtask(task, subtask, standards, projectPath);
+
+          if (!(await this.enforceBudget(task.id))) {
+            subtask.status = 'failed';
+            subtask.result = 'Blocked: budget exceeded';
+            await this.taskStore.updateTask(task.id, { subtasks });
+            return;
+          }
+
+          if (result.success) {
+            subtask.status = 'done';
+            subtask.result = result.output.slice(0, 200);
+            await commitAll(`db-coder: ${subtask.description.slice(0, 50)}`, projectPath).catch(() => {});
+            break;
+          }
+
           subtask.status = 'failed';
           subtask.result = result.output.slice(0, 200);
           log.warn(`Subtask failed: ${subtask.description}`);
-          // Attempt retry with stuckHandling
-          const handled = await this.handleStuck(task, subtask, result.output, stuckAdjustments);
-          if (!handled) break;
+          const handled = await this.handleRetry(
+            task,
+            subtasks,
+            subtask,
+            result.output,
+            stuckAdjustments,
+            retryCounts,
+            branchName,
+            projectPath,
+          );
+          if (!handled) {
+            stopSubtasks = true;
+            break;
+          }
         }
 
         await this.taskStore.updateTask(task.id, { subtasks });
+        if (stopSubtasks) break;
       }
 
       // REVIEW (dual review)
@@ -281,9 +288,9 @@ export class MainLoop {
       this.state = 'reviewing';
       await this.taskStore.updateTask(task.id, { phase: 'reviewing' });
 
-      let changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
-      let reviewResult = await this.dualReview(task, changedFiles);
       let reviewRetries = 0;
+      let changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
+      let { merged: reviewResult, decision: reviewDecision } = await this.dualReview(task, changedFiles, reviewRetries);
 
       await this.taskStore.updateTask(task.id, {
         review_results: [...(task.review_results as unknown[] || []), reviewResult],
@@ -293,7 +300,7 @@ export class MainLoop {
       await this.saveReviewEvent(task.id, 0, reviewResult, null);
 
       // Fix-and-re-review loop (in-place, no task re-queue)
-      while (!reviewResult.passed && reviewRetries < this.config.values.autonomy.maxRetries) {
+      while (reviewDecision === 'retry') {
         if (!(await this.enforceBudget(task.id))) return;
 
         reviewRetries++;
@@ -314,7 +321,7 @@ export class MainLoop {
         if (!(await this.enforceBudget(task.id))) return;
 
         changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
-        reviewResult = await this.dualReview(task, changedFiles);
+        ({ merged: reviewResult, decision: reviewDecision } = await this.dualReview(task, changedFiles, reviewRetries));
 
         // Record review event with fix agent info
         await this.saveReviewEvent(task.id, reviewRetries, reviewResult, fixAgentName);
@@ -373,8 +380,65 @@ export class MainLoop {
     }
   }
 
-  /** Dual review: Claude + Codex in parallel, merge results */
-  private async dualReview(task: Task, changedFiles: string[]): Promise<MergedReviewResult> {
+  private async executeSubtask(
+    task: Task,
+    subtask: SubTaskRecord,
+    standards: string,
+    projectPath: string,
+  ): Promise<AgentResult> {
+    const agent = subtask.executor === 'claude' ? this.claude : this.codex;
+    const mcpNames = subtask.executor === 'claude' ? this.claude.getMcpServerNames('execute') : [];
+    const prompt = executorPrompt(task.task_description, subtask.description, standards, '', mcpNames);
+    const result = await agent.execute(prompt, projectPath, {
+      timeout: this.config.values.autonomy.subtaskTimeout * 1000,
+    });
+
+    if (result.cost_usd > 0) {
+      await this.costTracker.addCost(task.id, result.cost_usd);
+    }
+
+    await this.taskStore.addLog({
+      task_id: task.id,
+      phase: 'execute',
+      agent: subtask.executor,
+      input_summary: subtask.description.slice(0, 200),
+      output_summary: result.output.slice(0, 500),
+      cost_usd: result.cost_usd,
+      duration_ms: result.duration_ms,
+    });
+
+    return result;
+  }
+
+  private async handleRetry(
+    task: Task,
+    subtasks: SubTaskRecord[],
+    subtask: SubTaskRecord,
+    error: string,
+    stuckAdjustments: string[],
+    retryCounts: Map<string, number>,
+    branchName: string,
+    projectPath: string,
+  ): Promise<boolean> {
+    const attempt = (retryCounts.get(subtask.id) ?? 0) + 1;
+    retryCounts.set(subtask.id, attempt);
+    const shouldRetry = await this.handleStuck(task, subtask, error, stuckAdjustments, attempt);
+    if (!shouldRetry) return false;
+    const backoffMs = Math.min(8000, 1000 * 2 ** (attempt - 1));
+    subtask.status = 'pending';
+    subtask.result = `Retrying (attempt ${attempt + 1})`;
+    await this.taskStore.updateTask(task.id, { subtasks });
+    await sleep(backoffMs);
+    await switchBranch(branchName, projectPath).catch(() => {});
+    return true;
+  }
+
+  /** Dual review: Claude + Codex in parallel, then merge and decide next action */
+  private async dualReview(
+    task: Task,
+    changedFiles: string[],
+    reviewRetries: number,
+  ): Promise<{ merged: MergedReviewResult; decision: 'approve' | 'retry' | 'reject' }> {
     const filesStr = changedFiles.join('\n');
     const reviewMcpNames = this.claude.getMcpServerNames('review');
     const agentGuide = buildAgentGuidance('review', this.claude.getLoadedPluginIds());
@@ -396,14 +460,32 @@ export class MainLoop {
       await this.costTracker.addCost(task.id, codexReview.cost_usd);
     }
 
-    // Merge: intersection = must fix, single = should fix
-    return mergeReviews(claudeReview, codexReview);
+    return this.handleReviewResult(claudeReview, codexReview, reviewRetries);
+  }
+
+  private handleReviewResult(
+    claudeReview: ReviewResult,
+    codexReview: ReviewResult,
+    reviewRetries: number,
+  ): { merged: MergedReviewResult; decision: 'approve' | 'retry' | 'reject' } {
+    const merged = mergeReviews(claudeReview, codexReview);
+    if (merged.passed) {
+      return { merged, decision: 'approve' };
+    }
+    if (reviewRetries >= this.config.values.autonomy.maxRetries) {
+      return { merged, decision: 'reject' };
+    }
+    return { merged, decision: 'retry' };
   }
 
   /** Graduated stuck handling: retry → reflect → skip. Populates stuckAdjustments for downstream use. */
-  private async handleStuck(task: Task, subtask: SubTaskRecord, error: string, stuckAdjustments: string[]): Promise<boolean> {
-    const iteration = task.iteration + 1;
-
+  private async handleStuck(
+    task: Task,
+    subtask: SubTaskRecord,
+    error: string,
+    stuckAdjustments: string[],
+    iteration: number,
+  ): Promise<boolean> {
     if (iteration === 1) {
       log.info('Stuck: retrying subtask');
       return true; // Will retry in next iteration

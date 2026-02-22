@@ -13,6 +13,11 @@ export interface ClaudeConfig {
 export interface CodexConfig {
   model: string;
   sandbox: 'workspace-write' | 'workspace-read' | 'full-auto';
+  tokenPricing?: {
+    inputPerMillion: number;
+    cachedInputPerMillion: number;
+    outputPerMillion: number;
+  };
 }
 
 export interface AutonomyConfig {

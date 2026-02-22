@@ -194,6 +194,14 @@ export class TaskStore {
     await this.sql`DELETE FROM tasks WHERE id = ${id}`;
   }
 
+  async recoverActiveTasks(projectPath: string): Promise<number> {
+    const result = await this.sql`
+      UPDATE tasks SET status = 'queued', phase = 'init', updated_at = NOW()
+      WHERE project_path = ${projectPath} AND status = 'active'
+    `;
+    return result.count;
+  }
+
   async getNextTask(projectPath: string): Promise<Task | null> {
     const [row] = await this.sql<Task[]>`
       SELECT * FROM tasks

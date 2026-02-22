@@ -8,7 +8,11 @@ const DEFAULTS: DbCoderConfig = {
   apiToken: '',
   brain: { model: 'opus', scanInterval: 3600, maxScanBudget: 1.0 },
   claude: { model: 'opus', maxTaskBudget: 2.0, maxTurns: 30 },
-  codex: { model: 'gpt-5.3-codex', sandbox: 'workspace-write' },
+  codex: {
+    model: 'gpt-5.3-codex',
+    sandbox: 'workspace-write',
+    tokenPricing: { inputPerMillion: 2, cachedInputPerMillion: 0.5, outputPerMillion: 8 },
+  },
   autonomy: { level: 'full', maxRetries: 3, subtaskTimeout: 600 },
   routing: {
     scan: 'brain', plan: 'brain',
