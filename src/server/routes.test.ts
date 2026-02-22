@@ -434,6 +434,60 @@ test('GET /api/status returns health-style status fields', async () => {
   });
 });
 
+test('GET /api/logs returns SSE headers', async () => {
+  const { server, token } = createServerFixture();
+  const listener = getRequestListener(server);
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/logs',
+    token,
+  });
+  const { response, state } = createMockResponse();
+
+  await listener(req, response);
+
+  assert.equal(state.statusCode, 200);
+  assert.equal(state.headers['content-type'], 'text/event-stream');
+  assert.equal(state.headers['cache-control'], 'no-cache');
+  assert.equal(state.headers.connection, 'keep-alive');
+
+  req.emit('close');
+});
+
+test('GET /api/plans/:id/stream returns SSE headers', async () => {
+  let draftId: number | null = null;
+  let cleanupCalls = 0;
+
+  const { server, token } = createServerFixture({
+    planWorkflow: {
+      addSSEListener: (id) => {
+        draftId = id;
+        return () => {
+          cleanupCalls += 1;
+        };
+      },
+    },
+  });
+  const listener = getRequestListener(server);
+  const req = createMockRequest({
+    method: 'GET',
+    url: '/api/plans/42/stream',
+    token,
+  });
+  const { response, state } = createMockResponse();
+
+  await listener(req, response);
+
+  assert.equal(state.statusCode, 200);
+  assert.equal(state.headers['content-type'], 'text/event-stream');
+  assert.equal(state.headers['cache-control'], 'no-cache');
+  assert.equal(state.headers.connection, 'keep-alive');
+  assert.equal(draftId, 42);
+
+  req.emit('close');
+  assert.equal(cleanupCalls, 1);
+});
+
 test('POST /api/plans/chat returns 201 and creates a chat session', async () => {
   let capturedProjectPath: string | undefined;
 
@@ -455,4 +509,37 @@ test('POST /api/plans/chat returns 201 and creates a chat session', async () => 
   assert.equal(state.statusCode, 201);
   assert.equal(capturedProjectPath, '/workspace/project');
   assert.deepEqual(parseJson<{ id: number }>(state), { id: 123 });
+});
+
+test('POST /api/plans/:id/chat with valid message returns 200', async () => {
+  let processArgs:
+    | {
+      id: number;
+      message: string;
+    }
+    | undefined;
+
+  const { server, token } = createServerFixture({
+    planWorkflow: {
+      processUserMessage: async (id, message) => {
+        processArgs = { id, message };
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: 'POST',
+    url: '/api/plans/7/chat',
+    token,
+    body: {
+      message: '  Run dependency audit  ',
+    },
+  });
+
+  assert.equal(state.statusCode, 200);
+  assert.deepEqual(parseJson<{ ok: boolean }>(state), { ok: true });
+  assert.deepEqual(processArgs, {
+    id: 7,
+    message: 'Run dependency audit',
+  });
 });
