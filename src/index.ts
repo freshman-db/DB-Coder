@@ -18,6 +18,7 @@ import { TrendAnalyzer } from './evolution/TrendAnalyzer.js';
 import { EvolutionEngine } from './evolution/EvolutionEngine.js';
 import { PluginMonitor } from './plugins/PluginMonitor.js';
 import { log, type LogEntry } from './utils/logger.js';
+import { validateConfigForStartup } from './startup/configValidation.js';
 
 const program = new Command()
   .name('db-coder')
@@ -34,6 +35,11 @@ program
     log.info(`Starting db-coder for project: ${projectPath}`);
 
     const config = new Config(projectPath);
+    if (!validateConfigForStartup(config.values, config.projectPath)) {
+      process.exitCode = 1;
+      return;
+    }
+
     const { memory, claude: claudeConfig, codex: codexConfig, budget, mcp: mcpConfig } = config.values;
 
     // Initialize components
