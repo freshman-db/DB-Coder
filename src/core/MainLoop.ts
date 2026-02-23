@@ -800,6 +800,13 @@ export class MainLoop {
     let reviewRetries = 0;
     const allReviewResults: unknown[] = [...(task.review_results as unknown[] || [])];
     let changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
+    if (changedFiles.length === 0) {
+      if (startCommit === '') {
+        log.warn('startCommit is empty (getHeadCommit failed) — changed files cannot be determined, review will auto-pass');
+      } else {
+        log.info('No files changed since start commit — review will auto-pass');
+      }
+    }
     let { merged: reviewResult, decision: reviewDecision, cost_usd: reviewCost, duration_ms: reviewDuration } = await this.dualReview(task, changedFiles, reviewRetries);
 
     allReviewResults.push(reviewResult);
