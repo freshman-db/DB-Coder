@@ -351,3 +351,35 @@
 [36m[2026-02-23T01:20:04.448Z] [INFO][0m Committed: db-coder: Extract MetaReflectPatchProposal interface from Pa
 [36m[2026-02-23T01:20:04.502Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
 [36m[2026-02-23T01:20:04.503Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T01:21:28.841Z] [INFO][0m Committed: db-coder: Add 7 unit tests to EvolutionEngine.test.ts: parse
+[36m[2026-02-23T01:21:28.857Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T01:26:02.239Z] [INFO][0m Reviews: Claude PASS, Codex PASS (273s)
+[36m[2026-02-23T01:26:04.372Z] [INFO][0m Reflecting on task (outcome=success)...
+[36m[2026-02-23T01:26:04.374Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T01:27:37.021Z] [INFO][0m Saved experience: Type guard + normalizer pair for LLM output parsing
+[36m[2026-02-23T01:27:37.024Z] [INFO][0m Saved experience: Verify caller error handling before converting silent corruption to throws
+[36m[2026-02-23T01:27:37.025Z] [INFO][0m Saved experience: Use log.debug (not log.error) for expected fallback paths
+[36m[2026-02-23T01:27:37.027Z] [INFO][0m Saved experience: Type guard depth: validate container shape, not element internals, at the boundary
+[36m[2026-02-23T01:27:37.029Z] [INFO][0m Saved experience: Test log calls via Logger's own observation API, not monkey-patching
+[36m[2026-02-23T01:27:37.031Z] [INFO][0m Saved experience: Check for undefined intermediate paths before non-object check in nested setters
+[36m[2026-02-23T01:27:37.033Z] [INFO][0m Saved experience: Three-step approach to replacing `any` in LLM output parsing
+[36m[2026-02-23T01:27:37.240Z] [INFO][0m Stored adjustment [avoidance]: When replacing `any` in LLM output parsing, always create a runtime type guard f
+[36m[2026-02-23T01:27:37.242Z] [INFO][0m Stored adjustment [process]: Before changing a function from silent-failure to throwing, grep for all call si
+[36m[2026-02-23T01:27:37.244Z] [INFO][0m Stored adjustment [strategy]: When adding error logging to a catch block that returns a fallback value (like n
+[36m[2026-02-23T01:27:37.245Z] [INFO][0m Stored adjustment [strategy]: When testing log output, prefer the Logger's observation API (addListener) over 
+[36m[2026-02-23T01:27:37.247Z] [INFO][0m Stored adjustment [strategy]: When a type guard validates an array field (e.g. `patches: PromptPatch[]`), add 
+[36m[2026-02-23T01:27:37.251Z] [INFO][0m Task completed: Fix three type safety and observability issues in EvolutionE
+[36m[2026-02-23T01:27:37.258Z] [INFO][0m Merged branch: db-coder/f341c2fa
+[36m[2026-02-23T01:27:37.262Z] [INFO][0m safeBuild: compiling to dist.tmp/
+[36m[2026-02-23T01:27:39.750Z] [INFO][0m safeBuild: swapping dist/ directories
+[36m[2026-02-23T01:27:39.755Z] [INFO][0m safeBuild: success (2s)
+[36m[2026-02-23T01:27:39.755Z] [INFO][0m Self-build succeeded, restart pending after cycle completes
+[36m[2026-02-23T01:27:39.770Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T01:28:34.428Z] [INFO][0m Executing task [P2]: Create a safeTool() wrapper in SystemDataMcp.ts to eliminate 14+ identical try/c
+[36m[2026-02-23T01:28:34.437Z] [INFO][0m Created branch: db-coder/e375527b
+[36m[2026-02-23T01:28:36.506Z] [INFO][0m Task has no subtasks, auto-decomposing...
+[36m[2026-02-23T01:28:36.506Z] [INFO][0m Creating task plan...
+[36m[2026-02-23T01:28:36.599Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
+[36m[2026-02-23T01:30:45.590Z] [INFO][0m Plan created: 1 tasks
+[36m[2026-02-23T01:30:45.689Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
+[36m[2026-02-23T01:30:45.689Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
