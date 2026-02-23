@@ -200,6 +200,15 @@ export class ClaudeCodeSession {
         if (timer) clearTimeout(timer);
         this.child = null;
 
+        // Log diagnostics for non-zero exits with no result
+        if (code !== 0 && !resultText && textParts.length === 0) {
+          log.warn('ClaudeCodeSession: non-zero exit with no output', {
+            exitCode: code,
+            stderr: stderr.slice(0, 500),
+            bufferRemainder: buffer.slice(0, 500),
+          });
+        }
+
         // Use result text if available, otherwise fall back to accumulated text
         const text = resultText || textParts.join('');
 
@@ -212,7 +221,9 @@ export class ClaudeCodeSession {
           numTurns,
           durationMs: Date.now() - start,
           isError,
-          errors: isError ? (errors.length > 0 ? errors : [stderr || `exit code ${code}`]) : [],
+          errors: (isError || (code !== 0 && code !== null))
+            ? (errors.length > 0 ? errors : [stderr || `exit code ${code}`])
+            : [],
           usage,
         });
       });
@@ -236,6 +247,7 @@ export class ClaudeCodeSession {
     const args = [
       '-p', prompt,
       '--output-format', 'stream-json',
+      '--verbose',
     ];
 
     if (opts.permissionMode === 'bypassPermissions') {

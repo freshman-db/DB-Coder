@@ -452,6 +452,10 @@ Respond with EXACTLY this JSON (no markdown, no extra text):
 {"task": "specific description of what to do", "priority": 0-3, "reasoning": "why"}`;
 
     const result = await this.brainThink(prompt);
+    log.info(`Brain decide raw: cost=$${result.costUsd.toFixed(4)}, exit=${result.exitCode}, isError=${result.isError}, turns=${result.numTurns}, text="${truncate(result.text, 200)}"`);
+    if (result.isError || result.exitCode !== 0) {
+      log.warn(`Brain session errors: ${result.errors.join('; ')}`);
+    }
     try {
       const parsed = JSON.parse(result.text);
       const taskDesc = parsed.task && typeof parsed.task === 'string' ? parsed.task : null;
@@ -530,6 +534,7 @@ Respond with EXACTLY this JSON (no markdown):
 {"task": "specific description", "priority": 2, "reasoning": "why"}`;
 
     const result = await this.brainThink(prompt);
+    log.info(`Brain directive raw: cost=$${result.costUsd.toFixed(4)}, exit=${result.exitCode}, turns=${result.numTurns}, text="${truncate(result.text, 200)}"`);
     try {
       const parsed = JSON.parse(result.text);
       const taskDesc = parsed.task && typeof parsed.task === 'string' ? parsed.task : null;
