@@ -208,6 +208,10 @@ export class MainLoop {
 
   async start(): Promise<void> {
     if (this.running) return;
+    // Wait for a previous cycle to fully exit before re-acquiring the lock
+    if (this.stoppedPromise) {
+      await this.waitForStopped();
+    }
     if (!this.acquireLock()) {
       log.error('Another instance is running. Lock file: ' + this.lockFile);
       return;
@@ -1226,7 +1230,11 @@ Fix these issues while maintaining code quality. Do not introduce new issues.`;
       // Check if PID in lock file is still running
       try {
         const pid = parseInt(readFileSync(this.lockFile, 'utf-8'), 10);
-        try { process.kill(pid, 0); return false; } catch { /* PID not running, stale lock */ }
+        if (pid === process.pid) {
+          // Same process (serve mode restart) — allow re-acquisition
+        } else {
+          try { process.kill(pid, 0); return false; } catch { /* PID not running, stale lock */ }
+        }
       } catch { /* invalid lock file, overwrite */ }
     }
     writeFileSync(this.lockFile, String(process.pid));
