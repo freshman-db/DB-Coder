@@ -370,6 +370,22 @@ Also evaluate:
 - Did the task add unnecessary complexity?
 - Could the same result be achieved with less code?
 
+## Recurring Pattern Escalation
+
+If the review flags a recurring pattern (for example: missing-test, null-safety, import), you MUST produce at least one BEHAVIORAL adjustment that changes default coding behavior across future tasks.
+
+Do not stop at task-specific technique advice.
+
+Technique adjustment (narrow):
+- "When testing parser timeout handling, mock runProcess to return exitCode -1 and a [TIMEOUT] marker."
+
+Behavioral adjustment (required for recurring issues):
+- "When executing any code modification task, always add or update unit tests for the changed code."
+- "Before completing any file edit, verify imports resolve and remove unused imports."
+- "When touching nullable inputs, always add explicit null/undefined guards at module boundaries."
+
+For recurring missing-test findings, prioritize behavioral rules in category "standard".
+
 ## Adjustment Quality Guidelines
 
 Each adjustment MUST be a specific, actionable instruction with a clear trigger condition.
