@@ -1394,8 +1394,9 @@ async function countTscErrors(cwd: string): Promise<number> {
     // Count lines containing ': error TS'
     const lines = (result.stdout + result.stderr).split('\n');
     return lines.filter(l => l.includes(': error TS')).length;
-  } catch {
-    return 0;
+  } catch (e) {
+    log.warn('countTscErrors failed', { error: e instanceof Error ? e.message : String(e) });
+    return -1;
   }
 }
 
