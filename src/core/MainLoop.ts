@@ -997,12 +997,12 @@ export class MainLoop {
     iteration: number,
     maxRetries: number,
   ): Promise<boolean> {
-    if (iteration < maxRetries && iteration === 1) {
+    if (iteration <= maxRetries && iteration === 1) {
       log.info('Stuck: retrying subtask');
       return true; // Will retry in next iteration
     }
 
-    if (iteration < maxRetries && iteration === 2) {
+    if (iteration <= maxRetries && iteration === 2) {
       log.info('Stuck: asking Brain to reflect and adjust');
       const { reflection, cost: reflectCost } = await this.brain.reflect(
         this.config.projectPath,
@@ -1028,7 +1028,7 @@ export class MainLoop {
       return true; // Will retry with new insights
     }
 
-    if (iteration < maxRetries) {
+    if (iteration <= maxRetries) {
       log.info(`Stuck: retrying subtask (attempt ${iteration}/${maxRetries})`);
       return true;
     }

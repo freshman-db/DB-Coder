@@ -94,6 +94,24 @@ type MainLoopReviewInternals = {
   checkBudgetOrAbort(taskId: string): Promise<boolean>;
 };
 
+type MainLoopStuckInternals = {
+  handleStuck(
+    task: Task,
+    subtask: Task['subtasks'][number],
+    error: string,
+    stuckAdjustments: string[],
+    iteration: number,
+    maxRetries: number,
+  ): Promise<boolean>;
+  tryProcessAdjustments(
+    taskId: string | null,
+    adjustments: string[],
+    outcome: 'success' | 'failed' | 'blocked_stuck' | 'blocked_max_retries',
+    appliedAdjustmentIds?: number[],
+    errorContext?: string,
+  ): Promise<void>;
+};
+
 type TaskLogInsert = {
   task_id: string;
   phase: string;
@@ -350,6 +368,10 @@ function getMainLoopEvaluationInternals(loop: MainLoop): MainLoopEvaluationInter
 
 function getMainLoopReviewInternals(loop: MainLoop): MainLoopReviewInternals {
   return loop as unknown as MainLoopReviewInternals;
+}
+
+function getMainLoopStuckInternals(loop: MainLoop): MainLoopStuckInternals {
+  return loop as unknown as MainLoopStuckInternals;
 }
 
 type PromptDeltaInternals = {
@@ -2162,6 +2184,220 @@ describe('MainLoop runReviewCycle', () => {
       .map(patch => patch.review_results.map(result => result.summary));
 
     assert.deepEqual(reviewResultsUpdates, [['approved-first-pass']]);
+  });
+});
+
+describe('MainLoop handleStuck', () => {
+  function createHandleStuckTask(taskId: string): Task {
+    const now = new Date();
+    return {
+      id: taskId,
+      project_path: '/tmp/db-coder-main-loop-test',
+      task_description: 'Handle repeated subtask failures',
+      phase: 'executing',
+      priority: 1,
+      plan: null,
+      subtasks: [],
+      review_results: [],
+      iteration: 0,
+      total_cost_usd: 0,
+      git_branch: null,
+      start_commit: null,
+      depends_on: [],
+      status: 'active',
+      created_at: now,
+      updated_at: now,
+    };
+  }
+
+  function createHandleStuckSubtask(): Task['subtasks'][number] {
+    return {
+      id: 'subtask-stuck-1',
+      description: 'Retry flaky implementation',
+      executor: 'codex',
+      status: 'failed',
+    };
+  }
+
+  test('boundary: iteration === maxRetries still retries', async () => {
+    const reflectCalls: Array<{ result: string; outcome: string }> = [];
+    const addCostCalls: Array<{ taskId: string; amount: number }> = [];
+
+    const { loop } = createMainLoopForCycle({
+      brain: {
+        reflect: async (_projectPath, _taskDescription, result, _reviewSummary, outcome) => {
+          reflectCalls.push({ result, outcome: outcome ?? 'success' });
+          return {
+            reflection: {
+              experiences: [],
+              taskSummary: 'Boundary reflection',
+              adjustments: ['unused'],
+            },
+            cost: 0.4,
+          };
+        },
+      },
+      costTracker: {
+        addCost: async (taskId: string, amount: number) => {
+          addCostCalls.push({ taskId, amount });
+        },
+      },
+    });
+
+    const stuckInternals = getMainLoopStuckInternals(loop);
+    const task = createHandleStuckTask('task-stuck-boundary');
+    const subtask = createHandleStuckSubtask();
+    const stuckAdjustments: string[] = [];
+
+    const shouldRetry = await stuckInternals.handleStuck(task, subtask, 'boom', stuckAdjustments, 3, 3);
+
+    assert.equal(shouldRetry, true);
+    assert.equal(reflectCalls.length, 0);
+    assert.deepEqual(addCostCalls, []);
+    assert.deepEqual(stuckAdjustments, []);
+  });
+
+  test('graduated behavior: iteration 1 simple retry, 2 reflect, 3+ generic retries', async () => {
+    const reflectCalls: Array<{ result: string; outcome: string }> = [];
+    const addCostCalls: Array<{ taskId: string; amount: number }> = [];
+    const adjustmentCalls: Array<{
+      taskId: string | null;
+      adjustments: string[];
+      outcome: 'success' | 'failed' | 'blocked_stuck' | 'blocked_max_retries';
+    }> = [];
+
+    const { loop } = createMainLoopForCycle({
+      brain: {
+        reflect: async (_projectPath, _taskDescription, result, _reviewSummary, outcome) => {
+          reflectCalls.push({ result, outcome: outcome ?? 'success' });
+          return {
+            reflection: {
+              experiences: [],
+              taskSummary: 'Second-attempt reflection',
+              adjustments: ['split into smaller steps'],
+            },
+            cost: 0.25,
+          };
+        },
+      },
+      costTracker: {
+        addCost: async (taskId: string, amount: number) => {
+          addCostCalls.push({ taskId, amount });
+        },
+      },
+    });
+    loop.setEvolutionEngine({
+      processAdjustments: async (
+        _projectPath: string,
+        taskId: string | null,
+        adjustments: string[],
+        outcome: 'success' | 'failed' | 'blocked_stuck' | 'blocked_max_retries',
+      ) => {
+        adjustmentCalls.push({ taskId, adjustments: [...adjustments], outcome });
+      },
+    } as unknown as EvolutionEngine);
+
+    const stuckInternals = getMainLoopStuckInternals(loop);
+    const task = createHandleStuckTask('task-stuck-graduated');
+    const subtask = createHandleStuckSubtask();
+    const stuckAdjustments: string[] = [];
+
+    const iteration1Retry = await stuckInternals.handleStuck(task, subtask, 'boom', stuckAdjustments, 1, 5);
+    const iteration2Retry = await stuckInternals.handleStuck(task, subtask, 'boom', stuckAdjustments, 2, 5);
+    const iteration3Retry = await stuckInternals.handleStuck(task, subtask, 'boom', stuckAdjustments, 3, 5);
+    const iteration4Retry = await stuckInternals.handleStuck(task, subtask, 'boom', stuckAdjustments, 4, 5);
+
+    assert.equal(iteration1Retry, true);
+    assert.equal(iteration2Retry, true);
+    assert.equal(iteration3Retry, true);
+    assert.equal(iteration4Retry, true);
+    assert.equal(reflectCalls.length, 1);
+    assert.match(reflectCalls[0]?.result ?? '', /failed: boom/);
+    assert.equal(reflectCalls[0]?.outcome, 'blocked_stuck');
+    assert.deepEqual(addCostCalls, [
+      { taskId: task.id, amount: 0.25 },
+    ]);
+    assert.deepEqual(stuckAdjustments, ['split into smaller steps']);
+    assert.deepEqual(adjustmentCalls, [
+      {
+        taskId: task.id,
+        adjustments: ['split into smaller steps'],
+        outcome: 'blocked_stuck',
+      },
+    ]);
+  });
+
+  test('termination: iteration > maxRetries returns false and blocks task', async () => {
+    const reflectCalls: Array<{ result: string; outcome: string }> = [];
+    const addCostCalls: Array<{ taskId: string; amount: number }> = [];
+    const updateTaskCalls: Array<{ taskId: string; patch: unknown }> = [];
+    const adjustmentCalls: Array<{
+      taskId: string | null;
+      adjustments: string[];
+      outcome: 'success' | 'failed' | 'blocked_stuck' | 'blocked_max_retries';
+    }> = [];
+
+    const { loop } = createMainLoopForCycle({
+      brain: {
+        reflect: async (_projectPath, _taskDescription, result, _reviewSummary, outcome) => {
+          reflectCalls.push({ result, outcome: outcome ?? 'success' });
+          return {
+            reflection: {
+              experiences: [],
+              taskSummary: 'Give up and escalate',
+              adjustments: ['escalate blocker'],
+            },
+            cost: 0.15,
+          };
+        },
+      },
+      taskStore: {
+        updateTask: async (taskId: string, patch: unknown) => {
+          updateTaskCalls.push({ taskId, patch: structuredClone(patch) });
+        },
+      },
+      costTracker: {
+        addCost: async (taskId: string, amount: number) => {
+          addCostCalls.push({ taskId, amount });
+        },
+      },
+    });
+    loop.setEvolutionEngine({
+      processAdjustments: async (
+        _projectPath: string,
+        taskId: string | null,
+        adjustments: string[],
+        outcome: 'success' | 'failed' | 'blocked_stuck' | 'blocked_max_retries',
+      ) => {
+        adjustmentCalls.push({ taskId, adjustments: [...adjustments], outcome });
+      },
+    } as unknown as EvolutionEngine);
+
+    const stuckInternals = getMainLoopStuckInternals(loop);
+    const task = createHandleStuckTask('task-stuck-termination');
+    const subtask = createHandleStuckSubtask();
+    const stuckAdjustments: string[] = [];
+
+    const shouldRetry = await stuckInternals.handleStuck(task, subtask, 'still failing', stuckAdjustments, 4, 3);
+
+    assert.equal(shouldRetry, false);
+    assert.equal(reflectCalls.length, 1);
+    assert.match(reflectCalls[0]?.result ?? '', /failed 4 times: still failing/);
+    assert.equal(reflectCalls[0]?.outcome, 'blocked_stuck');
+    assert.deepEqual(addCostCalls, [
+      { taskId: task.id, amount: 0.15 },
+    ]);
+    assert.deepEqual(stuckAdjustments, ['escalate blocker']);
+    assert.deepEqual(adjustmentCalls, [
+      {
+        taskId: task.id,
+        adjustments: ['escalate blocker'],
+        outcome: 'blocked_stuck',
+      },
+    ]);
+    assert.deepEqual(updateTaskCalls, [
+      { taskId: task.id, patch: { status: 'blocked', phase: 'blocked' } },
+    ]);
   });
 });
 
