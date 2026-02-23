@@ -106,3 +106,11 @@ export function tryParseReview(text: string): Omit<ReviewResult, 'cost_usd'> {
     summary: output.slice(0, 500),
   };
 }
+
+export function tryParseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}

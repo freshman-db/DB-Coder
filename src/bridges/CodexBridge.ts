@@ -2,7 +2,7 @@ import type { CodingAgent, AgentResult, ReviewResult } from './CodingAgent.js';
 import type { CodexConfig, TokenPricing } from '../config/types.js';
 import { runProcess, spawnWithJsonl, type JsonlEvent } from '../utils/process.js';
 import { log } from '../utils/logger.js';
-import { tryParseReview } from '../utils/parse.js';
+import { tryParseJson, tryParseReview } from '../utils/parse.js';
 import { readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -361,8 +361,4 @@ function firstPositiveNumber(values: unknown[]): number | null {
     }
   }
   return null;
-}
-
-function tryParseJson(text: string): unknown {
-  try { return JSON.parse(text); } catch { return undefined; }
 }

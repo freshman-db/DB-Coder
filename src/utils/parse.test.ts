@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { extractJsonFromText, isRecord, tryParseReview } from './parse.js';
+import { extractJsonFromText, isRecord, tryParseJson, tryParseReview } from './parse.js';
 
 test('isRecord identifies plain objects and rejects non-objects', () => {
   assert.equal(isRecord({ key: 'value' }), true);
@@ -83,6 +83,15 @@ test('extractJsonFromText returns null for empty, malformed, or non-string input
   assert.equal(extractJsonFromText(''), null);
   assert.equal(extractJsonFromText('note {"broken": } only'), null);
   assert.equal(extractJsonFromText(undefined as unknown as string), null);
+});
+
+test('tryParseJson parses valid JSON and returns undefined for invalid input', () => {
+  assert.deepEqual(tryParseJson('{"ok":true,"count":2}'), {
+    ok: true,
+    count: 2,
+  });
+  assert.equal(tryParseJson('{"broken": }'), undefined);
+  assert.equal(tryParseJson(''), undefined);
 });
 
 test('tryParseReview finds the review JSON object even when earlier JSON exists', () => {
