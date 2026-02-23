@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
 import {
   createSystemDataMcpServer,
   formatDate,
   formatDateNullable,
+  safeTool,
   type SystemDataMcpDeps,
 } from '../SystemDataMcp.js';
 import type { EvaluationScore } from '../../core/types.js';
@@ -357,6 +360,55 @@ test('formatDateNullable preserves nullish values and formats dates', () => {
   assert.equal(formatDateNullable('2026-02-11T00:00:00.000Z'), '2026-02-11T00:00:00.000Z');
   assert.equal(formatDateNullable(null), null);
   assert.equal(formatDateNullable(undefined), null);
+});
+
+test('safeTool returns the original handler result when handler succeeds', async () => {
+  const server = createSdkMcpServer({
+    name: 'safe-tool-success-test',
+    version: '1.0.0',
+    tools: [
+      safeTool(
+        'safe_tool_success',
+        'Safe tool success test.',
+        { input: z.string() },
+        async ({ input }) => ({
+          content: [{ type: 'text', text: 'ok' }],
+          structuredContent: { input, ok: true },
+        }),
+      ),
+    ],
+  });
+  const handler = getToolHandler(server as ReturnType<typeof createSystemDataMcpServer>, 'safe_tool_success');
+
+  const toolResult = await handler({ input: 'value' }, {});
+  assert.equal(toolResult.isError, undefined);
+  assert.deepEqual(toolResult, {
+    content: [{ type: 'text', text: 'ok' }],
+    structuredContent: { input: 'value', ok: true },
+  });
+});
+
+test('safeTool wraps thrown handler errors in standard tool error response', async () => {
+  const server = createSdkMcpServer({
+    name: 'safe-tool-error-test',
+    version: '1.0.0',
+    tools: [
+      safeTool(
+        'safe_tool_error',
+        'Safe tool error test.',
+        { value: z.number().optional() },
+        async () => {
+          throw new Error('boom');
+        },
+      ),
+    ],
+  });
+  const handler = getToolHandler(server as ReturnType<typeof createSystemDataMcpServer>, 'safe_tool_error');
+
+  const result = await handler({}, {});
+  assert.equal(result.isError, true);
+  assert.match(readText(result), /safe_tool_error failed: boom/);
+  assert.equal(result.structuredContent, undefined);
 });
 
 test('get_health_trend maps trend rows and respects default/custom limits', async () => {

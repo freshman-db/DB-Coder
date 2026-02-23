@@ -29,7 +29,7 @@ function error(toolName: string, err: unknown): ToolResponse {
   return { content: [{ type: 'text', text: `${toolName} failed: ${message}` }], isError: true };
 }
 
-function safeTool<Schema extends z.ZodRawShape>(
+export function safeTool<Schema extends z.ZodRawShape>(
   name: string,
   description: string,
   schema: Schema,
