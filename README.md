@@ -56,14 +56,22 @@ src/
 │   ├── PlanWorkflow.ts      # Chat-based planning (persistent ChatSession + SSE)
 │   └── TaskQueue.ts         # Task queue management
 ├── bridges/
+│   ├── CodingAgent.ts       # AgentResult / ReviewResult interfaces
 │   ├── ClaudeBridge.ts      # Agent SDK query() wrapper + createChatSession()
-│   └── CodexBridge.ts       # codex exec subprocess wrapper
+│   ├── CodexBridge.ts       # codex exec subprocess wrapper
+│   └── MessageHandler.ts    # Auto-answer AskUserQuestion handler
 ├── utils/
-│   └── AsyncChannel.ts      # Push-to-pull adapter for Agent SDK streaming
+│   ├── AsyncChannel.ts      # Push-to-pull adapter for Agent SDK streaming
+│   ├── cost.ts              # CostTracker (budget guard)
+│   ├── git.ts               # Git operations (branch, commit, merge, diff)
+│   ├── safeBuild.ts         # Atomic dist/ swap for self-modification
+│   └── ...
 ├── prompts/
-│   ├── brain.ts             # Brain prompt templates (scan/plan/reflect)
+│   ├── brain.ts             # Brain prompt templates (scan/plan/reflect) + formatDynamicContext
 │   ├── executor.ts          # Executor prompt
+│   ├── evaluator.ts         # Pre-execution evaluation prompt
 │   ├── reviewer.ts          # Reviewer prompt
+│   ├── agents.ts            # Agent guidance builder (plugin-aware)
 │   ├── PromptRegistry.ts    # Prompt registry (cache + dynamic patches)
 │   └── patchUtils.ts        # Section-level patch utilities (apply/validate)
 ├── evolution/
@@ -71,11 +79,13 @@ src/
 │   ├── TrendAnalyzer.ts     # Health trend analysis
 │   └── types.ts             # Evolution system types
 ├── memory/
-│   ├── TaskStore.ts         # PostgreSQL: tasks / logs / scans / plans / chat messages
+│   ├── TaskStore.ts         # PostgreSQL: tasks / logs / scans / plans / chat / adjustments
 │   ├── GlobalMemory.ts      # PostgreSQL: global experience memory
 │   └── ProjectMemory.ts     # claude-mem: project-level memory
 ├── mcp/
-│   └── McpDiscovery.ts      # MCP plugin auto-discovery + phase routing
+│   ├── McpDiscovery.ts      # MCP plugin auto-discovery + phase routing
+│   ├── SystemDataMcp.ts     # Internal MCP server for meta-reflect data access
+│   └── InternalMcpServer.ts # Internal MCP server base
 ├── plugins/
 │   └── PluginMonitor.ts     # Plugin update monitoring
 ├── server/
@@ -153,6 +163,9 @@ node dist/index.js serve --project .
 
 # Or with absolute path
 db-coder serve --project /path/to/your/project
+
+# Production: use the supervisor script for auto-restart and crash recovery
+nohup bash supervisor.sh > logs/nohup.out 2>&1 &
 ```
 
 Open `http://127.0.0.1:18800` in a browser. The API token is shown in startup logs or found in `~/.db-coder/config.json`.
@@ -209,22 +222,45 @@ The server runs on `http://127.0.0.1:18800`. All APIs require Bearer Token authe
 | POST | `/api/plans/:id/approve` | Approve plan |
 | POST | `/api/plans/:id/reject` | Reject plan |
 | POST | `/api/plans/:id/execute` | Execute approved plan |
+| GET | `/api/metrics` | Operational metrics (task stats, costs, health) |
 | **Evolution** | | |
 | GET | `/api/evolution/summary` | Evolution summary |
 | GET | `/api/evolution/prompt-versions` | Prompt versions |
 | POST | `/api/evolution/prompt-versions/:id/activate` | Activate patch |
 | POST | `/api/evolution/prompt-versions/:id/rollback` | Rollback patch |
 
+## Evolution Feedback Loop
+
+DB-Coder continuously learns from execution outcomes. The evolution system connects execution → review → reflection → future execution:
+
+```
+executeSubtask() ← evolution context injected (patterns, anti-patterns, adjustments)
+        ↓
+  dualReview() → structured mustFix/shouldFix issues
+        ↓
+  reflectOnTask() ← enriched review details (not just summary)
+        ↓
+  processAdjustments() → causal attribution (only applied adjustments updated)
+        ↓
+  smartTruncate() → tool summaries or tail-truncated output (not head)
+```
+
+Key mechanisms:
+- **Executor sees evolution context**: `synthesizePromptContext()` injects learned patterns, anti-patterns, and active adjustments into every executor prompt
+- **Structured review → reflect**: Full `mustFix`/`shouldFix` issue details (severity, file, line, suggestion) flow to reflection, not just a summary string
+- **Causal effectiveness attribution**: Records which adjustments were active when a task executed; only those adjustments get effectiveness updates on success/failure
+- **Smart truncation**: Prefers free SDK `tool_use_summary` metadata; falls back to tail-truncated output (1500 chars) instead of head-truncated (which captures useless preamble)
+
 ## Meta-Prompt Reflection System
 
-One of DB-Coder's core innovations: after every N completed tasks, the Brain automatically analyzes prompt template effectiveness and proposes optimizations.
+After every N completed tasks, the Brain analyzes prompt template effectiveness using an internal MCP data server and proposes optimizations.
 
 ```
 Task completed → counter++ → trigger metaReflect()
                                     ↓
-                   Collect review events / trends / logs
+                   SystemDataMcp provides data query tools
                                     ↓
-                   Brain (Opus) analyzes & proposes 0-3 patches
+                   Brain (Opus) autonomously explores data & proposes 0-3 patches
                                     ↓
                 candidate (confidence ≥ 0.7) → active
                                     ↓

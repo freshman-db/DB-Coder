@@ -56,14 +56,22 @@ src/
 │   ├── PlanWorkflow.ts      # 聊天式计划工作流 (常驻 ChatSession + SSE)
 │   └── TaskQueue.ts         # 任务队列管理
 ├── bridges/
+│   ├── CodingAgent.ts       # AgentResult / ReviewResult 接口定义
 │   ├── ClaudeBridge.ts      # Agent SDK query() 封装 + createChatSession()
-│   └── CodexBridge.ts       # codex exec 子进程封装
+│   ├── CodexBridge.ts       # codex exec 子进程封装
+│   └── MessageHandler.ts    # 自动应答 AskUserQuestion 处理器
 ├── utils/
-│   └── AsyncChannel.ts      # Push-to-pull 适配器，为 Agent SDK 提供流式输入
+│   ├── AsyncChannel.ts      # Push-to-pull 适配器，为 Agent SDK 提供流式输入
+│   ├── cost.ts              # CostTracker (预算守卫)
+│   ├── git.ts               # Git 操作 (分支/提交/合并/diff)
+│   ├── safeBuild.ts         # 原子 dist/ 替换（自修改安全）
+│   └── ...
 ├── prompts/
-│   ├── brain.ts             # Brain 提示词模板 (scan/plan/reflect)
+│   ├── brain.ts             # Brain 提示词模板 (scan/plan/reflect) + formatDynamicContext
 │   ├── executor.ts          # 执行器提示词
+│   ├── evaluator.ts         # 执行前评估提示词
 │   ├── reviewer.ts          # 审查器提示词
+│   ├── agents.ts            # Agent 引导构建器（插件感知）
 │   ├── PromptRegistry.ts    # 提示词注册表（缓存 + 动态补丁）
 │   └── patchUtils.ts        # 节级补丁工具 (apply/validate)
 ├── evolution/
@@ -71,11 +79,13 @@ src/
 │   ├── TrendAnalyzer.ts     # 健康趋势分析
 │   └── types.ts             # 进化系统类型
 ├── memory/
-│   ├── TaskStore.ts         # PostgreSQL: 任务/日志/扫描/计划草案/聊天消息
+│   ├── TaskStore.ts         # PostgreSQL: 任务/日志/扫描/计划草案/聊天消息/adjustments
 │   ├── GlobalMemory.ts      # PostgreSQL: 全局经验记忆
 │   └── ProjectMemory.ts     # claude-mem: 项目级记忆
 ├── mcp/
-│   └── McpDiscovery.ts      # MCP 插件自动发现 + 阶段路由
+│   ├── McpDiscovery.ts      # MCP 插件自动发现 + 阶段路由
+│   ├── SystemDataMcp.ts     # 内部 MCP 服务器，为 meta-reflect 提供数据查询工具
+│   └── InternalMcpServer.ts # 内部 MCP 服务器基类
 ├── plugins/
 │   └── PluginMonitor.ts     # 插件更新监控
 ├── server/
@@ -153,6 +163,9 @@ node dist/index.js serve --project .
 
 # 或指定绝对路径
 db-coder serve --project /path/to/your/project
+
+# 生产环境：使用 supervisor 脚本实现自动重启和崩溃恢复
+nohup bash supervisor.sh > logs/nohup.out 2>&1 &
 ```
 
 打开 `http://127.0.0.1:18800`。API 令牌在启动日志中显示，或查看 `~/.db-coder/config.json`。
@@ -209,22 +222,45 @@ Web UI 提供以下功能：
 | POST | `/api/plans/:id/approve` | 审批计划 |
 | POST | `/api/plans/:id/reject` | 驳回计划 |
 | POST | `/api/plans/:id/execute` | 执行已审批计划 |
+| GET | `/api/metrics` | 运维指标（任务统计、费用、健康度） |
 | **进化系统** | | |
 | GET | `/api/evolution/summary` | 进化摘要 |
 | GET | `/api/evolution/prompt-versions` | 提示词版本 |
 | POST | `/api/evolution/prompt-versions/:id/activate` | 激活补丁 |
 | POST | `/api/evolution/prompt-versions/:id/rollback` | 回滚补丁 |
 
+## 进化反馈环路
+
+DB-Coder 从每次执行结果中持续学习。进化系统连接 执行 → 审查 → 反思 → 未来执行：
+
+```
+executeSubtask() ← 注入进化上下文（模式、反模式、调整）
+        ↓
+  dualReview() → 结构化 mustFix/shouldFix issues
+        ↓
+  reflectOnTask() ← 丰富的审查详情（不仅是摘要）
+        ↓
+  processAdjustments() → 因果归因（仅更新被应用的 adjustments）
+        ↓
+  smartTruncate() → 优先 tool summaries，否则尾部截断
+```
+
+核心机制：
+- **执行器看到进化上下文**：`synthesizePromptContext()` 将学到的模式、反模式和活跃调整注入每个 executor prompt
+- **结构化审查 → 反思**：完整的 `mustFix`/`shouldFix` issue 详情（严重级别、文件、行号、建议）传递到反思，而非仅传摘要字符串
+- **因果归因**：记录任务执行时活跃的 adjustment IDs；仅这些 adjustments 在成功/失败时更新 effectiveness
+- **智能截断**：优先使用免费的 SDK `tool_use_summary` 元数据；fallback 使用尾部截断（1500 字符）而非头部截断
+
 ## Meta-Prompt 反思系统
 
-DB-Coder 的核心创新之一：Brain 每完成 N 个任务后，自动分析提示词模板的效果并提出优化。
+每完成 N 个任务后，Brain 通过内部 MCP 数据服务器自主分析提示词模板效果并提出优化。
 
 ```
 任务完成 → 累计计数器 → 触发 metaReflect()
                               ↓
-                 收集 review events / 趋势 / 日志
+                 SystemDataMcp 提供数据查询工具
                               ↓
-                 Brain (Opus) 分析并提出 0-3 个补丁
+                 Brain (Opus) 自主探索数据并提出 0-3 个补丁
                               ↓
               candidate (confidence ≥ 0.7) → active
                               ↓
