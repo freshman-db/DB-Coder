@@ -379,6 +379,86 @@ test('createPlan falls back safely when Claude returns invalid JSON', async () =
   assert.equal(result.cost, 0.29);
 });
 
+test('createPlanWithMarkdown includes formatted existing tasks and returns parsed markdown', async () => {
+  const projectPath = '/tmp/brain-plan-markdown';
+  const planCalls: PlanInvocation[] = [];
+  const listTaskCalls: string[] = [];
+
+  const claude = {
+    plan: async (
+      prompt: string,
+      cwd: string,
+      options?: { systemPrompt?: string; maxTurns?: number },
+    ) => {
+      planCalls.push({ prompt, cwd, options });
+      return {
+        success: true,
+        output: JSON.stringify({
+          tasks: [
+            {
+              id: 'task-md-1',
+              description: 'Implement markdown plan rendering',
+              type: 'feature',
+              priority: 1,
+              executor: 'codex',
+              subtasks: [
+                { id: 'task-md-1.1', description: 'Add markdown output tests', executor: 'codex' },
+              ],
+              dependsOn: [],
+              estimatedComplexity: 'medium',
+            },
+          ],
+          reasoning: 'Convert research output into a concrete implementation plan.',
+          markdown: '## Plan\n- Implement markdown plan rendering',
+        }),
+        cost_usd: 0.36,
+        duration_ms: 7,
+      } satisfies AgentResult;
+    },
+  } as unknown as ClaudeBridge;
+
+  const taskStore = {
+    listTasks: async (_cwd: string, status?: string) => {
+      listTaskCalls.push(status ?? 'none');
+      switch (status) {
+        case 'queued':
+          return [{ priority: 1, task_description: 'Queue follow-up tests' }];
+        case 'done':
+          return [{ priority: 2, task_description: 'Ship planner prompt cleanup' }];
+        case 'blocked':
+          return [{ priority: 0, task_description: 'Resolve flaky DB mocks' }];
+        case 'failed':
+          return [{ priority: 3, task_description: 'Retry docs sync task' }];
+        default:
+          return [];
+      }
+    },
+  } as unknown as TaskStore;
+
+  const brain = new Brain(claude, {} as GlobalMemory, {} as ProjectMemory, taskStore);
+  const result = await brain.createPlanWithMarkdown(
+    projectPath,
+    'Research says to expose both JSON and markdown plans.',
+    { description: 'Implement markdown plan output' },
+  );
+
+  assert.equal(result.cost, 0.36);
+  assert.equal(result.plan.tasks.length, 1);
+  assert.equal(result.plan.tasks[0]?.id, 'task-md-1');
+  assert.equal(result.plan.reasoning, 'Convert research output into a concrete implementation plan.');
+  assert.equal(result.reasoning, 'Convert research output into a concrete implementation plan.');
+  assert.equal(result.markdown, '## Plan\n- Implement markdown plan rendering');
+
+  assert.deepEqual(listTaskCalls, ['queued', 'done', 'blocked', 'failed']);
+  assert.equal(planCalls.length, 1);
+  assert.equal(planCalls[0]?.cwd, projectPath);
+  assert.equal(planCalls[0]?.options?.systemPrompt, BRAIN_SYSTEM_PROMPT);
+  assert.match(planCalls[0]?.prompt ?? '', /- \[P1\] \[queued\] Queue follow-up tests/);
+  assert.match(planCalls[0]?.prompt ?? '', /- \[P2\] \[done\] Ship planner prompt cleanup/);
+  assert.match(planCalls[0]?.prompt ?? '', /- \[P0\] \[blocked\] Resolve flaky DB mocks/);
+  assert.match(planCalls[0]?.prompt ?? '', /- \[P3\] \[failed\] Retry docs sync task/);
+});
+
 test('reflect calls ClaudeBridge and stores experiences in memory systems', async () => {
   const projectPath = '/tmp/brain-reflect-project';
   const planCalls: PlanInvocation[] = [];
