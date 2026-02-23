@@ -8,37 +8,32 @@
 
 ## 概述
 
-DB-Coder 是一个全自主的 AI 编码系统，通过 **scan → plan → execute → review → reflect** 循环持续改进目标项目。它使用 Claude (Opus) 作为大脑进行分析和规划，Claude + Codex 作为双执行引擎，并对代码变更进行交叉审查。
+DB-Coder 是一个全自主的 AI 编码系统，通过 **大脑决策 → 工人执行 → 硬验证 → 审查 → 反思** 循环持续改进目标项目。它使用两个独立的 Claude Code CLI session —— 只读的"大脑"负责决策，读写的"工人"负责执行 —— 并用 Codex CLI 进行交叉审查。
 
 ### 核心能力
 
-- **自主巡逻** — 无需人工干预的 scan → plan → execute → review → reflect 完整循环，通过 Web UI 启停
-- **交互式计划对话** — 在 Web UI 中与 Claude 进行多轮对话，实时流式输出 Markdown 格式的回复，逐步梳理需求后生成可执行计划
+- **自主巡逻** — 完整的 大脑决策 → 工人执行 → 硬验证 → Codex 审查 → 大脑反思 循环，通过 Web UI 启停
 - **双重审查** — Claude Code + Codex CLI 并行审查，交集问题为 must-fix
-- **自我进化** — 从每次任务中提取经验，动态优化提示词模板
-- **Meta-Prompt 反思** — Brain 定期分析提示词效果，提出节级补丁，自动追踪效果并回滚劣化版本
-- **MCP 集成** — 自动发现 Claude 插件（Serena、Context7、Playwright 等）并按阶段分配
-- **双层记忆** — PostgreSQL（全局经验）+ claude-mem（项目级上下文）
-- **Web UI** — 实时任务监控、日志流、费用追踪、聊天式计划
+- **硬验证** — TypeScript 错误计数对比基线，阻止合并劣化代码
+- **自然进化** — 大脑反思时直接编辑 CLAUDE.md (规则/状态) + 写入 claude-mem (经验)，无数值评分
+- **Web UI** — 实时任务监控、日志流、费用追踪、巡逻控制
+- **Git 安全** — 所有变更在隔离的 `db-coder/*` 分支上，验证通过后才合并到 main
 
 ## 架构
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                      Brain (Opus)                       │
-│              scan / plan / reflect / evolve              │
-├─────────────┬───────────────────────────┬───────────────┤
-│ ClaudeBridge│     PromptRegistry        │  CodexBridge  │
-│ (Agent SDK) │    (meta-prompt 补丁)      │ (codex exec)  │
-├─────────────┴───────────────────────────┴───────────────┤
-│          MainLoop              PlanWorkflow             │
-│   巡逻: scan→plan→execute      对话: 多轮沟通            │
-│   →review→reflect→merge        →研究→生成计划            │
-├──────────────┬──────────────┬───────────────────────────┤
-│  TaskStore   │ GlobalMemory │    EvolutionEngine        │
-│  (PostgreSQL)│  (PostgreSQL)│  调整 / 趋势 /             │
-│              │              │  meta-reflect / 补丁       │
-├──────────────┴──────────────┴───────────────────────────┤
+│                  MainLoop 编排器                         │
+│     brainDecide → workerExecute → hardVerify            │
+│       → codexReview → brainReflect → merge              │
+├─────────────┬─────────────────────────┬─────────────────┤
+│  大脑 session │      工人 session       │   Codex CLI     │
+│  (只读)      │      (读写)             │   (审查)        │
+│  Claude Code │      Claude Code       │  gpt-5.3-codex  │
+├─────────────┴─────────────────────────┴─────────────────┤
+│  CLAUDE.md + claude-mem          TaskStore (PostgreSQL)  │
+│  (规则 / 经验)                   (任务 / 日志 / 费用)    │
+├─────────────────────────────────────────────────────────┤
 │              HTTP Server (:18800)                        │
 │       REST API + Web SPA + SSE 流式传输                  │
 └─────────────────────────────────────────────────────────┘
@@ -48,55 +43,30 @@ DB-Coder 是一个全自主的 AI 编码系统，通过 **scan → plan → exec
 
 ```
 src/
-├── index.ts                 # CLI 入口 (commander)，自动 resolve 相对路径
+├── index.ts                         # CLI 入口 (commander)
 ├── core/
-│   ├── Brain.ts             # 扫描/规划/反思 (Agent SDK plan mode)
-│   ├── MainLoop.ts          # 巡逻循环: scan→plan→execute→review→reflect
-│   ├── ModeManager.ts       # PatrolManager (巡逻启停管理)
-│   ├── PlanWorkflow.ts      # 聊天式计划工作流 (常驻 ChatSession + SSE)
-│   └── TaskQueue.ts         # 任务队列管理
+│   ├── MainLoop.ts                  # 核心编排循环 (~530行)
+│   ├── ModeManager.ts               # PatrolManager (巡逻启停)
+│   ├── TaskQueue.ts                 # 任务队列 (从 DB 获取)
+│   ├── Shutdown.ts                  # 优雅退出
+│   └── ModuleScheduler.ts           # 模块扫描调度
 ├── bridges/
-│   ├── CodingAgent.ts       # AgentResult / ReviewResult 接口定义
-│   ├── ClaudeBridge.ts      # Agent SDK query() 封装 + createChatSession()
-│   ├── CodexBridge.ts       # codex exec 子进程封装
-│   └── MessageHandler.ts    # 自动应答 AskUserQuestion 处理器
-├── utils/
-│   ├── AsyncChannel.ts      # Push-to-pull 适配器，为 Agent SDK 提供流式输入
-│   ├── cost.ts              # CostTracker (预算守卫)
-│   ├── git.ts               # Git 操作 (分支/提交/合并/diff)
-│   ├── safeBuild.ts         # 原子 dist/ 替换（自修改安全）
-│   └── ...
-├── prompts/
-│   ├── brain.ts             # Brain 提示词模板 (scan/plan/reflect) + formatDynamicContext
-│   ├── executor.ts          # 执行器提示词
-│   ├── evaluator.ts         # 执行前评估提示词
-│   ├── reviewer.ts          # 审查器提示词
-│   ├── agents.ts            # Agent 引导构建器（插件感知）
-│   ├── PromptRegistry.ts    # 提示词注册表（缓存 + 动态补丁）
-│   └── patchUtils.ts        # 节级补丁工具 (apply/validate)
-├── evolution/
-│   ├── EvolutionEngine.ts   # 自我进化: 调整/趋势/meta-reflect
-│   ├── TrendAnalyzer.ts     # 健康趋势分析
-│   └── types.ts             # 进化系统类型
+│   ├── ClaudeCodeSession.ts         # Claude Code CLI stream-json 封装 (~230行)
+│   ├── CodingAgent.ts               # ReviewResult / ReviewIssue 接口
+│   └── CodexBridge.ts               # Codex CLI 子进程封装
 ├── memory/
-│   ├── TaskStore.ts         # PostgreSQL: 任务/日志/扫描/计划草案/聊天消息/adjustments
-│   ├── GlobalMemory.ts      # PostgreSQL: 全局经验记忆
-│   └── ProjectMemory.ts     # claude-mem: 项目级记忆
-├── mcp/
-│   ├── McpDiscovery.ts      # MCP 插件自动发现 + 阶段路由
-│   ├── SystemDataMcp.ts     # 内部 MCP 服务器，为 meta-reflect 提供数据查询工具
-│   └── InternalMcpServer.ts # 内部 MCP 服务器基类
-├── plugins/
-│   └── PluginMonitor.ts     # 插件更新监控
+│   ├── TaskStore.ts                 # PostgreSQL: 任务/日志/费用/计划
+│   ├── GlobalMemory.ts              # PostgreSQL: 全局记忆 (逐步淡出)
+│   └── ProjectMemory.ts             # claude-mem HTTP 客户端
 ├── server/
-│   ├── Server.ts            # HTTP 服务（API + 静态文件）
-│   └── routes.ts            # REST API 路由 (HttpError 统一错误处理)
+│   ├── Server.ts                    # HTTP 服务 (API + 静态文件 + 安全头)
+│   ├── routes.ts                    # REST API 路由 (~600行)
+│   └── rateLimit.ts                 # 速率限制
 ├── config/
-│   ├── Config.ts            # 配置加载（全局 + 项目级）
-│   └── types.ts             # 配置类型定义
-├── web/                     # SPA 前端 (HTML/CSS/JS + marked.js Markdown 渲染)
-└── scripts/
-    └── triggerMetaReflect.ts # 手动触发提示词优化
+│   ├── Config.ts                    # 配置加载 (全局 + 项目级)
+│   └── types.ts                     # 配置类型
+├── utils/                           # Git、费用追踪、进程管理、日志等
+└── web/                             # SPA 前端 (HTML/CSS/JS + marked.js)
 ```
 
 ## 快速开始
@@ -105,8 +75,8 @@ src/
 
 - Node.js >= 22
 - PostgreSQL（推荐 Docker）
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)（`@anthropic-ai/claude-agent-sdk`）
-- [Codex CLI](https://github.com/openai/codex)（可选，用于双重执行）
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)（全局安装）
+- [Codex CLI](https://github.com/openai/codex)（可选，用于双重审查）
 
 ### 安装
 
@@ -142,14 +112,7 @@ npm run build
   "memory": {
     "pgConnectionString": "postgresql://db:db@localhost:5432/db_coder"
   },
-  "evolution": {
-    "metaReflectInterval": 5,
-    "promptPatchAutoApply": true,
-    "maxActivePromptPatches": 3,
-    "goals": [
-      { "description": "提升代码质量", "priority": 1, "status": "active" }
-    ]
-  }
+  "server": { "port": 18800, "host": "127.0.0.1" }
 }
 ```
 
@@ -158,13 +121,13 @@ npm run build
 ### 启动
 
 ```bash
-# 作为服务运行（相对路径会自动 resolve 为绝对路径）
+# 作为服务运行（相对路径会自动 resolve）
 node dist/index.js serve --project .
 
 # 或指定绝对路径
 db-coder serve --project /path/to/your/project
 
-# 生产环境：使用 supervisor 脚本实现自动重启和崩溃恢复
+# 生产环境：使用 supervisor 脚本自动重启
 nohup bash supervisor.sh > logs/nohup.out 2>&1 &
 ```
 
@@ -185,14 +148,11 @@ db-coder pause / resume      # 暂停/恢复
 
 ## Web UI
 
-Web UI 提供以下功能：
-
 - **仪表盘** — 系统状态、巡逻控制、快捷操作
-- **巡逻模式** — 通过顶栏按钮启停巡逻；实时显示状态（扫描中、规划中、执行中等）
-- **计划对话** — 与 Claude 多轮对话，实时流式 Markdown 输出；从对话中生成可执行计划
+- **巡逻模式** — 通过顶栏按钮启停，实时显示状态（扫描中、执行中、审查中等）
 - **任务列表** — 查看、筛选、管理任务，支持分页
-- **运行日志** — 实时 SSE 日志流，支持级别过滤
-- **系统设置** — 当前项目、系统状态、费用统计、配置查看（只读）
+- **运行日志** — SSE 实时日志流，支持级别过滤
+- **系统设置** — 当前项目、系统状态、费用追踪
 
 ## API
 
@@ -200,7 +160,9 @@ Web UI 提供以下功能：
 
 | 方法 | 端点 | 说明 |
 |------|------|------|
-| GET | `/api/status` | 服务状态（含 projectPath） |
+| GET | `/api/status` | 服务状态 |
+| GET | `/api/status/stream` | SSE 实时状态 |
+| GET | `/api/metrics` | 运营指标 |
 | GET/POST | `/api/tasks` | 任务列表/创建 |
 | GET | `/api/tasks/:id` | 任务详情 |
 | POST | `/api/control/pause` | 暂停循环 |
@@ -209,86 +171,45 @@ Web UI 提供以下功能：
 | POST | `/api/patrol/start` | 启动巡逻 |
 | POST | `/api/patrol/stop` | 停止巡逻 |
 | GET | `/api/logs?follow=true` | SSE 日志流 |
-| GET | `/api/memory?q=...` | 搜索记忆 |
 | GET | `/api/cost` | 费用详情 |
-| **计划对话** | | |
-| POST | `/api/plans/chat` | 创建新对话 |
-| POST | `/api/plans/:id/message` | 发送用户消息 |
-| GET | `/api/plans/:id/messages` | 获取聊天历史 |
-| GET | `/api/plans/:id/stream` | SSE 流（实时更新） |
-| POST | `/api/plans/:id/generate` | 从对话生成计划 |
-| POST | `/api/plans/:id/close` | 关闭对话会话 |
-| GET | `/api/plans` | 计划草案列表 |
+| GET | `/api/plans` | 计划列表 (只读) |
 | POST | `/api/plans/:id/approve` | 审批计划 |
 | POST | `/api/plans/:id/reject` | 驳回计划 |
-| POST | `/api/plans/:id/execute` | 执行已审批计划 |
-| GET | `/api/metrics` | 运维指标（任务统计、费用、健康度） |
-| **进化系统** | | |
-| GET | `/api/evolution/summary` | 进化摘要 |
-| GET | `/api/evolution/prompt-versions` | 提示词版本 |
-| POST | `/api/evolution/prompt-versions/:id/activate` | 激活补丁 |
-| POST | `/api/evolution/prompt-versions/:id/rollback` | 回滚补丁 |
 
-## 进化反馈环路
+## 工作原理
 
-DB-Coder 从每次执行结果中持续学习。进化系统连接 执行 → 审查 → 反思 → 未来执行：
+### 大脑+工人模式
 
-```
-executeSubtask() ← 注入进化上下文（模式、反模式、调整）
-        ↓
-  dualReview() → 结构化 mustFix/shouldFix issues
-        ↓
-  reflectOnTask() ← 丰富的审查详情（不仅是摘要）
-        ↓
-  processAdjustments() → 因果归因（仅更新被应用的 adjustments）
-        ↓
-  smartTruncate() → 优先 tool summaries，否则尾部截断
-```
+编排器 (MainLoop) 驱动两个独立的 Claude Code CLI session：
 
-核心机制：
-- **执行器看到进化上下文**：`synthesizePromptContext()` 将学到的模式、反模式和活跃调整注入每个 executor prompt
-- **结构化审查 → 反思**：完整的 `mustFix`/`shouldFix` issue 详情（严重级别、文件、行号、建议）传递到反思，而非仅传摘要字符串
-- **因果归因**：记录任务执行时活跃的 adjustment IDs；仅这些 adjustments 在成功/失败时更新 effectiveness
-- **智能截断**：优先使用免费的 SDK `tool_use_summary` 元数据；fallback 使用尾部截断（1500 字符）而非头部截断
+1. **大脑 Session**（只读）— 读取 CLAUDE.md 和查询 claude-mem 了解项目状态，然后决定执行什么任务。输出结构化 JSON 决策。
 
-## Meta-Prompt 反思系统
+2. **工人 Session**（读写）— 在隔离的 Git 分支上执行选定的任务。使用 Claude Code 完整工具集进行代码读写和测试。
 
-每完成 N 个任务后，Brain 通过内部 MCP 数据服务器自主分析提示词模板效果并提出优化。
+3. **硬验证** — 运行 `tsc` 并对比基线错误计数。新增错误会触发工人 session 续传修复。
 
-```
-任务完成 → 累计计数器 → 触发 metaReflect()
-                              ↓
-                 SystemDataMcp 提供数据查询工具
-                              ↓
-                 Brain (Opus) 自主探索数据并提出 0-3 个补丁
-                              ↓
-              candidate (confidence ≥ 0.7) → active
-                              ↓
-            effectiveness 追踪（成功 +0.1 / 失败 -0.15）
-                              ↓
-              effectiveness < -0.3 → 自动回滚
-```
+4. **Codex 审查** — Codex CLI 独立审查 git diff。结果通过 `mergeReviews()` 与大脑评估交叉验证。
 
-**补丁类型**：`prepend` | `append` | `replace_section` | `remove_section`
+5. **大脑反思** — 大脑分析任务结果，编辑 CLAUDE.md 添加新规则/教训，并将经验保存到 claude-mem 供未来参考。
 
-**安全机制**：
-- JSON 格式守卫：验证补丁后提示词仍包含必需的输出格式标记
-- 自动回滚：effectiveness < -0.3 且评估 ≥ 3 次
-- 通过率回滚：pass rate 下降 > 15% 且评估 ≥ 5 次
-- 并发上限：最多 3 个同时活跃的补丁
-- 补丁失败降级：返回原始基础模板
+### 自然进化
+
+系统不使用数值评分（v1 已证明无效），而是通过以下方式进化：
+
+- **编辑 CLAUDE.md**：大脑根据任务结果直接增删改规则
+- **写入 claude-mem**：语义化经验存储，未来决策时按相关性检索
+- **Git 历史**：`git log CLAUDE.md` 就是完整的进化时间线
 
 ## 技术栈
 
 | 组件 | 技术 |
 |------|------|
 | 语言 | TypeScript / Node.js (ESM) |
-| 大脑 | Claude Opus，通过 `@anthropic-ai/claude-agent-sdk` |
-| 执行器 | Claude Code (Agent SDK) + Codex CLI (`gpt-5.3-codex`) |
+| 大脑/工人 | Claude Code CLI (`--output-format stream-json`) |
+| 审查器 | Codex CLI (`gpt-5.3-codex`) |
 | 数据库 | PostgreSQL + `pg_trgm`，通过 `postgres` (porsager) |
-| 项目记忆 | claude-mem HTTP API |
-| MCP | 自动发现插件（Serena、Context7、Playwright 等） |
-| Web UI | 原生 HTML/CSS/JS SPA + marked.js（Markdown 渲染） |
+| 经验积累 | CLAUDE.md + claude-mem HTTP API |
+| Web UI | 原生 HTML/CSS/JS SPA + marked.js |
 | HTTP 服务 | Node.js `http` 模块 |
 
 ## 许可证

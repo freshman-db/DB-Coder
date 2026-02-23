@@ -8,37 +8,32 @@
 
 ## Overview
 
-DB-Coder is a fully autonomous AI coding system that continuously improves target projects through a **scan → plan → execute → review → reflect** loop. It uses Claude (Opus) as the brain for analysis and planning, Claude + Codex as dual execution engines, and cross-reviews all code changes.
+DB-Coder is a fully autonomous AI coding system that continuously improves target projects through a **brain → execute → verify → review → reflect** loop. It uses two independent Claude Code CLI sessions — a read-only "brain" for decision-making and a read-write "worker" for execution — with Codex CLI as a cross-reviewer.
 
 ### Core Capabilities
 
-- **Autonomous Patrol** — Full scan → plan → execute → review → reflect cycle, started/stopped via Web UI
-- **Interactive Plan Chat** — Multi-turn conversational planning with Claude in the Web UI, streaming Markdown responses in real-time
-- **Dual Review** — Claude Code + Codex CLI review in parallel, intersection issues are must-fix
-- **Self-Evolution** — Extracts lessons from every task, dynamically optimizes prompt templates
-- **Meta-Prompt Reflection** — Brain periodically analyzes prompt effectiveness, proposes section-level patches, auto-tracks impact and rolls back degraded versions
-- **MCP Integration** — Auto-discovers Claude plugins (Serena, Context7, Playwright, etc.) and routes by phase
-- **Dual-Layer Memory** — PostgreSQL (global experience) + claude-mem (project-level context)
-- **Web UI** — Real-time task monitoring, log streaming, cost tracking, chat-based planning
+- **Autonomous Patrol** — Full brain decide → worker execute → hard verify → codex review → brain reflect cycle, started/stopped via Web UI
+- **Dual Review** — Claude Code + Codex CLI review in parallel; intersection issues are must-fix
+- **Hard Verification** — TypeScript error count comparison against baseline prevents merging degraded code
+- **Natural Evolution** — Brain reflects by editing CLAUDE.md (rules/status) and writing to claude-mem (experience), no numeric scoring
+- **Web UI** — Real-time task monitoring, log streaming, cost tracking, patrol control
+- **Git Safety** — All changes on isolated `db-coder/*` branches, verified before merge to main
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                      Brain (Opus)                       │
-│              scan / plan / reflect / evolve              │
-├─────────────┬───────────────────────────┬───────────────┤
-│ ClaudeBridge│     PromptRegistry        │  CodexBridge  │
-│ (Agent SDK) │  (meta-prompt patches)    │ (codex exec)  │
-├─────────────┴───────────────────────────┴───────────────┤
-│          MainLoop              PlanWorkflow             │
-│   patrol: scan→plan→execute    chat: multi-turn dialog  │
-│   →review→reflect→merge        →research→generate plan  │
-├──────────────┬──────────────┬───────────────────────────┤
-│  TaskStore   │ GlobalMemory │    EvolutionEngine        │
-│  (PostgreSQL)│  (PostgreSQL)│  adjustments / trends /   │
-│              │              │  meta-reflect / patches    │
-├──────────────┴──────────────┴───────────────────────────┤
+│                  MainLoop Orchestrator                   │
+│     brainDecide → workerExecute → hardVerify            │
+│       → codexReview → brainReflect → merge              │
+├─────────────┬─────────────────────────┬─────────────────┤
+│ Brain Session│    Worker Session      │   Codex CLI     │
+│ (read-only) │    (read-write)        │   (review)      │
+│ Claude Code │    Claude Code         │  gpt-5.3-codex  │
+├─────────────┴─────────────────────────┴─────────────────┤
+│  CLAUDE.md + claude-mem        TaskStore (PostgreSQL)   │
+│  (rules / experience)         (tasks / logs / costs)    │
+├─────────────────────────────────────────────────────────┤
 │              HTTP Server (:18800)                        │
 │       REST API + Web SPA + SSE Streaming                │
 └─────────────────────────────────────────────────────────┘
@@ -48,55 +43,30 @@ DB-Coder is a fully autonomous AI coding system that continuously improves targe
 
 ```
 src/
-├── index.ts                 # CLI entry (commander), resolves project path
+├── index.ts                         # CLI entry (commander)
 ├── core/
-│   ├── Brain.ts             # Scan / plan / reflect (Agent SDK plan mode)
-│   ├── MainLoop.ts          # Patrol loop: scan→plan→execute→review→reflect
-│   ├── ModeManager.ts       # PatrolManager (patrol start/stop)
-│   ├── PlanWorkflow.ts      # Chat-based planning (persistent ChatSession + SSE)
-│   └── TaskQueue.ts         # Task queue management
+│   ├── MainLoop.ts                  # Orchestration loop (~530 lines)
+│   ├── ModeManager.ts               # PatrolManager (patrol start/stop)
+│   ├── TaskQueue.ts                 # Task queue from DB
+│   ├── Shutdown.ts                  # Graceful shutdown
+│   └── ModuleScheduler.ts           # Module scan scheduling
 ├── bridges/
-│   ├── CodingAgent.ts       # AgentResult / ReviewResult interfaces
-│   ├── ClaudeBridge.ts      # Agent SDK query() wrapper + createChatSession()
-│   ├── CodexBridge.ts       # codex exec subprocess wrapper
-│   └── MessageHandler.ts    # Auto-answer AskUserQuestion handler
-├── utils/
-│   ├── AsyncChannel.ts      # Push-to-pull adapter for Agent SDK streaming
-│   ├── cost.ts              # CostTracker (budget guard)
-│   ├── git.ts               # Git operations (branch, commit, merge, diff)
-│   ├── safeBuild.ts         # Atomic dist/ swap for self-modification
-│   └── ...
-├── prompts/
-│   ├── brain.ts             # Brain prompt templates (scan/plan/reflect) + formatDynamicContext
-│   ├── executor.ts          # Executor prompt
-│   ├── evaluator.ts         # Pre-execution evaluation prompt
-│   ├── reviewer.ts          # Reviewer prompt
-│   ├── agents.ts            # Agent guidance builder (plugin-aware)
-│   ├── PromptRegistry.ts    # Prompt registry (cache + dynamic patches)
-│   └── patchUtils.ts        # Section-level patch utilities (apply/validate)
-├── evolution/
-│   ├── EvolutionEngine.ts   # Self-evolution: adjustments / trends / meta-reflect
-│   ├── TrendAnalyzer.ts     # Health trend analysis
-│   └── types.ts             # Evolution system types
+│   ├── ClaudeCodeSession.ts         # Claude Code CLI stream-json wrapper (~230 lines)
+│   ├── CodingAgent.ts               # ReviewResult / ReviewIssue interfaces
+│   └── CodexBridge.ts               # Codex CLI subprocess wrapper
 ├── memory/
-│   ├── TaskStore.ts         # PostgreSQL: tasks / logs / scans / plans / chat / adjustments
-│   ├── GlobalMemory.ts      # PostgreSQL: global experience memory
-│   └── ProjectMemory.ts     # claude-mem: project-level memory
-├── mcp/
-│   ├── McpDiscovery.ts      # MCP plugin auto-discovery + phase routing
-│   ├── SystemDataMcp.ts     # Internal MCP server for meta-reflect data access
-│   └── InternalMcpServer.ts # Internal MCP server base
-├── plugins/
-│   └── PluginMonitor.ts     # Plugin update monitoring
+│   ├── TaskStore.ts                 # PostgreSQL: tasks / logs / costs / plans
+│   ├── GlobalMemory.ts              # PostgreSQL: global memory (legacy, phasing out)
+│   └── ProjectMemory.ts             # claude-mem HTTP client
 ├── server/
-│   ├── Server.ts            # HTTP server (API + static files)
-│   └── routes.ts            # REST API routes (HttpError pattern)
+│   ├── Server.ts                    # HTTP server (API + static files + security headers)
+│   ├── routes.ts                    # REST API routes (~600 lines)
+│   └── rateLimit.ts                 # Rate limiting
 ├── config/
-│   ├── Config.ts            # Config loading (global + project-level)
-│   └── types.ts             # Config type definitions
-├── web/                     # SPA frontend (HTML/CSS/JS + marked.js for Markdown)
-└── scripts/
-    └── triggerMetaReflect.ts # Manual prompt optimization trigger
+│   ├── Config.ts                    # Config loading (global + project-level)
+│   └── types.ts                     # Config type definitions
+├── utils/                           # Git, cost tracking, process, logging, etc.
+└── web/                             # SPA frontend (HTML/CSS/JS + marked.js)
 ```
 
 ## Quick Start
@@ -105,8 +75,8 @@ src/
 
 - Node.js >= 22
 - PostgreSQL (recommended via Docker)
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (`@anthropic-ai/claude-agent-sdk`)
-- [Codex CLI](https://github.com/openai/codex) (optional, for dual execution)
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (installed globally)
+- [Codex CLI](https://github.com/openai/codex) (optional, for dual review)
 
 ### Installation
 
@@ -142,14 +112,7 @@ Global config: `~/.db-coder/config.json`
   "memory": {
     "pgConnectionString": "postgresql://db:db@localhost:5432/db_coder"
   },
-  "evolution": {
-    "metaReflectInterval": 5,
-    "promptPatchAutoApply": true,
-    "maxActivePromptPatches": 3,
-    "goals": [
-      { "description": "Improve code quality", "priority": 1, "status": "active" }
-    ]
-  }
+  "server": { "port": 18800, "host": "127.0.0.1" }
 }
 ```
 
@@ -164,7 +127,7 @@ node dist/index.js serve --project .
 # Or with absolute path
 db-coder serve --project /path/to/your/project
 
-# Production: use the supervisor script for auto-restart and crash recovery
+# Production: use the supervisor script for auto-restart
 nohup bash supervisor.sh > logs/nohup.out 2>&1 &
 ```
 
@@ -185,14 +148,11 @@ db-coder pause / resume      # Pause / Resume
 
 ## Web UI
 
-The Web UI provides:
-
 - **Dashboard** — System status, patrol control, quick actions
-- **Patrol** — Start/stop patrol via topbar button; real-time state display (scanning, planning, executing, etc.)
-- **Plan Chat** — Multi-turn conversational planning with Claude; streaming Markdown responses; generate executable plans from chat
+- **Patrol** — Start/stop via topbar button; real-time state display (scanning, executing, reviewing, etc.)
 - **Task List** — View, filter, and manage tasks with pagination
 - **Logs** — Real-time SSE log streaming with level filtering
-- **Settings** — Current project, system status, cost tracking, configuration (read-only)
+- **Settings** — Project info, system status, cost tracking
 
 ## API
 
@@ -200,7 +160,9 @@ The server runs on `http://127.0.0.1:18800`. All APIs require Bearer Token authe
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/status` | Service status (includes projectPath) |
+| GET | `/api/status` | Service status |
+| GET | `/api/status/stream` | SSE real-time status |
+| GET | `/api/metrics` | Operational metrics |
 | GET/POST | `/api/tasks` | List / Create tasks |
 | GET | `/api/tasks/:id` | Task details |
 | POST | `/api/control/pause` | Pause loop |
@@ -209,86 +171,45 @@ The server runs on `http://127.0.0.1:18800`. All APIs require Bearer Token authe
 | POST | `/api/patrol/start` | Start patrol |
 | POST | `/api/patrol/stop` | Stop patrol |
 | GET | `/api/logs?follow=true` | SSE log stream |
-| GET | `/api/memory?q=...` | Search memory |
 | GET | `/api/cost` | Cost details |
-| **Plan Chat** | | |
-| POST | `/api/plans/chat` | Create new chat session |
-| POST | `/api/plans/:id/message` | Send user message |
-| GET | `/api/plans/:id/messages` | Get chat history |
-| GET | `/api/plans/:id/stream` | SSE stream (real-time updates) |
-| POST | `/api/plans/:id/generate` | Generate plan from chat |
-| POST | `/api/plans/:id/close` | Close chat session |
 | GET | `/api/plans` | List plan drafts |
 | POST | `/api/plans/:id/approve` | Approve plan |
 | POST | `/api/plans/:id/reject` | Reject plan |
-| POST | `/api/plans/:id/execute` | Execute approved plan |
-| GET | `/api/metrics` | Operational metrics (task stats, costs, health) |
-| **Evolution** | | |
-| GET | `/api/evolution/summary` | Evolution summary |
-| GET | `/api/evolution/prompt-versions` | Prompt versions |
-| POST | `/api/evolution/prompt-versions/:id/activate` | Activate patch |
-| POST | `/api/evolution/prompt-versions/:id/rollback` | Rollback patch |
 
-## Evolution Feedback Loop
+## How It Works
 
-DB-Coder continuously learns from execution outcomes. The evolution system connects execution → review → reflection → future execution:
+### Brain + Worker Pattern
 
-```
-executeSubtask() ← evolution context injected (patterns, anti-patterns, adjustments)
-        ↓
-  dualReview() → structured mustFix/shouldFix issues
-        ↓
-  reflectOnTask() ← enriched review details (not just summary)
-        ↓
-  processAdjustments() → causal attribution (only applied adjustments updated)
-        ↓
-  smartTruncate() → tool summaries or tail-truncated output (not head)
-```
+The orchestrator (MainLoop) drives two independent Claude Code CLI sessions:
 
-Key mechanisms:
-- **Executor sees evolution context**: `synthesizePromptContext()` injects learned patterns, anti-patterns, and active adjustments into every executor prompt
-- **Structured review → reflect**: Full `mustFix`/`shouldFix` issue details (severity, file, line, suggestion) flow to reflection, not just a summary string
-- **Causal effectiveness attribution**: Records which adjustments were active when a task executed; only those adjustments get effectiveness updates on success/failure
-- **Smart truncation**: Prefers free SDK `tool_use_summary` metadata; falls back to tail-truncated output (1500 chars) instead of head-truncated (which captures useless preamble)
+1. **Brain Session** (read-only) — Reads CLAUDE.md and queries claude-mem to understand project state, then decides which task to work on. Outputs structured JSON decisions.
 
-## Meta-Prompt Reflection System
+2. **Worker Session** (read-write) — Executes the chosen task on an isolated Git branch. Uses Claude Code's full tool set to read, write, and test code.
 
-After every N completed tasks, the Brain analyzes prompt template effectiveness using an internal MCP data server and proposes optimizations.
+3. **Hard Verification** — Runs `tsc` and compares error count against baseline. New errors trigger a fix cycle via the worker's session continuation.
 
-```
-Task completed → counter++ → trigger metaReflect()
-                                    ↓
-                   SystemDataMcp provides data query tools
-                                    ↓
-                   Brain (Opus) autonomously explores data & proposes 0-3 patches
-                                    ↓
-                candidate (confidence ≥ 0.7) → active
-                                    ↓
-              effectiveness tracking (success +0.1 / failure -0.15)
-                                    ↓
-                effectiveness < -0.3 → auto rollback
-```
+4. **Codex Review** — Codex CLI reviews the git diff independently. Results are cross-validated with the brain's assessment using `mergeReviews()`.
 
-**Patch Operations**: `prepend` | `append` | `replace_section` | `remove_section`
+5. **Brain Reflection** — Brain analyzes outcomes, edits CLAUDE.md with new rules/lessons, and saves experience to claude-mem for future reference.
 
-**Safety Guards**:
-- JSON format guard: validates patched prompts still contain required output format markers
-- Auto rollback: effectiveness < -0.3 with ≥ 3 evaluations
-- Pass rate rollback: pass rate drops > 15% with ≥ 5 evaluations
-- Concurrency cap: max 3 active patches at a time
-- Patch failure fallback: returns to original base template
+### Natural Evolution
+
+Instead of numeric scoring (which proved ineffective in v1), the system evolves through:
+
+- **CLAUDE.md edits**: Brain directly adds/modifies/removes rules based on task outcomes
+- **claude-mem writes**: Semantic experience storage, retrieved by relevance in future decisions
+- **Git history**: `git log CLAUDE.md` shows the complete evolution timeline
 
 ## Tech Stack
 
 | Component | Technology |
 |-----------|-----------|
 | Language | TypeScript / Node.js (ESM) |
-| Brain | Claude Opus via `@anthropic-ai/claude-agent-sdk` |
-| Executor | Claude Code (Agent SDK) + Codex CLI (`gpt-5.3-codex`) |
+| Brain / Worker | Claude Code CLI (`--output-format stream-json`) |
+| Reviewer | Codex CLI (`gpt-5.3-codex`) |
 | Database | PostgreSQL + `pg_trgm` via `postgres` (porsager) |
-| Project Memory | claude-mem HTTP API |
-| MCP | Auto-discovered plugins (Serena, Context7, Playwright, etc.) |
-| Web UI | Vanilla HTML/CSS/JS SPA + marked.js (Markdown rendering) |
+| Experience | CLAUDE.md + claude-mem HTTP API |
+| Web UI | Vanilla HTML/CSS/JS SPA + marked.js |
 | HTTP Server | Node.js `http` module |
 
 ## License
