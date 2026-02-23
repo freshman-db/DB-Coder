@@ -846,6 +846,22 @@ export class MainLoop {
           agent: fixAgentName,
           stopReason: fixResult.stopReason,
         });
+        const fixFailureReview: MergedReviewResult = {
+          passed: false,
+          mustFix: [],
+          shouldFix: [],
+          summary: `Fix attempt ${reviewRetries} failed (${fixAgentName})`,
+        };
+        allReviewResults.push(fixFailureReview);
+        await this.taskStore.updateTask(task.id, { review_results: allReviewResults });
+        if (reviewRetries >= this.config.values.autonomy.maxRetries) {
+          log.warn('Max retries reached after fix failures', {
+            reviewRetries,
+            maxRetries: this.config.values.autonomy.maxRetries,
+          });
+          reviewDecision = 'reject';
+          break;
+        }
         continue;
       }
       const changedFilesForCommit = await getModifiedAndAddedFiles(projectPath).catch(() => []);

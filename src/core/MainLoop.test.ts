@@ -2570,6 +2570,198 @@ describe('MainLoop runReviewCycle', () => {
     }
   });
 
+  test('rejects after max retries when every fix attempt fails without re-reviewing', async () => {
+    let codexFixCalls = 0;
+    let claudeFixCalls = 0;
+    let dualReviewCalls = 0;
+
+    const { loop } = createMainLoopForCycle({
+      config: {
+        values: {
+          autonomy: {
+            maxRetries: 3,
+          },
+        },
+      },
+      codex: {
+        execute: async () => {
+          codexFixCalls++;
+          return { success: false, output: 'failed', cost_usd: 0, duration_ms: 0 };
+        },
+      },
+      claude: {
+        execute: async () => {
+          claudeFixCalls++;
+          return { success: false, output: 'failed', cost_usd: 0, duration_ms: 0 };
+        },
+      },
+    });
+
+    const reviewInternals = getMainLoopReviewInternals(loop);
+    const originalDualReview = reviewInternals.dualReview;
+    const originalBuildFixPrompt = reviewInternals.buildFixPrompt;
+    const originalSaveReviewEvent = reviewInternals.saveReviewEvent;
+    const originalCheckBudgetOrAbort = reviewInternals.checkBudgetOrAbort;
+
+    const initialReview: MergedReviewResult = {
+      passed: false,
+      mustFix: [issue('initial-review-issue')],
+      shouldFix: [],
+      summary: 'initial-review',
+    };
+
+    reviewInternals.checkBudgetOrAbort = async () => false;
+    reviewInternals.buildFixPrompt = async () => 'Fix review issues.';
+    reviewInternals.saveReviewEvent = async () => {};
+    reviewInternals.dualReview = async (_task, _changedFiles, reviewRetries) => {
+      dualReviewCalls++;
+      assert.equal(reviewRetries, 0);
+      return { merged: initialReview, decision: 'retry', cost_usd: 0, duration_ms: 0 };
+    };
+
+    const now = new Date();
+    const task: Task = {
+      id: 'task-review-all-fixes-fail',
+      project_path: '/tmp/db-coder-main-loop-test',
+      task_description: 'Reject when all fix attempts fail',
+      phase: 'executing',
+      priority: 1,
+      plan: null,
+      subtasks: [],
+      review_results: [],
+      iteration: 0,
+      total_cost_usd: 0,
+      git_branch: null,
+      start_commit: null,
+      depends_on: [],
+      status: 'active',
+      created_at: now,
+      updated_at: now,
+    };
+
+    let reviewCycleResult: { aborted: true } | { aborted: false; reviewResult: MergedReviewResult; reviewRetries: number };
+    try {
+      reviewCycleResult = await reviewInternals.runReviewCycle(task, 'HEAD', [], '/tmp/db-coder-main-loop-test');
+    } finally {
+      reviewInternals.dualReview = originalDualReview;
+      reviewInternals.buildFixPrompt = originalBuildFixPrompt;
+      reviewInternals.saveReviewEvent = originalSaveReviewEvent;
+      reviewInternals.checkBudgetOrAbort = originalCheckBudgetOrAbort;
+    }
+
+    assert.equal(reviewCycleResult.aborted, false);
+    if (reviewCycleResult.aborted) return;
+    assert.equal(reviewCycleResult.reviewRetries, 3);
+    assert.equal(reviewCycleResult.reviewResult.passed, false);
+    assert.equal(dualReviewCalls, 1);
+    assert.equal(codexFixCalls, 1);
+    assert.equal(claudeFixCalls, 2);
+  });
+
+  test('records fix-failure review entries before rejecting at max retries', async () => {
+    const updateTaskCalls: Array<{ taskId: string; patch: unknown }> = [];
+    let dualReviewCalls = 0;
+
+    const { loop } = createMainLoopForCycle({
+      config: {
+        values: {
+          autonomy: {
+            maxRetries: 1,
+          },
+        },
+      },
+      codex: {
+        execute: async () => ({ success: false, output: 'failed', cost_usd: 0, duration_ms: 0 }),
+      },
+      claude: {
+        execute: async () => ({ success: false, output: 'failed', cost_usd: 0, duration_ms: 0 }),
+      },
+      taskStore: {
+        updateTask: async (taskId: string, patch: unknown) => {
+          updateTaskCalls.push({ taskId, patch: structuredClone(patch) });
+        },
+      },
+    });
+
+    const reviewInternals = getMainLoopReviewInternals(loop);
+    const originalDualReview = reviewInternals.dualReview;
+    const originalBuildFixPrompt = reviewInternals.buildFixPrompt;
+    const originalSaveReviewEvent = reviewInternals.saveReviewEvent;
+    const originalCheckBudgetOrAbort = reviewInternals.checkBudgetOrAbort;
+
+    const initialReview: MergedReviewResult = {
+      passed: false,
+      mustFix: [issue('initial-review-issue')],
+      shouldFix: [],
+      summary: 'initial-review',
+    };
+
+    reviewInternals.checkBudgetOrAbort = async () => false;
+    reviewInternals.buildFixPrompt = async () => 'Fix review issues.';
+    reviewInternals.saveReviewEvent = async () => {};
+    reviewInternals.dualReview = async (_task, _changedFiles, reviewRetries) => {
+      dualReviewCalls++;
+      assert.equal(reviewRetries, 0);
+      return { merged: initialReview, decision: 'retry', cost_usd: 0, duration_ms: 0 };
+    };
+
+    const now = new Date();
+    const task: Task = {
+      id: 'task-review-fix-failure-recorded',
+      project_path: '/tmp/db-coder-main-loop-test',
+      task_description: 'Record fix failures in review history',
+      phase: 'executing',
+      priority: 1,
+      plan: null,
+      subtasks: [],
+      review_results: [],
+      iteration: 0,
+      total_cost_usd: 0,
+      git_branch: null,
+      start_commit: null,
+      depends_on: [],
+      status: 'active',
+      created_at: now,
+      updated_at: now,
+    };
+
+    let reviewCycleResult: { aborted: true } | { aborted: false; reviewResult: MergedReviewResult; reviewRetries: number };
+    try {
+      reviewCycleResult = await reviewInternals.runReviewCycle(task, 'HEAD', [], '/tmp/db-coder-main-loop-test');
+    } finally {
+      reviewInternals.dualReview = originalDualReview;
+      reviewInternals.buildFixPrompt = originalBuildFixPrompt;
+      reviewInternals.saveReviewEvent = originalSaveReviewEvent;
+      reviewInternals.checkBudgetOrAbort = originalCheckBudgetOrAbort;
+    }
+
+    assert.equal(reviewCycleResult.aborted, false);
+    if (reviewCycleResult.aborted) return;
+    assert.equal(reviewCycleResult.reviewRetries, 1);
+    assert.equal(reviewCycleResult.reviewResult.passed, false);
+    assert.equal(dualReviewCalls, 1);
+
+    const reviewResultsUpdates = updateTaskCalls
+      .map(call => call.patch)
+      .filter((patch): patch is { review_results: MergedReviewResult[] } => {
+        if (typeof patch !== 'object' || patch === null) return false;
+        return Array.isArray((patch as { review_results?: unknown[] }).review_results);
+      })
+      .map(patch => patch.review_results);
+
+    assert.equal(reviewResultsUpdates.length, 2);
+    const finalReviewHistory = reviewResultsUpdates[reviewResultsUpdates.length - 1];
+    assert.deepEqual(finalReviewHistory, [
+      initialReview,
+      {
+        passed: false,
+        mustFix: [],
+        shouldFix: [],
+        summary: 'Fix attempt 1 failed (codex)',
+      },
+    ]);
+  });
+
   test('accumulates review_results across retries instead of overwriting prior attempts', async () => {
     let codexFixCalls = 0;
     let claudeFixCalls = 0;
