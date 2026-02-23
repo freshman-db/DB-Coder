@@ -169,14 +169,8 @@ export class CodexBridge implements CodingAgent {
     const start = Date.now();
 
     try {
-      const reviewPrompt = `Review the uncommitted code changes in this repository.
-Focus on: logic errors, security vulnerabilities, test coverage, performance issues.
-Output your review as JSON: { "passed": boolean, "issues": [{ "severity": "critical"|"high"|"medium"|"low", "description": string, "file": string, "line": number, "suggestion": string }], "summary": string }
-
-${prompt}`;
-
       // Reviews are read-only — enforce workspace-read regardless of config
-      const args = ['exec', ...this.sandboxArgs('workspace-read'), '--json', reviewPrompt];
+      const args = ['exec', ...this.sandboxArgs('workspace-read'), '--json', prompt];
       const { output, exitCode, events, stderr } = await this.invokeCodex(args, cwd, {
         outFilePrefix: 'codex-review',
       });
