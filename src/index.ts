@@ -10,6 +10,9 @@ import { CodexBridge } from './bridges/CodexBridge.js';
 import { TaskQueue } from './core/TaskQueue.js';
 import { MainLoop } from './core/MainLoop.js';
 import { CycleEventBus } from './core/CycleEventBus.js';
+import { registerGuards } from './core/guards/index.js';
+import { registerObservers } from './core/observers/index.js';
+import { registerStrategies } from './core/strategies/index.js';
 import { CostTracker } from './utils/cost.js';
 import { Server } from './server/Server.js';
 import { PatrolManager } from './core/ModeManager.js';
@@ -61,6 +64,30 @@ program
     const costTracker = new CostTracker(taskStore, budget);
 
     const eventBus = new CycleEventBus();
+
+    registerGuards(eventBus, {
+      getDiffStats: async (startCommit: string) => {
+        const { getDiffStats } = await import('./utils/git.js');
+        const stats = await getDiffStats(startCommit, 'HEAD', projectPath);
+        return { filesChanged: stats.files_changed, insertions: stats.insertions, deletions: stats.deletions };
+      },
+      getBudgetInfo: async () => {
+        const dailyCost = await taskStore.getDailyCost();
+        return { remainingUsd: config.values.budget.maxPerDay - dailyCost.total_cost_usd, avgTaskCostUsd: 2 };
+      },
+      lockFile: `${process.env.HOME}/.db-coder/patrol.lock`,
+    });
+
+    registerObservers(eventBus);
+
+    registerStrategies(eventBus, {
+      getProjectHealth: async () => ({
+        tscErrors: 0,  // Will be populated by actual tsc check in later iteration
+        recentSuccessRate: 0.8,
+        blockedTaskCount: 0,
+      }),
+    });
+
     const mainLoop = new MainLoop(config, taskQueue, codexBridge, taskStore, costTracker, eventBus);
     const patrolManager = new PatrolManager(mainLoop, taskStore, projectPath);
     const planChat = new PlanChatManager(taskStore, config);
