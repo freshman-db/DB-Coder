@@ -21,6 +21,15 @@ const CATEGORY_KEYWORDS: Record<AdjustmentCategory, string[]> = {
 // Config fields safe for auto-update
 const SAFE_CONFIG_FIELDS = new Set(['brain.scanInterval', 'autonomy.subtaskTimeout']);
 
+const RECURRING_ISSUE_DIRECTIVES: Record<string, string> = {
+  'missing-test': 'MANDATORY: Every code change must include corresponding unit tests.',
+  'null-safety': 'MANDATORY: Add explicit null/undefined guards before property access.',
+  import: 'MANDATORY: Keep imports valid, explicit, and aligned with module boundaries.',
+  'logic-error': 'MANDATORY: Validate behavior changes with edge-case and regression checks.',
+  'api-design': 'MANDATORY: Preserve API contracts and update consumers when interfaces change.',
+  'code-style': 'MANDATORY: Follow project style and lint rules before completing changes.',
+};
+
 interface GoalKeywordRule {
   goalIndicators: string[];
   taskKeywords: string[];
@@ -224,7 +233,13 @@ export class EvolutionEngine {
     const events = await this.taskStore.getRecurringIssueCategories(projectPath, 10);
     return events
       .filter(e => e.count >= 3)
-      .map(e => `Recurring issue: "${e.category}" appeared ${e.count} times. Consider addressing root cause.`);
+      .map((e) => {
+        const directive = RECURRING_ISSUE_DIRECTIVES[e.category];
+        if (directive) {
+          return `${directive} This issue has recurred ${e.count} times without improvement.`;
+        }
+        return `Recurring issue: "${e.category}" appeared ${e.count} times. Consider addressing root cause.`;
+      });
   }
 
   /**
