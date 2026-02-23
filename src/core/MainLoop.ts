@@ -411,7 +411,7 @@ export class MainLoop {
 
     // EXECUTE + REVIEW queued tasks (with pre-execution evaluation)
     let task = await this.taskQueue.getNext(projectPath);
-    while (task && this.running && !this.paused) {
+    while (task && this.running && !this.paused && !this.restartPending) {
       if (await this.checkBudgetOrAbort(task.id)) {
         break;
       }
@@ -433,6 +433,7 @@ export class MainLoop {
       await this.recordEvaluation(task, evaluation);
 
       await this.executeTask(task);
+      if (this.restartPending) break;
       task = await this.taskQueue.getNext(projectPath);
     }
 
@@ -1348,7 +1349,7 @@ export function mergeReviews(claude: ReviewResult, codex: ReviewResult): MergedR
   // Find intersection: issues flagged by both reviewers
   for (const ci of claude.issues) {
     const match = codex.issues.find(xi => {
-      const fileMatch = (xi.file && ci.file) ? xi.file === ci.file : !xi.file && !ci.file;
+      const fileMatch = !!(xi.file && ci.file && xi.file === ci.file);
       const descSim = wordJaccard(xi.description, ci.description);
       return fileMatch && descSim > 0.4;
     });

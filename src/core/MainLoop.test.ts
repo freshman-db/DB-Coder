@@ -3497,3 +3497,83 @@ describe('MainLoop dedup helpers', () => {
     );
   });
 });
+
+test('restartPending stops task execution loop — second queued task is not executed', async () => {
+  let getNextCalls = 0;
+  let executeTaskCalls = 0;
+
+  const now = new Date();
+  const makeTask = (id: string): Task => ({
+    id,
+    project_path: '/tmp/db-coder-main-loop-test',
+    task_description: `Task ${id}`,
+    phase: 'init',
+    priority: 1,
+    plan: null,
+    subtasks: [{ id: 'S1', description: 'sub', executor: 'codex', status: 'pending' }],
+    review_results: [],
+    iteration: 0,
+    total_cost_usd: 0,
+    git_branch: null,
+    start_commit: null,
+    depends_on: [],
+    status: 'queued',
+    created_at: now,
+    updated_at: now,
+  });
+
+  const task1 = makeTask('task-restart-1');
+  const task2 = makeTask('task-restart-2');
+
+  const { loop } = createMainLoopForCycle({
+    brain: {
+      hasChanges: async () => false,
+    },
+    taskQueue: {
+      getQueued: async () => [task1, task2],
+      getNext: async () => {
+        getNextCalls++;
+        if (getNextCalls === 1) return task1;
+        if (getNextCalls === 2) return task2;
+        return null;
+      },
+    },
+    taskStore: {
+      saveEvaluationEvent: async () => {},
+    },
+  });
+
+  const internals = getMainLoopInternals(loop);
+  const loopWithMethods = loop as unknown as {
+    evaluateTaskValue(task: Task, projectPath: string): Promise<EvaluationResult>;
+    executeTask(task: Task): Promise<void>;
+    restartPending: boolean;
+  };
+  const originalEvaluateTaskValue = loopWithMethods.evaluateTaskValue;
+  const originalExecuteTask = loopWithMethods.executeTask;
+
+  loopWithMethods.evaluateTaskValue = async () => ({
+    passed: true,
+    score: { problemLegitimacy: 1, solutionProportionality: 1, expectedComplexity: 1, historicalSuccess: 1, total: 4 },
+    reasoning: 'pass',
+    cost_usd: 0,
+    duration_ms: 0,
+  });
+  loopWithMethods.executeTask = async () => {
+    executeTaskCalls++;
+    // Simulate self-build setting restartPending during first task execution
+    loopWithMethods.restartPending = true;
+  };
+
+  internals.setRunning(true);
+  try {
+    await loop.runCycle();
+  } finally {
+    internals.setRunning(false);
+    loopWithMethods.evaluateTaskValue = originalEvaluateTaskValue;
+    loopWithMethods.executeTask = originalExecuteTask;
+  }
+
+  assert.equal(executeTaskCalls, 1, 'only first task should execute before restart');
+  assert.equal(getNextCalls, 1, 'should not fetch second task when restartPending');
+});
