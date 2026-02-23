@@ -232,6 +232,9 @@ function createMainLoopForCycle(overrides: MainLoopCycleOverrides = {}): MainLoo
     updatePromptVersionEffectiveness: async () => {},
     listTasks: async () => [],
     recoverActiveTasks: async () => 0,
+    getModules: async () => [],
+    getServiceState: async () => null,
+    setServiceState: async () => {},
     ...overrides.taskStore,
   } as unknown as TaskStore;
 
@@ -689,6 +692,7 @@ describe('MainLoop runCycle integration', () => {
             result: scanAnalysis,
             health_score: 82,
             cost_usd: 0,
+            module_name: null,
             created_at: now,
           };
         },

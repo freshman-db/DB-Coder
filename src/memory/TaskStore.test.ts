@@ -161,7 +161,7 @@ describe('TaskStore.updateTask', () => {
 
 describe('TaskStore.saveScanResult', () => {
   test('uses sql.json for the result payload instead of JSON.stringify', async () => {
-    const { sql, taggedCalls, jsonCalls } = createSqlMock();
+    const { sql, taggedCalls, jsonCalls } = createSqlMock(() => [{ id: 1 }]);
     const store = createTaskStore(sql);
 
     const result = {
@@ -178,6 +178,7 @@ describe('TaskStore.saveScanResult', () => {
       result: result as any,
       health_score: 82,
       cost_usd: 1.25,
+      module_name: null,
     });
 
     assert.equal(jsonCalls.length, 1);
@@ -185,14 +186,14 @@ describe('TaskStore.saveScanResult', () => {
     assert.equal(taggedCalls.length, 1);
     assert.equal(
       taggedCalls[0].text,
-      'INSERT INTO scan_results (project_path, commit_hash, depth, result, health_score, cost_usd) VALUES ($1, $2, $3, $4, $5, $6)',
+      'INSERT INTO scan_results (project_path, commit_hash, depth, result, health_score, cost_usd, module_name) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
     );
     assert.deepEqual(taggedCalls[0].values[3], { __json: result });
     assert.notEqual(taggedCalls[0].values[3], JSON.stringify(result));
   });
 
   test('passes null health_score and cost_usd through unchanged', async () => {
-    const { sql, taggedCalls } = createSqlMock();
+    const { sql, taggedCalls } = createSqlMock(() => [{ id: 2 }]);
     const store = createTaskStore(sql);
 
     await store.saveScanResult({
@@ -207,6 +208,7 @@ describe('TaskStore.saveScanResult', () => {
       } as any,
       health_score: null,
       cost_usd: null,
+      module_name: null,
     });
 
     assert.equal(taggedCalls[0].values[4], null);

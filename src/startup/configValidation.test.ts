@@ -36,6 +36,7 @@ function createValidConfig(): DbCoderConfig {
     server: { host: '127.0.0.1', port: 18800 },
     mcp: { enabled: true },
     plugins: {},
+    scan: {},
     evolution: {
       goals: [{ description: 'Keep code quality high', priority: 1, status: 'active' }],
     },

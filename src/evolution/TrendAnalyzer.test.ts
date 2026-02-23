@@ -30,6 +30,7 @@ function makeScanWithResult(id: number, result: ProjectAnalysis): ScanResult {
     result,
     health_score: 80,
     cost_usd: null,
+    module_name: null,
     created_at: new Date('2026-01-01T00:00:00.000Z'),
   };
 }

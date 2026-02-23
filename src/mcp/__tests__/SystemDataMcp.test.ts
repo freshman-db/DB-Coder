@@ -61,6 +61,7 @@ function createScanRecord(overrides: Partial<ScanResult> = {}): ScanResult {
     },
     health_score: 85,
     cost_usd: 0.1,
+    module_name: null,
     created_at: new Date('2026-02-01T00:00:00.000Z'),
     ...overrides,
   };
