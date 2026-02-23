@@ -2,9 +2,10 @@ import type { TaskStore } from '../memory/TaskStore.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { Config } from '../config/Config.js';
 import type { TrendAnalyzer } from './TrendAnalyzer.js';
-import type { AdjustmentCategory, DynamicPromptContext, HealthTrend, PromptMetrics, PromptName, PromptPatch, PromptVersion } from './types.js';
-import type { ProjectAnalysis, RecurringIssueCategory, ReviewEvent, Task } from '../memory/types.js';
+import type { AdjustmentCategory, DynamicPromptContext, PromptMetrics, PromptName, PromptPatch, PromptVersion } from './types.js';
+import type { ProjectAnalysis } from '../memory/types.js';
 import type { ClaudeBridge } from '../bridges/ClaudeBridge.js';
+import { createSystemDataMcpServer } from '../mcp/SystemDataMcp.js';
 import { log } from '../utils/logger.js';
 
 // Keywords for categorizing adjustments
@@ -52,24 +53,6 @@ const GOAL_FALLBACK_KEYWORDS = Array.from(
   new Set(GOAL_KEYWORD_RULES.flatMap(rule => rule.taskKeywords.map(keyword => keyword.toLowerCase()))),
 );
 
-interface EvaluationEventSummary {
-  total: number;
-  passed: number;
-  failed: number;
-  avgTotal: number;
-}
-
-interface MetaReflectData {
-  reviewEvents: ReviewEvent[];
-  recentTasks: Task[];
-  healthTrend: HealthTrend | null;
-  activeVersions: PromptVersion[];
-  passRate: number;
-  avgCost: number;
-  issueCategories: RecurringIssueCategory[];
-  evaluationStats: EvaluationEventSummary;
-}
-
 interface ParsedMetaReflectOutput {
   patches: Array<{
     promptName: string;
@@ -96,6 +79,7 @@ export class EvolutionEngine {
     taskId: string | null,
     adjustments: string[],
     outcome: 'success' | 'failed' | 'blocked_stuck' | 'blocked_max_retries',
+    appliedAdjustmentIds?: number[],
   ): Promise<void> {
     // 1. Store new adjustments
     for (const text of adjustments) {
@@ -104,13 +88,11 @@ export class EvolutionEngine {
       log.info(`Stored adjustment [${category}]: ${text.slice(0, 80)}`);
     }
 
-    // 2. Update effectiveness: task-level adjustments get larger delta, global gets smaller
-    if (taskId) {
-      const taskDelta = outcome === 'success' ? 0.15 : -0.1;
-      await this.taskStore.updateTaskAdjustmentEffectiveness(taskId, taskDelta);
+    // 2. Update effectiveness of adjustments that were *applied* to this task (causal attribution)
+    if (appliedAdjustmentIds && appliedAdjustmentIds.length > 0) {
+      const delta = outcome === 'success' ? 0.1 : -0.05;
+      await this.taskStore.updateAdjustmentEffectivenessById(appliedAdjustmentIds, delta);
     }
-    const globalDelta = outcome === 'success' ? 0.05 : -0.02;
-    await this.taskStore.updateAdjustmentEffectiveness(projectPath, globalDelta);
 
     // 3. Supersede weak adjustments
     const superseded = await this.taskStore.supersedeWeakAdjustments(projectPath);
@@ -301,9 +283,16 @@ export class EvolutionEngine {
   async metaReflect(projectPath: string, claude: ClaudeBridge): Promise<void> {
     log.info('Starting meta-reflect: analyzing prompt effectiveness...');
     try {
-      const data = await this.collectMetaReflectData(projectPath);
-      const metaPrompt = this.buildMetaReflectPrompt(data);
-      const result = await claude.plan(metaPrompt, projectPath, { maxTurns: 5 });
+      const metaPrompt = this.buildMetaReflectPrompt();
+      const systemDataMcp = createSystemDataMcpServer({
+        projectPath,
+        taskStore: this.taskStore,
+        globalMemory: this.globalMemory,
+      });
+      const result = await claude.plan(metaPrompt, projectPath, {
+        maxTurns: 10,
+        internalMcpServers: { 'db-coder-system-data': systemDataMcp },
+      });
       const resultCost = Number(result?.cost_usd ?? 0);
       if (resultCost > 0) {
         await this.taskStore.addDailyCost(resultCost);
@@ -405,119 +394,47 @@ export class EvolutionEngine {
     await this.rollbackDegradedVersions(projectPath);
   }
 
-  private async collectMetaReflectData(projectPath: string): Promise<MetaReflectData> {
-    if (typeof projectPath !== 'string' || projectPath.trim().length === 0) {
-      throw new Error('projectPath is required for meta-reflection');
-    }
-
-    const [reviewEventsResult, recentTasksResult, healthTrendResult, activeVersionsResult, issueCategoriesResult, evalEventsResult] = await Promise.all([
-      this.taskStore.getRecentReviewEvents(projectPath, 20),
-      this.taskStore.listTasks(projectPath, 'done'),
-      this.trendAnalyzer.getHealthTrend(projectPath),
-      this.taskStore.getActivePromptVersions(projectPath),
-      this.taskStore.getRecurringIssueCategories(projectPath, 10),
-      this.taskStore.getRecentEvaluationEvents(projectPath, 20),
-    ]);
-
-    const reviewEvents = reviewEventsResult ?? [];
-    const recentTasks = recentTasksResult ?? [];
-    const healthTrend = healthTrendResult ?? null;
-    const activeVersions = activeVersionsResult ?? [];
-    const issueCategories = issueCategoriesResult ?? [];
-    const evalEvents = evalEventsResult ?? [];
-
-    const totalReviews = reviewEvents.length;
-    const passedReviews = reviewEvents.filter(event => event?.passed === true).length;
-    const passRate = totalReviews > 0 ? passedReviews / totalReviews : 1;
-
-    const costWindowSize = Math.min(recentTasks.length, 20);
-    const avgCost = costWindowSize > 0
-      ? recentTasks
-        .slice(-costWindowSize)
-        .reduce((sum, task) => sum + Number(task?.total_cost_usd ?? 0), 0) / costWindowSize
-      : 0;
-
-    const evalTotal = evalEvents.length;
-    const evalPassed = evalEvents.filter(e => e.passed).length;
-    const evalAvgTotal = evalTotal > 0
-      ? evalEvents.reduce((sum, e) => sum + (e.score?.total ?? 0), 0) / evalTotal
-      : 0;
-
-    return {
-      reviewEvents,
-      recentTasks,
-      healthTrend,
-      activeVersions,
-      passRate,
-      avgCost,
-      issueCategories,
-      evaluationStats: { total: evalTotal, passed: evalPassed, failed: evalTotal - evalPassed, avgTotal: evalAvgTotal },
-    };
-  }
-
-  private buildMetaReflectPrompt(data: MetaReflectData): string {
-    if (!data || typeof data !== 'object') {
-      throw new Error('meta-reflect data is required to build prompt');
-    }
-
-    const reviewEvents = Array.isArray(data.reviewEvents) ? data.reviewEvents : [];
-    const recentTasks = Array.isArray(data.recentTasks) ? data.recentTasks : [];
-    const healthTrend = data.healthTrend ?? null;
-    const activeVersions = Array.isArray(data.activeVersions) ? data.activeVersions : [];
-    const passRate = Number.isFinite(data.passRate) ? data.passRate : 0;
-    const avgCost = Number.isFinite(data.avgCost) ? data.avgCost : 0;
-    const issueCategories = Array.isArray(data.issueCategories) ? data.issueCategories : [];
-    const evalStats = data.evaluationStats ?? { total: 0, passed: 0, failed: 0, avgTotal: 0 };
-
-    const activeVersionsSummary = activeVersions.length > 0
-      ? activeVersions
-        .map(version => `- ${version.prompt_name} v${version.version}: effectiveness=${Number(version.effectiveness ?? 0).toFixed(2)}, tasks=${version.tasks_evaluated ?? 0}`)
-        .join('\n')
-      : 'No active prompt patches.';
-
-    const issueCategorySummary = issueCategories
-      .map(category => `${category?.category ?? 'unknown'}(${Number(category?.count ?? 0)})`)
-      .join(', ') || 'none';
-
-    const failureSummary = reviewEvents
-      .filter(event => event?.passed === false)
-      .slice(0, 5)
-      .map((event) => {
-        const taskId = typeof event?.task_id === 'string' ? event.task_id.slice(0, 8) : 'unknown';
-        const mustFixCount = Number(event?.must_fix_count ?? 0);
-        const shouldFixCount = Number(event?.should_fix_count ?? 0);
-        const issueList = JSON.stringify(event?.issue_categories ?? []);
-        return `- Task ${taskId}: must_fix=${mustFixCount}, should_fix=${shouldFixCount}, categories=${issueList}`;
-      })
-      .join('\n') || 'None';
-
+  private buildMetaReflectPrompt(): string {
     return `You are analyzing the effectiveness of an AI coding agent's prompt templates.
 
-## Current Performance Metrics
-- Review pass rate: ${(passRate * 100).toFixed(1)}%
-- Average task cost: $${avgCost.toFixed(4)}
-- Health trend: ${healthTrend?.direction ?? 'unknown'} (${healthTrend?.current ?? 'N/A'}/100)
-- Recurring issue categories: ${issueCategorySummary}
-- Total completed tasks: ${recentTasks.length}
+## Available Data Tools
 
-## Active Prompt Patches
-${activeVersionsSummary}
+You have access to the db-coder-system-data MCP server with these tools to query project data:
 
-## Recent Review Failures
-${failureSummary}
+**Overview tools** (start here):
+- get_health_trend: Health score trend over recent scans
+- get_review_history: Review pass/fail rates and recurring issue categories
+- get_task_outcomes: Task success/failure/blocked statistics
+- get_evaluation_scores: Pre-execution evaluation score history
+- get_cost_trend: Daily spending trend
 
-## Pre-execution Evaluation Stats
-- Total evaluations: ${evalStats.total}
-- Passed: ${evalStats.passed}, Rejected: ${evalStats.failed}
-- Average score: ${(evalStats.avgTotal ?? 0).toFixed(1)}/8
-${evalStats.total > 0 ? `- Pass rate: ${((evalStats.passed / evalStats.total) * 100).toFixed(1)}%` : '- No evaluations yet'}
+**Drill-down tools** (use to investigate specifics):
+- get_task_detail: Full details of a single task (plan, subtasks, logs, reviews)
+- get_recent_tasks: Recent task list with full descriptions
+- get_task_logs: Execution logs for a specific task
+- get_review_details: All review rounds for a specific task
+
+**Evolution tools** (check current state):
+- get_adjustment_summary: Active adjustments with effectiveness scores
+- get_prompt_versions: Prompt patch history and active versions
+- get_goal_progress: Evolution goal progress tracking
+- get_recurring_issues: High-frequency issue categories
+
+**Knowledge tools**:
+- search_memories: Search learned patterns and experiences
+
+## Workflow
+
+1. Start by calling overview tools (get_review_history, get_task_outcomes, get_health_trend) to understand current performance
+2. Identify problem areas (low pass rate, recurring failures, cost spikes)
+3. Drill down into specific failed tasks using get_task_detail and get_review_details
+4. Check existing adjustments and prompt patches with get_adjustment_summary and get_prompt_versions
+5. Based on your analysis, propose 0-3 prompt patches
 
 ## Available Prompt Names
 brain_system, scan, plan, reflect, executor, reviewer, evaluator
 
-## Instructions
-Analyze the data and propose 0-3 prompt patches to improve performance.
-Each patch modifies a section of a prompt template using these operations:
+## Patch Operations
 - prepend: Add content before the prompt
 - append: Add content after the prompt
 - replace_section: Replace content under a ## heading
@@ -525,6 +442,8 @@ Each patch modifies a section of a prompt template using these operations:
 
 Only propose patches when there's clear evidence of a problem.
 Focus on the most impactful changes.
+
+## Output Format
 
 Output as JSON:
 {
