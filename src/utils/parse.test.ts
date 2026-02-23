@@ -85,12 +85,18 @@ test('extractJsonFromText returns null for empty, malformed, or non-string input
   assert.equal(extractJsonFromText(undefined as unknown as string), null);
 });
 
-test('tryParseJson parses valid JSON and returns undefined for invalid input', () => {
+test('tryParseJson parses a valid JSON object string', () => {
   assert.deepEqual(tryParseJson('{"ok":true,"count":2}'), {
     ok: true,
     count: 2,
   });
+});
+
+test('tryParseJson returns undefined for malformed JSON', () => {
   assert.equal(tryParseJson('{"broken": }'), undefined);
+});
+
+test('tryParseJson returns undefined for an empty string', () => {
   assert.equal(tryParseJson(''), undefined);
 });
 
