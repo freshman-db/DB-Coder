@@ -76,8 +76,9 @@ while true; do
     node dist/index.js serve --project . &
     child_pid=$!
     log "Child started (pid=$child_pid)"
-    wait "$child_pid" 2>/dev/null
-    exit_code=$?
+    # wait returns child exit code; prevent set -e from killing supervisor
+    exit_code=0
+    wait "$child_pid" 2>/dev/null || exit_code=$?
     child_pid=""
 
     end_time=$(date +%s)
