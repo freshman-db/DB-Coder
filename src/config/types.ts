@@ -2,6 +2,8 @@ export interface BrainConfig {
   model: string;
   scanInterval: number; // seconds between scans
   maxScanBudget: number; // USD per scan
+  claudeMdMaintenanceInterval: number; // trigger every N completed tasks (0=disabled)
+  claudeMdMaintenanceEnabled: boolean;
 }
 
 export interface ClaudeConfig {

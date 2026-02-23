@@ -388,7 +388,15 @@ export class MainLoop {
       // 12. Periodic deep chain review
       this.tasksCompleted++;
       if (this.tasksCompleted % 5 === 0) {
-        await this.deepChainReview(projectPath);
+        try { await this.deepChainReview(projectPath); }
+        catch (err) { log.warn('Deep chain review failed', err); }
+      }
+
+      // 13. Periodic CLAUDE.md maintenance
+      const { claudeMdMaintenanceEnabled: maintEnabled, claudeMdMaintenanceInterval: maintInterval } = this.config.values.brain;
+      if (maintEnabled && maintInterval > 0 && this.tasksCompleted % maintInterval === 0) {
+        try { await this.claudeMdMaintenance(projectPath); }
+        catch (err) { log.warn('CLAUDE.md maintenance failed', err); }
       }
     } catch (err) {
       log.error('Task execution error', err);
@@ -716,17 +724,52 @@ If you find issues, create tasks for them by reporting what needs fixing.
 Update CLAUDE.md if you discover new patterns or pitfalls.`,
       {
         permissionMode: 'bypassPermissions',
-        maxTurns: 20,
+        maxTurns: 50,
         cwd: projectPath,
-        timeout: 300_000,
+        timeout: 3_600_000,
         model: this.config.values.brain.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
-        disallowedTools: ['Edit', 'Write', 'NotebookEdit'],
-        appendSystemPrompt: 'You are performing a deep code review. Read CLAUDE.md for chain definitions. Do not modify source code.',
+        allowedTools: ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write'],
+        appendSystemPrompt: 'You are performing a deep code review. You CAN edit CLAUDE.md to add new patterns or pitfalls. Do not modify source code.',
       },
     );
 
     if (result.costUsd > 0) await this.taskStore.addDailyCost(result.costUsd);
     log.info(`Deep chain review completed (${Math.round(result.durationMs / 1000)}s, $${result.costUsd.toFixed(4)})`);
+  }
+
+  // --- Periodic CLAUDE.md maintenance ---
+
+  private async claudeMdMaintenance(projectPath: string): Promise<void> {
+    log.info('Starting periodic CLAUDE.md maintenance');
+    const result = await this.brainSession.run(
+      `Perform a maintenance audit of CLAUDE.md. Keep it accurate, concise, and useful.
+
+Read CLAUDE.md, then verify against actual code:
+1. **文件结构** — Are listed files still accurate? Remove deleted, add important new ones.
+2. **当前状态** — Are checklist items correct? Update "待运行验证" items if now verified.
+3. **API 端点** — Do endpoints match actual routes in src/server/routes.ts?
+4. **架构描述** — Does it match actual code structure?
+5. **踩过的坑** — Remove entries for deleted code. Keep entries concise.
+6. **DB Schema** — Are table descriptions still accurate?
+
+Rules:
+- DELETE outdated info rather than adding disclaimers.
+- Keep the file concise — summarize growing sections.
+- Only state what you verify in the code.
+- Use claude-mem to note what you changed and why.`,
+      {
+        permissionMode: 'bypassPermissions',
+        maxTurns: 50,
+        cwd: projectPath,
+        timeout: 3_600_000,
+        model: this.config.values.brain.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
+        allowedTools: ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write'],
+        appendSystemPrompt: 'You are maintaining CLAUDE.md. You CAN edit CLAUDE.md. Do not modify source code.',
+      },
+    );
+
+    if (result.costUsd > 0) await this.taskStore.addDailyCost(result.costUsd);
+    log.info(`CLAUDE.md maintenance completed (${Math.round(result.durationMs / 1000)}s, $${result.costUsd.toFixed(4)})`);
   }
 
   // --- State management ---

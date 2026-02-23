@@ -13,7 +13,7 @@
   └── Web UI + API (SPA :18800)
 ```
 
-核心循环: `brainDecide() → workerExecute() → hardVerify() → codexReview() → brainReflect() → mergeBranch()`
+核心循环: `brainDecide() → workerExecute() → hardVerify() → codexReview() → brainReflect() → mergeBranch() → [deepChainReview] → [claudeMdMaintenance]`
 
 ## 当前状态
 
@@ -28,8 +28,8 @@
 - [x] 自修改重启 (safeBuild + exit code 75)
 - [x] 计划对话 (PlanChatManager + ClaudeCodeSession)
 - [x] 始终进化模式 (10 维度 + 模块轮转扫描 + 三层防御)
-- [ ] 大脑反思后自动更新 CLAUDE.md (框架就绪, 待运行验证)
-- [ ] 深度链路审查 (每 5 个任务触发, 待运行验证)
+- [x] CLAUDE.md 自动维护 (brainReflect + 周期性 claudeMdMaintenance 每 15 任务)
+- [x] 深度链路审查 (每 5 个任务触发, 可编辑 CLAUDE.md)
 
 ## 环境
 
