@@ -15,6 +15,7 @@ import type { AgentResult, ReviewResult, ReviewIssue } from '../bridges/CodingAg
 import { parseEvaluation } from './Brain.js';
 import { evaluatorPrompt } from '../prompts/evaluator.js';
 import { executorPrompt } from '../prompts/executor.js';
+import { formatDynamicContext } from '../prompts/brain.js';
 import { reviewerPrompt } from '../prompts/reviewer.js';
 import { buildAgentGuidance } from '../prompts/agents.js';
 import { createSystemDataMcpServer } from '../mcp/SystemDataMcp.js';
@@ -32,7 +33,7 @@ const ERROR_RECOVERY_MS = 30000;
 const PLUGIN_CHECK_INTERVAL_MS = 86400_000;
 const BRANCH_ID_LENGTH = 8;
 const TASK_DESC_MAX_LENGTH = 80;
-const SUBTASK_RESULT_MAX_LENGTH = 200;
+const SUBTASK_RESULT_MAX_LENGTH = 1500;
 const COMMIT_MSG_MAX_LENGTH = 50;
 const REVIEW_SUMMARY_MAX_LENGTH = 200;
 const LOG_OUTPUT_MAX_LENGTH = 500;
@@ -483,7 +484,7 @@ export class MainLoop {
         }
       }
 
-      const { subtasks, stuckAdjustments, aborted } = await this.executeSubtasks(task, branchName, projectPath);
+      const { subtasks, stuckAdjustments, appliedAdjustmentIds, aborted } = await this.executeSubtasks(task, branchName, projectPath);
       if (aborted) return;
 
       const reviewCycle = await this.runReviewCycle(task, startCommit, stuckAdjustments, projectPath);
@@ -502,7 +503,7 @@ export class MainLoop {
         }
       }
 
-      await this.reflectOnTask(task, subtasks, reviewResult, reviewRetries, stuckAdjustments, projectPath);
+      await this.reflectOnTask(task, subtasks, reviewResult, reviewRetries, stuckAdjustments, appliedAdjustmentIds, projectPath);
 
       // Merge completed task branch back to main
       if (shouldMerge) {
@@ -602,19 +603,28 @@ export class MainLoop {
     task: Task,
     branchName: string,
     projectPath: string,
-  ): Promise<{ subtasks: SubTaskRecord[]; stuckAdjustments: string[]; aborted: boolean }> {
+  ): Promise<{ subtasks: SubTaskRecord[]; stuckAdjustments: string[]; appliedAdjustmentIds: number[]; aborted: boolean }> {
     const subtasks = task.subtasks as SubTaskRecord[];
     const standards = await this.globalMemory.getRelevant('coding standards');
     const stuckAdjustments: string[] = [];
     const retryCounts = new Map<string, number>();
     let stopSubtasks = false;
 
+    // Record which adjustments were active when execution started (for causal attribution)
+    let appliedAdjustmentIds: number[] = [];
+    if (this.evolutionEngine) {
+      try {
+        const active = await this.taskStore.getActiveAdjustments(this.config.projectPath);
+        appliedAdjustmentIds = active.map(a => a.id);
+      } catch { /* ignore */ }
+    }
+
     for (const subtask of subtasks) {
       if (subtask.status === 'done') continue;
 
       while (true) {
         if (await this.checkBudgetOrAbort(task.id)) {
-          return { subtasks, stuckAdjustments, aborted: true };
+          return { subtasks, stuckAdjustments, appliedAdjustmentIds, aborted: true };
         }
 
         subtask.status = 'running';
@@ -625,19 +635,19 @@ export class MainLoop {
           subtask.status = 'failed';
           subtask.result = 'Blocked: budget exceeded';
           await this.taskStore.updateTask(task.id, { subtasks });
-          return { subtasks, stuckAdjustments, aborted: true };
+          return { subtasks, stuckAdjustments, appliedAdjustmentIds, aborted: true };
         }
 
         if (result.success) {
           subtask.status = 'done';
-          subtask.result = result.output.slice(0, SUBTASK_RESULT_MAX_LENGTH);
+          subtask.result = smartTruncate(result.output, result.toolSummaries, SUBTASK_RESULT_MAX_LENGTH);
           const changedFiles = await getModifiedAndAddedFiles(projectPath).catch(() => []);
           await commitAll(`db-coder: ${subtask.description.slice(0, COMMIT_MSG_MAX_LENGTH)}`, projectPath, changedFiles).catch(() => {});
           break;
         }
 
         subtask.status = 'failed';
-        subtask.result = result.output.slice(0, SUBTASK_RESULT_MAX_LENGTH);
+        subtask.result = smartTruncate(result.output, result.toolSummaries, SUBTASK_RESULT_MAX_LENGTH);
         log.warn(`Subtask failed: ${subtask.description}`);
         const handled = await this.handleRetry(task, subtask, {
           subtasks,
@@ -657,7 +667,7 @@ export class MainLoop {
       if (stopSubtasks) break;
     }
 
-    return { subtasks, stuckAdjustments, aborted: false };
+    return { subtasks, stuckAdjustments, appliedAdjustmentIds, aborted: false };
   }
 
   private async runReviewCycle(
@@ -719,6 +729,7 @@ export class MainLoop {
     reviewResult: MergedReviewResult,
     reviewRetries: number,
     stuckAdjustments: string[],
+    appliedAdjustmentIds: number[],
     projectPath: string,
   ): Promise<void> {
     this.setState('reflecting');
@@ -727,11 +738,19 @@ export class MainLoop {
     const allResults = subtasks.map(st => `${st.description}: ${st.status} ${st.result ?? ''}`).join('\n');
     const outcome = reviewResult.passed ? 'success' as const : 'blocked_max_retries' as const;
     const retryContext = reviewRetries > 0 ? `\nReview retries: ${reviewRetries}. Stuck adjustments applied: ${stuckAdjustments.length}` : '';
-    const { reflection, cost: reflectCost } = await this.brain.reflect(projectPath, task.task_description, allResults + retryContext, reviewResult.summary, outcome);
+
+    // Enrich review summary with structured issue details for better reflection
+    const issueDetails = [...reviewResult.mustFix, ...reviewResult.shouldFix]
+      .map(i => `- [${i.severity}] ${i.description}${i.file ? ` (${i.file}${i.line ? `:${i.line}` : ''})` : ''}${i.suggestion ? `: ${i.suggestion}` : ''}`)
+      .join('\n');
+    const enrichedReviewSummary = reviewResult.summary
+      + (issueDetails ? `\n\nSpecific issues found:\n${issueDetails}` : '');
+
+    const { reflection, cost: reflectCost } = await this.brain.reflect(projectPath, task.task_description, allResults + retryContext, enrichedReviewSummary, outcome);
     if (reflectCost > 0) await this.costTracker.addCost(task.id, reflectCost);
 
     if (this.evolutionEngine && reflection.adjustments.length > 0) {
-      await this.tryProcessAdjustments(task.id, reflection.adjustments, outcome);
+      await this.tryProcessAdjustments(task.id, reflection.adjustments, outcome, appliedAdjustmentIds);
     }
 
     const finalStatus = reviewResult.passed ? 'done' : 'blocked';
@@ -752,7 +771,17 @@ export class MainLoop {
   ): Promise<AgentResult> {
     const agent = subtask.executor === 'claude' ? this.claude : this.codex;
     const mcpNames = subtask.executor === 'claude' ? this.claude.getMcpServerNames('execute') : [];
-    const basePrompt = executorPrompt(task.task_description, subtask.description, standards, '', mcpNames);
+
+    // Inject evolution context so executor sees learned patterns, anti-patterns, and adjustments
+    let dynamicContext = '';
+    if (this.evolutionEngine) {
+      try {
+        const ctx = await this.evolutionEngine.synthesizePromptContext(this.config.projectPath);
+        dynamicContext = formatDynamicContext(ctx);
+      } catch { /* ignore — proceed without evolution context */ }
+    }
+
+    const basePrompt = executorPrompt(task.task_description, subtask.description, standards, dynamicContext, mcpNames);
     const prompt = this.promptRegistry ? await this.promptRegistry.resolve('executor', basePrompt) : basePrompt;
     const result = await agent.execute(prompt, projectPath, {
       timeout: this.config.values.autonomy.subtaskTimeout * 1000,
@@ -891,6 +920,7 @@ export class MainLoop {
           task.id,
           reflection.adjustments,
           'blocked_stuck',
+          undefined,
           'Evolution processAdjustments (stuck) failed',
         );
       }
@@ -1120,15 +1150,28 @@ Fix these issues while maintaining code quality. Do not introduce new issues.`;
     taskId: string | null,
     adjustments: string[],
     outcome: AdjustmentOutcome,
+    appliedAdjustmentIds?: number[],
     errorContext = 'Evolution processAdjustments failed',
   ): Promise<void> {
     if (!this.evolutionEngine || adjustments.length === 0) return;
     try {
-      await this.evolutionEngine.processAdjustments(this.config.projectPath, taskId, adjustments, outcome);
+      await this.evolutionEngine.processAdjustments(this.config.projectPath, taskId, adjustments, outcome, appliedAdjustmentIds);
     } catch (err) {
       log.warn(`${errorContext}: ${err}`);
     }
   }
+}
+
+/**
+ * Smart truncation: prefer tool summaries (free SDK metadata), fallback to tail of output.
+ * Tail is more useful than head because LLM output usually starts with preamble.
+ */
+function smartTruncate(output: string, toolSummaries: string[] | undefined, maxLength: number): string {
+  if (toolSummaries?.length) {
+    return toolSummaries.join('\n').slice(0, maxLength);
+  }
+  if (output.length <= maxLength) return output;
+  return '...' + output.slice(-maxLength);
 }
 
 function mergeReviews(claude: ReviewResult, codex: ReviewResult): MergedReviewResult {
