@@ -46,6 +46,40 @@ Output as JSON:
     assert.ok(result.includes('## Output Format'));
   });
 
+  it('should preserve heading when replace_section target heading is final line without newline', () => {
+    const text = `Intro
+
+## Target`;
+    const patches: PromptPatch[] = [
+      { op: 'replace_section', section: 'Target', content: 'New content', reason: 'test' },
+    ];
+
+    const result = applyPatches(text, patches);
+    assert.equal(result, `Intro
+
+## Target
+New content
+`);
+  });
+
+  it('should replace section content when file has no final newline', () => {
+    const text = `Intro
+
+## Target
+Old content`;
+    const patches: PromptPatch[] = [
+      { op: 'replace_section', section: 'Target', content: 'New content', reason: 'test' },
+    ];
+
+    const result = applyPatches(text, patches);
+    assert.equal(result, `Intro
+
+## Target
+New content
+`);
+    assert.ok(!result.includes('Old content'));
+  });
+
   it('should remove a section', () => {
     const patches: PromptPatch[] = [
       { op: 'remove_section', section: 'Instructions', content: '', reason: 'unnecessary' },

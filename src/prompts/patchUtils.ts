@@ -31,7 +31,8 @@ function applySinglePatch(text: string, patch: PromptPatch): string {
       if (start === -1) throw new Error(`Section not found: ${patch.section}`);
       const before = text.slice(0, start);
       const after = text.slice(end);
-      const heading = text.slice(start, text.indexOf('\n', start) + 1);
+      const nlIdx = text.indexOf('\n', start);
+      const heading = nlIdx === -1 ? text.slice(start) + '\n' : text.slice(start, nlIdx + 1);
       return before + heading + patch.content + '\n' + after;
     }
 
@@ -84,14 +85,6 @@ function findSectionBounds(text: string, sectionName: string): { start: number; 
 
   return { start: -1, end: -1 };
 }
-
-// JSON format markers that must survive patching
-const REQUIRED_MARKERS = [
-  '"issues"',
-  '"passed"',
-  '"experiences"',
-  '"tasks"',
-];
 
 /**
  * Validate that a patched prompt still contains expected JSON output format markers.
