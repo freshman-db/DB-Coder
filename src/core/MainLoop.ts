@@ -576,7 +576,6 @@ Respond with EXACTLY this JSON (no markdown):
     return this.brainSession.run(prompt, {
       permissionMode: 'bypassPermissions',
       maxTurns: 20,
-      maxBudget: this.config.values.brain.maxScanBudget,
       cwd: this.config.projectPath,
       timeout: 300_000,
       model: this.config.values.brain.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
@@ -676,7 +675,6 @@ Keep CLAUDE.md concise — only add genuinely useful rules.`;
     const result = await this.brainSession.run(prompt, {
       permissionMode: 'bypassPermissions',
       maxTurns: 10,
-      maxBudget: this.config.values.brain.maxScanBudget / 2,
       cwd: projectPath,
       timeout: 120_000,
       model: this.config.values.brain.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
@@ -714,7 +712,6 @@ Update CLAUDE.md if you discover new patterns or pitfalls.`,
       {
         permissionMode: 'bypassPermissions',
         maxTurns: 20,
-        maxBudget: this.config.values.brain.maxScanBudget,
         cwd: projectPath,
         timeout: 300_000,
         model: this.config.values.brain.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
