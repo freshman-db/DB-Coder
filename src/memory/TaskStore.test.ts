@@ -159,63 +159,6 @@ describe('TaskStore.updateTask', () => {
   });
 });
 
-describe('TaskStore.saveScanResult', () => {
-  test('uses sql.json for the result payload instead of JSON.stringify', async () => {
-    const { sql, taggedCalls, jsonCalls } = createSqlMock(() => [{ id: 1 }]);
-    const store = createTaskStore(sql);
-
-    const result = {
-      issues: [{ type: 'null-safety' }],
-      opportunities: [],
-      projectHealth: 82,
-      summary: 'Needs cleanup',
-    };
-
-    await store.saveScanResult({
-      project_path: '/repo',
-      commit_hash: 'abc123',
-      depth: 'deep',
-      result: result as any,
-      health_score: 82,
-      cost_usd: 1.25,
-      module_name: null,
-    });
-
-    assert.equal(jsonCalls.length, 1);
-    assert.equal(jsonCalls[0], result);
-    assert.equal(taggedCalls.length, 1);
-    assert.equal(
-      taggedCalls[0].text,
-      'INSERT INTO scan_results (project_path, commit_hash, depth, result, health_score, cost_usd, module_name) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id',
-    );
-    assert.deepEqual(taggedCalls[0].values[3], { __json: result });
-    assert.notEqual(taggedCalls[0].values[3], JSON.stringify(result));
-  });
-
-  test('passes null health_score and cost_usd through unchanged', async () => {
-    const { sql, taggedCalls } = createSqlMock(() => [{ id: 2 }]);
-    const store = createTaskStore(sql);
-
-    await store.saveScanResult({
-      project_path: '/repo',
-      commit_hash: 'def456',
-      depth: 'quick',
-      result: {
-        issues: [],
-        opportunities: [],
-        projectHealth: 100,
-        summary: 'Clean',
-      } as any,
-      health_score: null,
-      cost_usd: null,
-      module_name: null,
-    });
-
-    assert.equal(taggedCalls[0].values[4], null);
-    assert.equal(taggedCalls[0].values[5], null);
-  });
-});
-
 describe('TaskStore.incrementTaskCost', () => {
   test('builds an atomic COALESCE update statement', async () => {
     const { sql, unsafeCalls } = createSqlMock();
@@ -364,106 +307,8 @@ describe('TaskStore.getOperationalMetrics', () => {
   });
 });
 
-describe('TaskStore.saveConfigProposal', () => {
-  test('serializes current and proposed config values with sql.json', async () => {
-    const { sql, taggedCalls, jsonCalls } = createSqlMock();
-    const store = createTaskStore(sql);
-
-    const currentValue = { evolution: { maxActiveAdjustments: 3 } };
-    const proposedValue = { evolution: { maxActiveAdjustments: 5 } };
-
-    await store.saveConfigProposal({
-      project_path: '/repo',
-      field_path: 'evolution.maxActiveAdjustments',
-      current_value: currentValue,
-      proposed_value: proposedValue,
-      reason: 'Allow more concurrent experiments',
-      confidence: 0.82,
-    });
-
-    assert.equal(jsonCalls.length, 2);
-    assert.equal(jsonCalls[0], currentValue);
-    assert.equal(jsonCalls[1], proposedValue);
-    assert.equal(
-      taggedCalls[0].text,
-      'INSERT INTO config_proposals (project_path, field_path, current_value, proposed_value, reason, confidence) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-    );
-    assert.deepEqual(taggedCalls[0].values[2], { __json: currentValue });
-    assert.deepEqual(taggedCalls[0].values[3], { __json: proposedValue });
-  });
-
-  test('supports primitive JSON boundary values', async () => {
-    const { sql, jsonCalls } = createSqlMock();
-    const store = createTaskStore(sql);
-
-    await store.saveConfigProposal({
-      project_path: '/repo',
-      field_path: 'evolution.retryLimit',
-      current_value: 0,
-      proposed_value: false,
-      reason: 'Disable retries temporarily',
-      confidence: 0.5,
-    });
-
-    assert.deepEqual(jsonCalls, [0, false]);
-  });
-});
-
-describe('TaskStore.savePromptVersion', () => {
-  test('serializes patches and baseline metrics JSON payloads', async () => {
-    const { sql, taggedCalls, jsonCalls } = createSqlMock();
-    const store = createTaskStore(sql);
-
-    const patches = [{
-      op: 'append',
-      section: '## Guardrails',
-      content: 'Validate parser output',
-      reason: 'Reduce malformed responses',
-    }] as const;
-    const baseline = {
-      passRate: 0.91,
-      avgCostUsd: 1.1,
-      issueCount: 2,
-      tasksEvaluated: 14,
-    };
-
-    await store.savePromptVersion({
-      project_path: '/repo',
-      prompt_name: 'plan',
-      version: 2,
-      patches: [...patches],
-      rationale: 'Harden planning output contract',
-      confidence: 0.77,
-      baseline_metrics: baseline,
-    });
-
-    assert.equal(jsonCalls.length, 2);
-    assert.deepEqual(jsonCalls, [[...patches], baseline]);
-    assert.deepEqual(taggedCalls[0].values[3], { __json: [...patches] });
-    assert.deepEqual(taggedCalls[0].values[6], { __json: baseline });
-  });
-
-  test('writes null baseline metrics without json serialization', async () => {
-    const { sql, taggedCalls, jsonCalls } = createSqlMock();
-    const store = createTaskStore(sql);
-
-    await store.savePromptVersion({
-      project_path: '/repo',
-      prompt_name: 'scan',
-      version: 1,
-      patches: [{ op: 'append', content: 'Be concise', reason: 'cost' }],
-      rationale: 'First pass',
-      confidence: 0.6,
-      baseline_metrics: null,
-    });
-
-    assert.equal(jsonCalls.length, 1);
-    assert.equal(taggedCalls[0].values[6], null);
-  });
-});
-
 describe('TaskStore plan draft JSONB columns', () => {
-  test('serializes plan payloads for save and update operations', async () => {
+  test('serializes plan payloads for updatePlanDraftPlan', async () => {
     const { sql, taggedCalls, jsonCalls } = createSqlMock();
     const store = createTaskStore(sql);
 
@@ -472,23 +317,10 @@ describe('TaskStore plan draft JSONB columns', () => {
         id: 'T1',
         description: 'Add type-safe JSONB schemas',
         priority: 1,
-        executor: 'codex' as const,
-        subtasks: [{ id: 'S1', description: 'Wire schema imports', executor: 'codex' as const }],
-        dependsOn: [],
-        estimatedComplexity: 'low' as const,
-        type: 'refactor' as const,
       }],
       reasoning: 'Improve persistence type safety',
     };
 
-    await store.savePlanDraft({
-      project_path: '/repo',
-      plan,
-      analysis_summary: 'analysis',
-      reasoning: 'reasoning',
-      markdown: 'markdown',
-      cost_usd: 0.4,
-    });
     await store.updatePlanDraftPlan(11, {
       plan,
       markdown: 'updated markdown',
@@ -496,11 +328,9 @@ describe('TaskStore plan draft JSONB columns', () => {
       cost_usd: 0.9,
     });
 
-    assert.equal(jsonCalls.length, 2);
+    assert.equal(jsonCalls.length, 1);
     assert.equal(jsonCalls[0], plan);
-    assert.equal(jsonCalls[1], plan);
-    assert.deepEqual(taggedCalls[0].values[1], { __json: plan });
-    assert.deepEqual(taggedCalls[1].values[0], { __json: plan });
+    assert.deepEqual(taggedCalls[0].values[0], { __json: plan });
   });
 
   test('serializes annotations when provided and skips serialization when omitted', async () => {

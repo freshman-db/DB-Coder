@@ -4,13 +4,8 @@ import type { TaskStore } from '../memory/TaskStore.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { CostTracker } from '../utils/cost.js';
 import type { Config } from '../config/Config.js';
-import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
-import type { PluginMonitor } from '../plugins/PluginMonitor.js';
 import type { PatrolManager } from '../core/ModeManager.js';
-import type { PlanWorkflow } from '../core/PlanWorkflow.js';
-import type { PlanRequest } from '../prompts/brain.js';
-import type { MemoryCategory, PromptName } from '../types/constants.js';
-import { memoryCategories, promptNames } from '../types/constants.js';
+import type { PlanChatManager } from '../core/PlanChatManager.js';
 import { log, type LogEntry } from '../utils/logger.js';
 import { isPositiveFinite, isRecord } from '../utils/parse.js';
 
@@ -20,10 +15,8 @@ interface RouteContext {
   globalMemory: GlobalMemory;
   costTracker: CostTracker;
   config: Config;
-  evolutionEngine?: EvolutionEngine;
-  pluginMonitor?: PluginMonitor;
   patrolManager?: PatrolManager;
-  planWorkflow?: PlanWorkflow;
+  planChat?: PlanChatManager;
 }
 
 type RouteHandler = (req: IncomingMessage, res: ServerResponse, ctx: RouteContext, params: Record<string, string>) => Promise<void>;
@@ -37,14 +30,9 @@ interface Route {
 
 const routes: Route[] = [];
 const MAX_TASK_DESCRIPTION_LENGTH = 4_000;
-const MAX_MEMORY_CONTENT_LENGTH = 32_000;
-const MAX_MEMORY_TITLE_LENGTH = 200;
-const MAX_MEMORY_TAG_LENGTH = 64;
-const MAX_MEMORY_TAG_COUNT = 20;
 const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 const VALID_DEPTHS = ['quick', 'normal', 'deep'] as const;
 type ScanDepth = (typeof VALID_DEPTHS)[number];
-const validPromptNames: ReadonlySet<string> = new Set<string>(promptNames);
 
 export class HttpError extends Error {
   constructor(public readonly statusCode: number, message: string) {
@@ -56,13 +44,6 @@ export class HttpError extends Error {
 interface CreateTaskRequest {
   description: string;
   priority?: number;
-}
-
-interface CreateMemoryRequest {
-  category: MemoryCategory;
-  content: string;
-  title?: string;
-  tags?: string[];
 }
 
 type ValidationResult<T> =
@@ -463,232 +444,10 @@ route('GET', '/api/logs', async (req, res, ctx) => {
   }
 });
 
-// --- Memory ---
-route('GET', '/api/memory', async (req, res, ctx) => {
-  const url = new URL(req.url ?? '', `http://${req.headers.host}`);
-  const q = url.searchParams.get('q') ?? '';
-  if (!q) {
-    const memories = await ctx.globalMemory.getByCategory('experience');
-    json(res, memories);
-    return;
-  }
-  const results = await ctx.globalMemory.search(q);
-  json(res, results);
-});
-
-route('POST', '/api/memory', async (req, res, ctx) => {
-  const validation = validateCreateMemoryBody(await readBody(req));
-  if (!validation.ok) {
-    json(res, { error: validation.error }, 400);
-    return;
-  }
-
-  const { category, content, title, tags } = validation.value;
-  const memory = await ctx.globalMemory.add({
-    category,
-    title: title ?? content.slice(0, 50),
-    content,
-    tags: tags ?? [],
-    source_project: null,
-    confidence: 1.0, // Manual entries get full confidence
-  });
-  json(res, memory, 201);
-});
-
 // --- Cost ---
 route('GET', '/api/cost', async (_req, res, ctx) => {
   const costs = await ctx.costTracker.getDailySummary();
   json(res, { costs, sessionCost: ctx.costTracker.getSessionCost() });
-});
-
-// --- Evolution ---
-route('GET', '/api/evolution/summary', async (_req, res, ctx) => {
-  if (!ctx.evolutionEngine) { json(res, { error: 'Evolution engine not available' }, 503); return; }
-  const summary = await ctx.evolutionEngine.getSummary(ctx.config.projectPath);
-  json(res, summary);
-});
-
-route('GET', '/api/evolution/trends', async (_req, res, ctx) => {
-  if (!ctx.evolutionEngine) { json(res, { error: 'Evolution engine not available' }, 503); return; }
-  const summary = await ctx.evolutionEngine.getSummary(ctx.config.projectPath);
-  json(res, summary.trends);
-});
-
-route('GET', '/api/evolution/goals', async (_req, res, ctx) => {
-  if (!ctx.evolutionEngine) { json(res, { error: 'Evolution engine not available' }, 503); return; }
-  const summary = await ctx.evolutionEngine.getSummary(ctx.config.projectPath);
-  const configGoals = ctx.config.values.evolution?.goals ?? [];
-  json(res, { goals: configGoals, progress: summary.goals });
-});
-
-route('GET', '/api/evolution/adjustments', async (_req, res, ctx) => {
-  const adjustments = await ctx.taskStore.getActiveAdjustments(ctx.config.projectPath);
-  json(res, adjustments);
-});
-
-route('GET', '/api/evolution/proposals', async (_req, res, ctx) => {
-  const proposals = await ctx.taskStore.getPendingProposals(ctx.config.projectPath);
-  json(res, proposals);
-});
-
-route('POST', '/api/evolution/proposals/:id/apply', async (_req, res, ctx, params) => {
-  const id = parseRouteId(params, 'id', 'proposal ID');
-  await ctx.taskStore.updateProposalStatus(id, 'applied');
-  json(res, { ok: true, status: 'applied' });
-});
-
-route('GET', '/api/evolution/review-patterns', async (_req, res, ctx) => {
-  if (!ctx.evolutionEngine) { json(res, { error: 'Evolution engine not available' }, 503); return; }
-  const patterns = await ctx.evolutionEngine.analyzeRecurringIssues(ctx.config.projectPath);
-  const categories = await ctx.taskStore.getRecurringIssueCategories(ctx.config.projectPath, 20);
-  json(res, { patterns, categories });
-});
-
-route('POST', '/api/evolution/proposals/:id/reject', async (_req, res, ctx, params) => {
-  const id = parseRouteId(params, 'id', 'proposal ID');
-  await ctx.taskStore.updateProposalStatus(id, 'rejected');
-  json(res, { ok: true, status: 'rejected' });
-});
-
-// --- Prompt Versions ---
-route('GET', '/api/evolution/prompt-versions', async (_req, res, ctx) => {
-  const [active, candidates] = await Promise.all([
-    ctx.taskStore.getActivePromptVersions(ctx.config.projectPath),
-    ctx.taskStore.getCandidatePromptVersions(ctx.config.projectPath),
-  ]);
-  json(res, { active, candidates });
-});
-
-route('GET', '/api/evolution/prompt-versions/:name', async (_req, res, ctx, params) => {
-  const name = params.name;
-  if (!validPromptNames.has(name)) {
-    json(res, { error: `Invalid prompt name. Valid names: ${Array.from(validPromptNames).join(', ')}` }, 400);
-    return;
-  }
-
-  const history = await ctx.taskStore.getPromptVersionHistory(ctx.config.projectPath, name as PromptName);
-  json(res, history);
-});
-
-route('POST', '/api/evolution/prompt-versions/:id/activate', async (_req, res, ctx, params) => {
-  const id = parseRouteId(params, 'id', 'version ID');
-  const version = await ctx.taskStore.getPromptVersion(id);
-  if (!version) { json(res, { error: 'Version not found' }, 404); return; }
-  await ctx.taskStore.supersedeActivePromptVersion(ctx.config.projectPath, version.prompt_name);
-  await ctx.taskStore.activatePromptVersion(id);
-  json(res, { ok: true, status: 'active' });
-});
-
-route('POST', '/api/evolution/prompt-versions/:id/rollback', async (_req, res, ctx, params) => {
-  const id = parseRouteId(params, 'id', 'version ID');
-  await ctx.taskStore.updatePromptVersionStatus(id, 'rolled_back');
-  json(res, { ok: true, status: 'rolled_back' });
-});
-
-// --- Plugins ---
-route('GET', '/api/plugins', async (_req, res, ctx) => {
-  if (!ctx.pluginMonitor) { json(res, { error: 'Plugin monitor not available' }, 503); return; }
-  const result = await ctx.pluginMonitor.checkForUpdates();
-  json(res, result);
-});
-
-route('GET', '/api/plugins/updates', async (_req, res, ctx) => {
-  if (!ctx.pluginMonitor) { json(res, { error: 'Plugin monitor not available' }, 503); return; }
-  const result = await ctx.pluginMonitor.checkForUpdates();
-  json(res, { newPlugins: result.newPlugins, updatable: result.updatable, checkedAt: result.checkedAt });
-});
-
-route('POST', '/api/plugins/:name/install', async (_req, res, ctx, params) => {
-  if (!ctx.pluginMonitor) { json(res, { error: 'Plugin monitor not available' }, 503); return; }
-  const ok = await ctx.pluginMonitor.installPlugin(params.name);
-  json(res, { ok, plugin: params.name }, ok ? 200 : 500);
-});
-
-route('POST', '/api/plugins/:name/update', async (_req, res, ctx, params) => {
-  if (!ctx.pluginMonitor) { json(res, { error: 'Plugin monitor not available' }, 503); return; }
-  const ok = await ctx.pluginMonitor.updatePlugin(params.name);
-  json(res, { ok, plugin: params.name }, ok ? 200 : 500);
-});
-
-route('POST', '/api/plugins/:name/enable', async (_req, res, ctx, params) => {
-  if (!ctx.pluginMonitor) { json(res, { error: 'Plugin monitor not available' }, 503); return; }
-  const ok = await ctx.pluginMonitor.enablePlugin(params.name);
-  json(res, { ok, plugin: params.name }, ok ? 200 : 500);
-});
-
-route('POST', '/api/plugins/:name/disable', async (_req, res, ctx, params) => {
-  if (!ctx.pluginMonitor) { json(res, { error: 'Plugin monitor not available' }, 503); return; }
-  const ok = await ctx.pluginMonitor.disablePlugin(params.name);
-  json(res, { ok, plugin: params.name }, ok ? 200 : 500);
-});
-
-// --- Scan Modules ---
-route('GET', '/api/scan/modules', async (_req, res, ctx) => {
-  const modules = await ctx.taskStore.getModules(ctx.config.projectPath);
-  json(res, modules);
-});
-
-route('GET', '/api/scan/modules/:name/history', async (req, res, ctx, params) => {
-  const name = decodeURIComponent(params.name);
-  const url = new URL(req.url ?? '', `http://${req.headers.host}`);
-  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') ?? '10', 10) || 10));
-  const history = await ctx.taskStore.getModuleScanHistory(ctx.config.projectPath, name, limit);
-  json(res, history);
-});
-
-route('POST', '/api/scan/modules/:name', async (req, res, ctx, params) => {
-  if (ctx.loop.isRunning()) {
-    json(res, { error: 'Cannot trigger module scan while patrol is running' }, 409);
-    return;
-  }
-  const name = decodeURIComponent(params.name);
-  const body = await readBody(req);
-  const rawDepth = isRecord(body) ? body.depth : undefined;
-  const depth = rawDepth === 'quick' ? 'quick' as const : 'normal' as const;
-  ctx.loop.triggerModuleScan(name, depth).catch(err => log.error('Module scan error', err));
-  json(res, { triggered: true, module: name, depth });
-});
-
-route('POST', '/api/scan/identify', async (_req, res, ctx) => {
-  if (ctx.loop.isRunning()) {
-    json(res, { error: 'Cannot identify modules while patrol is running' }, 409);
-    return;
-  }
-  ctx.loop.triggerIdentifyModules().catch(err => log.error('Module identification error', err));
-  json(res, { triggered: true });
-});
-
-route('GET', '/api/scan/health', async (_req, res, ctx) => {
-  const projectPath = ctx.config.projectPath;
-  const modules = await ctx.taskStore.getModules(projectPath);
-  const latestScans = await ctx.taskStore.getLatestModuleScans(projectPath);
-
-  const moduleHealth: Array<{ name: string; health: number | null; lastScanned: Date | null }> = [];
-  const healthScores: number[] = [];
-
-  for (const mod of modules) {
-    const scan = latestScans.find(s => s.module_name === mod.name);
-    const health = scan?.health_score ?? null;
-    moduleHealth.push({
-      name: mod.name,
-      health,
-      lastScanned: scan?.created_at ?? null,
-    });
-    healthScores.push(health ?? 50); // Unscanned modules default to 50
-  }
-
-  const projectHealth = healthScores.length > 0
-    ? Math.round(healthScores.reduce((a, b) => a + b, 0) / healthScores.length)
-    : null;
-
-  // Also include the latest global scan health for comparison
-  const lastGlobalScan = await ctx.taskStore.getLastScan(projectPath);
-
-  json(res, {
-    projectHealth,
-    globalScanHealth: lastGlobalScan?.health_score ?? null,
-    modules: moduleHealth,
-  });
 });
 
 // --- Patrol Control ---
@@ -714,33 +473,31 @@ route('POST', '/api/patrol/stop', async (_req, res, ctx) => {
   }
 });
 
-// --- Plans: Chat-based workflow ---
-route('POST', '/api/plans/chat', async (_req, res, ctx) => {
-  if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
-  const id = await ctx.planWorkflow.createChatSession(ctx.config.projectPath);
-  json(res, { id }, 201);
-});
-
-async function handlePlanChatMessage(req: IncomingMessage, res: ServerResponse, ctx: RouteContext, params: Record<string, string>, successStatus: number): Promise<void> {
-  if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
-  const id = parseRouteId(params, 'id', 'plan ID');
-  const body = await readBody(req);
-  const message = isRecord(body) ? body.message : undefined;
-  if (typeof message !== 'string' || message.trim().length === 0) {
-    json(res, { error: 'message is required' }, 400);
-    return;
-  }
-  ctx.planWorkflow.processUserMessage(id, message.trim())
-    .catch(err => log.error(`Chat message processing failed for plan #${id}`, err));
-  json(res, { ok: true }, successStatus);
+// --- Plans: Chat-based workflow (v2, backed by PlanChatManager) ---
+function requirePlanChat(ctx: RouteContext): PlanChatManager {
+  if (!ctx.planChat) throw new HttpError(503, 'Plan chat not available');
+  return ctx.planChat;
 }
 
-route('POST', '/api/plans/:id/message', async (req, res, ctx, params) => {
-  await handlePlanChatMessage(req, res, ctx, params, 202);
+route('POST', '/api/plans/chat', async (_req, res, ctx) => {
+  const planChat = requirePlanChat(ctx);
+  const draftId = await planChat.createSession();
+  json(res, { ok: true, id: draftId });
 });
 
-route('POST', '/api/plans/:id/chat', async (req, res, ctx, params) => {
-  await handlePlanChatMessage(req, res, ctx, params, 200);
+route('POST', '/api/plans/:id/message', async (req, res, ctx, params) => {
+  const planChat = requirePlanChat(ctx);
+  const id = parseRouteId(params, 'id', 'plan ID');
+  const body = await readBody(req) as Record<string, unknown>;
+  const message = typeof body.message === 'string' ? body.message.trim() : '';
+  if (!message) throw new HttpError(400, 'message is required');
+
+  // Don't await — run in background so the response returns immediately.
+  // The client uses SSE (GET /stream) to receive the assistant response.
+  planChat.sendMessage(id, message).catch(err => {
+    log.error(`PlanChat message error for draft ${id}`, err);
+  });
+  json(res, { ok: true });
 });
 
 route('GET', '/api/plans/:id/messages', async (_req, res, ctx, params) => {
@@ -750,55 +507,47 @@ route('GET', '/api/plans/:id/messages', async (_req, res, ctx, params) => {
 });
 
 route('GET', '/api/plans/:id/stream', async (req, res, ctx, params) => {
-  if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
+  const planChat = requirePlanChat(ctx);
   const id = parseRouteId(params, 'id', 'plan ID');
 
-  const releaseConnection = reserveSseConnection('/api/plans/:id/stream', res);
-  if (!releaseConnection) {
-    return;
-  }
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+  });
+  res.write(':ok\n\n');
 
-  let remove = () => {};
-  const stream = createSseStream(req, res, {
-    onCleanup: () => {
-      releaseConnection();
-      remove();
-      remove = () => {};
-    },
+  const unsubscribe = planChat.addListener(id, (event, data) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   });
 
-  remove = ctx.planWorkflow.addSSEListener(id, (event, data) => {
-    if (!stream.write(event, data)) {
-      return;
-    }
-  });
+  const onClose = () => { unsubscribe(); res.end(); };
+  req.on('close', onClose);
+  req.on('error', onClose);
 });
 
-route('POST', '/api/plans/:id/generate', async (req, res, ctx, params) => {
-  if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
+route('POST', '/api/plans/:id/generate', async (_req, res, ctx, params) => {
+  const planChat = requirePlanChat(ctx);
   const id = parseRouteId(params, 'id', 'plan ID');
-  ctx.planWorkflow.generatePlan(id, ctx.config.projectPath)
-    .catch(err => log.error(`Plan generation failed for #${id}`, err));
-  json(res, { ok: true, message: 'Plan generation started' }, 202);
+  planChat.generatePlan(id).catch(err => {
+    log.error(`PlanChat generate error for draft ${id}`, err);
+  });
+  json(res, { ok: true });
 });
 
 route('POST', '/api/plans/:id/close', async (_req, res, ctx, params) => {
-  if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
+  const planChat = requirePlanChat(ctx);
   const id = parseRouteId(params, 'id', 'plan ID');
-  await ctx.planWorkflow.closeSession(id);
+  await planChat.closeSession(id);
   json(res, { ok: true });
 });
 
 route('POST', '/api/plans/:id/resume', async (_req, res, ctx, params) => {
-  if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
+  const planChat = requirePlanChat(ctx);
   const id = parseRouteId(params, 'id', 'plan ID');
-  try {
-    await ctx.planWorkflow.resumeSession(id);
-    json(res, { ok: true });
-  } catch (err) {
-    if (err instanceof Error) { json(res, { error: err.message }, 400); return; }
-    throw err;
-  }
+  await planChat.resumeSession(id);
+  json(res, { ok: true });
 });
 
 route('GET', '/api/plans', async (req, res, ctx) => {
@@ -829,24 +578,11 @@ route('POST', '/api/plans/:id/reject', async (_req, res, ctx, params) => {
   json(res, { ok: true, status: 'rejected' });
 });
 
-route('POST', '/api/plans/:id/revise', async (_req, res, ctx, params) => {
-  if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
-  const id = parseRouteId(params, 'id', 'plan ID');
-  const revisePromise = ctx.planWorkflow.revisePlan(id);
-  json(res, { ok: true, message: 'Plan revision started' }, 202);
-  revisePromise.catch(err => log.error('Plan revision failed', err));
-});
-
 route('POST', '/api/plans/:id/execute', async (_req, res, ctx, params) => {
-  if (!ctx.planWorkflow) { json(res, { error: 'Plan workflow not available' }, 503); return; }
+  const planChat = requirePlanChat(ctx);
   const id = parseRouteId(params, 'id', 'plan ID');
-  try {
-    await ctx.planWorkflow.executeApprovedPlan(id);
-    json(res, { ok: true, message: 'Plan tasks enqueued' });
-  } catch (err) {
-    if (err instanceof Error) { json(res, { error: err.message }, 400); return; }
-    throw err;
-  }
+  const created = await planChat.executePlan(id);
+  json(res, { ok: true, created });
 });
 
 // --- Route matching ---
@@ -963,80 +699,6 @@ function validateCreateTaskBody(body: unknown): ValidationResult<CreateTaskReque
       ...(normalizedPriority !== undefined ? { priority: normalizedPriority } : {}),
     },
   };
-}
-
-function validateCreateMemoryBody(body: unknown): ValidationResult<CreateMemoryRequest> {
-  if (!isRecord(body)) {
-    return { ok: false, error: 'Request body must be a JSON object.' };
-  }
-
-  const category = body.category;
-  if (typeof category !== 'string' || category.trim().length === 0) {
-    return { ok: false, error: 'category is required and must be a non-empty string.' };
-  }
-
-  const normalizedCategory = category.trim();
-  if (!isMemoryCategory(normalizedCategory)) {
-    return { ok: false, error: 'category must be one of: habit, experience, standard, workflow, framework, failure, simplification.' };
-  }
-
-  const content = body.content;
-  if (typeof content !== 'string') {
-    return { ok: false, error: 'content is required and must be a non-empty string.' };
-  }
-
-  const normalizedContent = content.trim();
-  if (normalizedContent.length === 0) {
-    return { ok: false, error: 'content is required and must be a non-empty string.' };
-  }
-  if (normalizedContent.length > MAX_MEMORY_CONTENT_LENGTH) {
-    return { ok: false, error: `content must be at most ${MAX_MEMORY_CONTENT_LENGTH} characters.` };
-  }
-
-  const title = body.title;
-  let normalizedTitle: string | undefined;
-  if (title !== undefined) {
-    if (typeof title !== 'string') {
-      return { ok: false, error: 'title must be a non-empty string when provided.' };
-    }
-    normalizedTitle = title.trim();
-    if (normalizedTitle.length === 0) {
-      return { ok: false, error: 'title must be a non-empty string when provided.' };
-    }
-    if (normalizedTitle.length > MAX_MEMORY_TITLE_LENGTH) {
-      return { ok: false, error: `title must be at most ${MAX_MEMORY_TITLE_LENGTH} characters.` };
-    }
-  }
-
-  const tags = body.tags;
-  let normalizedTags: string[] | undefined;
-  if (tags !== undefined) {
-    if (!Array.isArray(tags) || tags.some(tag => typeof tag !== 'string')) {
-      return { ok: false, error: 'tags must be an array of strings when provided.' };
-    }
-    if (tags.length > MAX_MEMORY_TAG_COUNT) {
-      return { ok: false, error: `tags must contain at most ${MAX_MEMORY_TAG_COUNT} items.` };
-    }
-
-    normalizedTags = tags.map(tag => tag.trim()).filter(tag => tag.length > 0);
-    if (normalizedTags.some(tag => tag.length > MAX_MEMORY_TAG_LENGTH)) {
-      return { ok: false, error: `each tag must be at most ${MAX_MEMORY_TAG_LENGTH} characters.` };
-    }
-  }
-
-  return {
-    ok: true,
-    value: {
-      category: normalizedCategory,
-      content: normalizedContent,
-      ...(normalizedTitle !== undefined ? { title: normalizedTitle } : {}),
-      ...(normalizedTags !== undefined ? { tags: normalizedTags } : {}),
-    },
-  };
-}
-
-function isMemoryCategory(value: string): value is MemoryCategory {
-  return memoryCategories.some(category => category === value);
 }
 
 function isScanDepth(value: string): value is ScanDepth {

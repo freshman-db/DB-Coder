@@ -5,11 +5,9 @@ import test from 'node:test';
 import type { Config } from '../config/Config.js';
 import type { MainLoop } from '../core/MainLoop.js';
 import type { PatrolManager } from '../core/ModeManager.js';
-import type { PlanWorkflow } from '../core/PlanWorkflow.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { OperationalMetrics } from '../memory/types.js';
-import { promptNames } from '../types/constants.js';
 import type { CostTracker } from '../utils/cost.js';
 import { log } from '../utils/logger.js';
 import { createMockRequest, createMockResponse, getRequestListener } from './__test-helpers.js';
@@ -31,7 +29,6 @@ interface ServerFixtureOptions {
   taskStore?: Partial<TaskStore>;
   costTracker?: Partial<CostTracker>;
   modeManager?: Partial<PatrolManager>;
-  planWorkflow?: Partial<PlanWorkflow>;
 }
 
 interface ServerFixture {
@@ -73,25 +70,19 @@ function createServerFixture(options: ServerFixtureOptions = {}): ServerFixture 
     ...options.modeManager,
   } as unknown as PatrolManager;
 
-  const planWorkflow = {
-    createChatSession: async () => 1,
-    ...options.planWorkflow,
-  } as unknown as PlanWorkflow;
-
   const config = {
     projectPath: '/workspace/project',
     values: {
       apiToken: token,
       server: { host: '127.0.0.1', port: 18890 },
       brain: { scanInterval: 30 },
-      evolution: { goals: [] },
     },
   } as unknown as Config;
 
   const globalMemory = {} as GlobalMemory;
 
   return {
-    server: new Server(config, loop, taskStore, globalMemory, costTracker, undefined, undefined, modeManager, planWorkflow),
+    server: new Server(config, loop, taskStore, globalMemory, costTracker, undefined, undefined, modeManager),
     token,
   };
 }
@@ -253,187 +244,6 @@ test('POST /api/tasks with invalid body returns 400', async () => {
     error: 'description is required and must be a non-empty string.',
   });
   assert.equal(createCalls, 0);
-});
-
-test('POST /api/evolution/proposals/:id/apply parses proposal ID and updates status', async () => {
-  let updateArgs:
-    | {
-      id: number;
-      status: string;
-    }
-    | undefined;
-
-  const { server, token } = createServerFixture({
-    taskStore: {
-      updateProposalStatus: async (id, status) => {
-        updateArgs = { id, status };
-      },
-    },
-  });
-
-  const state = await dispatch(server, {
-    method: 'POST',
-    url: '/api/evolution/proposals/12/apply',
-    token,
-  });
-
-  assert.equal(state.statusCode, 200);
-  assert.deepEqual(parseJson<{ ok: boolean; status: string }>(state), {
-    ok: true,
-    status: 'applied',
-  });
-  assert.deepEqual(updateArgs, {
-    id: 12,
-    status: 'applied',
-  });
-});
-
-test('POST /api/evolution/proposals/:id/apply returns 400 for invalid proposal ID', async () => {
-  let updateCalls = 0;
-
-  const { server, token } = createServerFixture({
-    taskStore: {
-      updateProposalStatus: async () => {
-        updateCalls += 1;
-      },
-    },
-  });
-
-  const state = await dispatch(server, {
-    method: 'POST',
-    url: '/api/evolution/proposals/not-a-number/apply',
-    token,
-  });
-
-  assert.equal(state.statusCode, 400);
-  assert.deepEqual(parseJson<{ error: string }>(state), {
-    error: 'Invalid proposal ID',
-  });
-  assert.equal(updateCalls, 0);
-});
-
-test('GET /api/evolution/prompt-versions/:name validates prompt name and returns history', async () => {
-  let historyArgs:
-    | {
-      projectPath: string;
-      promptName: string;
-    }
-    | undefined;
-
-  const expectedHistory = [
-    {
-      id: 7,
-      prompt_name: 'scan',
-    },
-  ] as unknown as Awaited<ReturnType<TaskStore['getPromptVersionHistory']>>;
-
-  const { server, token } = createServerFixture({
-    taskStore: {
-      getPromptVersionHistory: async (projectPath, promptName) => {
-        historyArgs = { projectPath, promptName };
-        return expectedHistory;
-      },
-    },
-  });
-
-  const state = await dispatch(server, {
-    method: 'GET',
-    url: '/api/evolution/prompt-versions/scan',
-    token,
-  });
-
-  assert.equal(state.statusCode, 200);
-  assert.deepEqual(parseJson<typeof expectedHistory>(state), expectedHistory);
-  assert.deepEqual(historyArgs, {
-    projectPath: '/workspace/project',
-    promptName: 'scan',
-  });
-});
-
-test('GET /api/evolution/prompt-versions/:name returns 400 for unsupported prompt name', async () => {
-  let historyCalls = 0;
-
-  const { server, token } = createServerFixture({
-    taskStore: {
-      getPromptVersionHistory: async () => {
-        historyCalls += 1;
-        return [] as Awaited<ReturnType<TaskStore['getPromptVersionHistory']>>;
-      },
-    },
-  });
-
-  const state = await dispatch(server, {
-    method: 'GET',
-    url: '/api/evolution/prompt-versions/unsupported_prompt',
-    token,
-  });
-
-  assert.equal(state.statusCode, 400);
-  assert.deepEqual(parseJson<{ error: string }>(state), {
-    error: `Invalid prompt name. Valid names: ${promptNames.join(', ')}`,
-  });
-  assert.equal(historyCalls, 0);
-});
-
-test('POST /api/evolution/prompt-versions/:id/activate parses version ID and activates version', async () => {
-  let requestedId: number | undefined;
-  let supersedeArgs:
-    | {
-      projectPath: string;
-      promptName: string;
-    }
-    | undefined;
-  let activatedId: number | undefined;
-
-  const { server, token } = createServerFixture({
-    taskStore: {
-      getPromptVersion: async (id) => {
-        requestedId = id;
-        return {
-          prompt_name: 'planner',
-        } as unknown as Awaited<ReturnType<TaskStore['getPromptVersion']>>;
-      },
-      supersedeActivePromptVersion: async (projectPath, promptName) => {
-        supersedeArgs = { projectPath, promptName };
-      },
-      activatePromptVersion: async (id) => {
-        activatedId = id;
-      },
-    },
-  });
-
-  const state = await dispatch(server, {
-    method: 'POST',
-    url: '/api/evolution/prompt-versions/5/activate',
-    token,
-  });
-
-  assert.equal(state.statusCode, 200);
-  assert.deepEqual(parseJson<{ ok: boolean; status: string }>(state), {
-    ok: true,
-    status: 'active',
-  });
-  assert.equal(requestedId, 5);
-  assert.deepEqual(supersedeArgs, {
-    projectPath: '/workspace/project',
-    promptName: 'planner',
-  });
-  assert.equal(activatedId, 5);
-});
-
-test('POST /api/evolution/prompt-versions/:id/activate returns 400 for invalid version ID', async () => {
-  const { server, token } = createServerFixture();
-
-  const state = await dispatch(server, {
-    method: 'POST',
-    url: '/api/evolution/prompt-versions/not-a-number/activate',
-    token,
-  });
-
-  assert.equal(state.statusCode, 400);
-  assert.deepEqual(parseJson<{ error: string }>(state), {
-    error: 'Invalid version ID',
-  });
 });
 
 test('GET /api/plans/:id/messages parses plan ID and returns messages', async () => {
@@ -1186,56 +996,23 @@ test('GET /api/status/stream returns SSE headers and cleans up status listeners'
   assert.equal(removeCalls, 1);
 });
 
-test('GET /api/plans/:id/stream returns SSE headers', async () => {
-  let draftId: number | null = null;
-  let emit: ((event: string, data: string) => void) | undefined;
-  let cleanupCalls = 0;
+test('GET /api/plans/:id/stream returns 503 when planChat not injected', async () => {
+  const { server, token } = createServerFixture();
 
-  const { server, token } = createServerFixture({
-    planWorkflow: {
-      addSSEListener: (id, listener) => {
-        draftId = id;
-        emit = listener;
-        return () => {
-          cleanupCalls += 1;
-        };
-      },
-    },
-  });
-  const listener = getRequestListener(server);
-  const req = createMockRequest({
+  const state = await dispatch(server, {
     method: 'GET',
     url: '/api/plans/42/stream',
     token,
   });
-  const { response, state } = createMockResponse();
 
-  await listener(req, response);
-
-  assert.equal(state.statusCode, 200);
-  assert.equal(state.headers['content-type'], 'text/event-stream');
-  assert.equal(state.headers['cache-control'], 'no-cache');
-  assert.equal(state.headers.connection, 'keep-alive');
-  assert.equal(draftId, 42);
-
-  emit?.('status', '{"ready":true}');
-  assert.equal(state.body, 'event: status\ndata: {"ready":true}\n\n');
-
-  req.emit('close');
-  assert.equal(cleanupCalls, 1);
+  assert.equal(state.statusCode, 503);
+  assert.deepEqual(parseJson<{ error: string }>(state), {
+    error: 'Plan chat not available',
+  });
 });
 
-test('POST /api/plans/chat returns 201 and creates a chat session', async () => {
-  let capturedProjectPath: string | undefined;
-
-  const { server, token } = createServerFixture({
-    planWorkflow: {
-      createChatSession: async (projectPath) => {
-        capturedProjectPath = projectPath;
-        return 123;
-      },
-    },
-  });
+test('POST /api/plans/chat returns 503 when planChat not injected', async () => {
+  const { server, token } = createServerFixture();
 
   const state = await dispatch(server, {
     method: 'POST',
@@ -1243,40 +1020,24 @@ test('POST /api/plans/chat returns 201 and creates a chat session', async () => 
     token,
   });
 
-  assert.equal(state.statusCode, 201);
-  assert.equal(capturedProjectPath, '/workspace/project');
-  assert.deepEqual(parseJson<{ id: number }>(state), { id: 123 });
+  assert.equal(state.statusCode, 503);
+  assert.deepEqual(parseJson<{ error: string }>(state), {
+    error: 'Plan chat not available',
+  });
 });
 
-test('POST /api/plans/:id/chat with valid message returns 200', async () => {
-  let processArgs:
-    | {
-      id: number;
-      message: string;
-    }
-    | undefined;
-
-  const { server, token } = createServerFixture({
-    planWorkflow: {
-      processUserMessage: async (id, message) => {
-        processArgs = { id, message };
-      },
-    },
-  });
+test('POST /api/plans/:id/message returns 503 when planChat not injected', async () => {
+  const { server, token } = createServerFixture();
 
   const state = await dispatch(server, {
     method: 'POST',
-    url: '/api/plans/7/chat',
+    url: '/api/plans/7/message',
     token,
-    body: {
-      message: '  Run dependency audit  ',
-    },
+    body: { message: 'Run dependency audit' },
   });
 
-  assert.equal(state.statusCode, 200);
-  assert.deepEqual(parseJson<{ ok: boolean }>(state), { ok: true });
-  assert.deepEqual(processArgs, {
-    id: 7,
-    message: 'Run dependency audit',
+  assert.equal(state.statusCode, 503);
+  assert.deepEqual(parseJson<{ error: string }>(state), {
+    error: 'Plan chat not available',
   });
 });

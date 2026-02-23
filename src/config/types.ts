@@ -34,7 +34,6 @@ export interface RoutingConfig {
   plan: 'brain';
   execute_frontend: 'claude';
   execute_backend: 'codex';
-  review: Array<'claude' | 'codex'>;
   reflect: 'brain';
 }
 
@@ -77,13 +76,6 @@ export interface EvolutionGoal {
 
 export interface EvolutionConfig {
   goals: EvolutionGoal[];
-  architectureNotes?: string;
-  autoConfigUpdate?: boolean; // default false — auto-apply safe config proposals
-  maxAdjustmentsPerPrompt?: number; // default 5
-  trendWindowSize?: number; // default 10 — number of recent scans for trend analysis
-  metaReflectInterval?: number;      // default 5, trigger meta-reflect every N completed tasks
-  promptPatchAutoApply?: boolean;    // default true, auto-promote high-confidence candidates
-  maxActivePromptPatches?: number;   // default 3, max concurrent active patches
 }
 
 export type PluginRelevance = 'essential' | 'recommended' | 'optional' | 'irrelevant';
@@ -93,12 +85,6 @@ export interface PluginConfig {
   autoInstallRecommended?: boolean;    // default false — auto-install recommended plugins
   checkInterval?: number;              // default 86400 (24h, seconds)
   relevanceOverrides?: Record<string, PluginRelevance>; // manual plugin relevance
-}
-
-export interface ScanConfig {
-  autoIdentifyModules?: boolean;    // default true — auto-identify functional modules
-  maxModulesPerCycle?: number;      // default 1 — modules to scan per cycle
-  moduleRotationInterval?: number;  // default 3 — cycles before rotating to unchanged modules
 }
 
 export interface DbCoderConfig {
@@ -115,7 +101,6 @@ export interface DbCoderConfig {
   mcp: McpConfig;
   plugins: PluginConfig;
   evolution: EvolutionConfig;
-  scan: ScanConfig;
 }
 
 export type DeepPartial<T> = {

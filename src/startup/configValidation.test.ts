@@ -24,7 +24,6 @@ function createValidConfig(): DbCoderConfig {
       plan: 'brain',
       execute_frontend: 'claude',
       execute_backend: 'codex',
-      review: ['claude', 'codex'],
       reflect: 'brain',
     },
     budget: { maxPerTask: 5.0, maxPerDay: 200.0, warningThreshold: 0.8 },
@@ -36,7 +35,6 @@ function createValidConfig(): DbCoderConfig {
     server: { host: '127.0.0.1', port: 18800 },
     mcp: { enabled: true },
     plugins: {},
-    scan: {},
     evolution: {
       goals: [{ description: 'Keep code quality high', priority: 1, status: 'active' }],
     },

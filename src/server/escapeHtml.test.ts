@@ -157,17 +157,6 @@ test('renderPlanReviewView escapes draft.id', () => {
   );
 });
 
-// ─── Static analysis: memory results escape item.source ───
-
-test('renderMemory escapes item.source', () => {
-  const fn = extractFunction(appSource, 'renderMemory');
-  assert.ok(fn, 'renderMemory should exist');
-  assert.ok(
-    fn.includes('escapeHtml(String(item.source))'),
-    'item.source in memory results should be escaped',
-  );
-});
-
 // ─── Edge case: null/undefined coercion via String() ───
 
 test('String() coercion handles null safely', () => {

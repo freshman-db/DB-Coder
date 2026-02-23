@@ -187,11 +187,8 @@ const routes = [
   { pattern: /^#\/tasks\/(.+)$/, page: 'taskDetail', title: '任务详情' },
   { pattern: /^#\/history$/, page: 'history', title: '历史记录' },
   { pattern: /^#\/logs$/, page: 'logs', title: '运行日志' },
-  { pattern: /^#\/memory$/, page: 'memory', title: '记忆检索' },
-  { pattern: /^#\/plans$/, page: 'plans', title: '计划对话' },
+  { pattern: /^#\/plans$/, page: 'plans', title: '计划列表' },
   { pattern: /^#\/plans\/(.+)$/, page: 'planDetail', title: '计划详情' },
-  { pattern: /^#\/plugins$/, page: 'plugins', title: '插件管理' },
-  { pattern: /^#\/evolution$/, page: 'evolution', title: '进化分析' },
   { pattern: /^#\/settings$/, page: 'settings', title: '系统设置' },
 ];
 
@@ -252,11 +249,8 @@ function renderPage(page, param) {
     taskDetail: () => renderTaskDetail(param),
     history: renderHistory,
     logs: renderLogs,
-    memory: renderMemory,
     plans: renderPlans,
     planDetail: () => renderPlanDetail(param),
-    plugins: renderPlugins,
-    evolution: renderEvolution,
     settings: renderSettings,
   };
 
@@ -292,8 +286,8 @@ function getPatrolStateDesc(patrolling, loopState, currentTaskId, scanInterval) 
 }
 
 async function renderDashboard() {
-  const [status, cost, evoSummary] = await Promise.all([
-    api('/status'), api('/cost'), api('/evolution/summary').catch(() => null),
+  const [status, cost] = await Promise.all([
+    api('/status'), api('/cost'),
   ]);
   const content = $('#content');
 
@@ -305,10 +299,6 @@ async function renderDashboard() {
   // Extract today's cost from daily costs array (sorted by date DESC, [0] = most recent)
   const dailyCostsArr = Array.isArray(co.costs) ? co.costs : Array.isArray(st.dailyCosts) ? st.dailyCosts : [];
   const todayCost = dailyCostsArr.length > 0 ? Number(dailyCostsArr[0].total_cost_usd || 0) : 0;
-
-  // Health score from evolution trend data
-  const healthScore = evoSummary?.trends?.health?.current ?? '-';
-  const healthColor = healthScore >= 80 ? 'green' : healthScore >= 50 ? 'orange' : 'red';
 
   state.paused = !!st.paused;
   updatePatrolBtn(patrolling);
@@ -337,11 +327,6 @@ async function renderDashboard() {
         <div class="card-label">今日费用</div>
         <div class="card-value green">$${todayCost.toFixed(2)}</div>
         <div class="card-sub">会话累计 $${Number(co.sessionCost ?? 0).toFixed(2)}</div>
-      </div>
-      <div class="card">
-        <div class="card-label">健康评分</div>
-        <div class="card-value ${healthColor}">${healthScore}</div>
-        <div class="card-sub">综合运行质量</div>
       </div>
     </div>
 
@@ -795,234 +780,6 @@ function appendLog(entry) {
   }
 }
 
-// ---- 记忆检索 ----
-function renderMemory() {
-  const content = $('#content');
-  content.innerHTML = `
-    <div class="search-bar">
-      <input type="text" class="form-input" id="memoryQuery" placeholder="输入关键词搜索记忆..." autofocus>
-      <button class="btn btn-primary" id="memorySearch">搜索</button>
-    </div>
-    <div id="memoryResults">
-      <div class="empty-state">
-        <div class="icon">&#128270;</div>
-        <p>输入关键词搜索项目记忆库</p>
-      </div>
-    </div>
-  `;
-
-  const input = $('#memoryQuery');
-  const searchBtn = $('#memorySearch');
-
-  const doSearch = async () => {
-    const q = input.value.trim();
-    if (!q) return;
-
-    const results = $('#memoryResults');
-    results.innerHTML = '<div class="loading"><div class="spinner"></div>搜索中...</div>';
-
-    const data = await api(`/memory?q=${encodeURIComponent(q)}`);
-
-    if (!data || (Array.isArray(data) && data.length === 0)) {
-      results.innerHTML = '<div class="empty-state"><p>未找到相关记忆</p></div>';
-      return;
-    }
-
-    const items = Array.isArray(data) ? data : (data.results || []);
-    if (items.length === 0) {
-      results.innerHTML = '<div class="empty-state"><p>未找到相关记忆</p></div>';
-      return;
-    }
-
-    results.innerHTML = items.map((item) => `
-      <div class="memory-result">
-        <div class="result-title">${escapeHtml(item.title || item.file || '记忆片段')}</div>
-        <div class="result-body">${escapeHtml(item.content || item.text || item.body || '')}</div>
-        <div class="result-meta">
-          ${item.score ? `相关度: ${(item.score * 100).toFixed(0)}%` : ''}
-          ${item.source ? ` | 来源: ${escapeHtml(String(item.source))}` : ''}
-          ${item.updatedAt ? ` | 更新: ${timeAgo(item.updatedAt)}` : ''}
-        </div>
-      </div>
-    `).join('');
-  };
-
-  searchBtn.addEventListener('click', doSearch);
-  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
-}
-
-// ---- 系统设置 ----
-// ---- 插件管理 ----
-async function renderPlugins() {
-  const content = $('#content');
-  const data = await api('/plugins');
-
-  if (!data) {
-    content.innerHTML = '<div class="empty-state"><p>插件监控不可用</p></div>';
-    return;
-  }
-
-  const relevanceColors = { essential: '#10b981', recommended: '#3b82f6', optional: '#6b7280', irrelevant: '#9ca3af' };
-  const relevanceLabels = { essential: '核心', recommended: '推荐', optional: '可选', irrelevant: '无关' };
-
-  function pluginCard(p) {
-    const statusBadge = p.installed
-      ? (p.enabled ? '<span class="badge badge-success">已启用</span>' : '<span class="badge badge-muted">已禁用</span>')
-      : '<span class="badge badge-info">未安装</span>';
-    const updateBadge = p.hasUpdate ? '<span class="badge badge-warning">可更新</span>' : '';
-    const relevanceDot = `<span style="color:${relevanceColors[p.relevance] || '#6b7280'}">${relevanceLabels[p.relevance] || p.relevance}</span>`;
-
-    const actions = [];
-    if (!p.installed) {
-      actions.push(`<button class="btn btn-sm btn-primary" data-action="pluginAction" data-id="${escapeHtml(p.name)}" data-arg="install">安装</button>`);
-    } else {
-      if (p.hasUpdate) actions.push(`<button class="btn btn-sm btn-warning" data-action="pluginAction" data-id="${escapeHtml(p.name)}" data-arg="update">更新</button>`);
-      if (p.enabled) {
-        actions.push(`<button class="btn btn-sm btn-secondary" data-action="pluginAction" data-id="${escapeHtml(p.name)}" data-arg="disable">禁用</button>`);
-      } else {
-        actions.push(`<button class="btn btn-sm btn-success" data-action="pluginAction" data-id="${escapeHtml(p.name)}" data-arg="enable">启用</button>`);
-      }
-    }
-
-    return `
-      <div class="card plugin-card">
-        <div class="plugin-header">
-          <strong>${escapeHtml(p.name.split('/').pop() || p.name)}</strong>
-          <div class="plugin-badges">${statusBadge} ${updateBadge} ${relevanceDot}</div>
-        </div>
-        <p class="plugin-desc">${escapeHtml(p.description || '无描述')}</p>
-        <div class="plugin-meta">
-          <span>v${escapeHtml(p.version || '?')}</span>
-          <div class="plugin-actions">${actions.join(' ')}</div>
-        </div>
-      </div>`;
-  }
-
-  const installed = (data.installed || []);
-  const available = (data.available || []);
-  const checkedAt = data.checkedAt ? new Date(data.checkedAt).toLocaleString('zh-CN') : '-';
-
-  content.innerHTML = `
-    <div class="page-header">
-      <h2>插件管理</h2>
-      <span class="text-muted">最近检查: ${escapeHtml(checkedAt)}</span>
-    </div>
-
-    <div class="section">
-      <h3>已安装插件 (${installed.length})</h3>
-      <div class="plugin-grid">
-        ${installed.length > 0 ? installed.map(pluginCard).join('') : '<p class="text-muted">暂无已安装插件</p>'}
-      </div>
-    </div>
-
-    ${available.length > 0 ? `
-    <div class="section">
-      <h3>可用插件 (${available.length})</h3>
-      <div class="plugin-grid">
-        ${available.map(pluginCard).join('')}
-      </div>
-    </div>` : ''}
-  `;
-}
-
-async function pluginAction(name, action) {
-  const res = await api(`/plugins/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
-  if (res?.ok) {
-    toast(`插件 ${name} ${action} 成功`);
-    renderPlugins();
-  } else {
-    toast(`操作失败: ${res?.error || '未知错误'}`, 'error');
-  }
-}
-// pluginAction called via data-action="pluginAction" delegation, no window global needed.
-
-// ---- 进化分析 ----
-async function renderEvolution() {
-  const content = $('#content');
-  const [summary, reviewPatterns, adjustments] = await Promise.all([
-    api('/evolution/summary'),
-    api('/evolution/review-patterns'),
-    api('/evolution/adjustments'),
-  ]);
-
-  if (!summary) {
-    content.innerHTML = '<div class="empty-state"><p>进化引擎不可用</p></div>';
-    return;
-  }
-
-  // Review patterns section
-  const patternsHtml = reviewPatterns?.categories?.length > 0
-    ? reviewPatterns.categories.map((c) => `
-        <div class="list-item">
-          <span class="list-item-title">${escapeHtml(c.category)}</span>
-          <span class="badge ${c.count >= 5 ? 'badge-failed' : c.count >= 3 ? 'badge-warning' : 'badge-pending'}">${c.count} 次</span>
-        </div>`).join('')
-    : '<div class="empty-state"><p>暂无审查模式数据</p></div>';
-
-  // Adjustments section
-  const adjHtml = adjustments?.length > 0
-    ? adjustments.slice(0, 10).map((a) => {
-        const effColor = a.effectiveness > 0.3 ? 'green' : a.effectiveness < -0.1 ? 'red' : 'orange';
-        return `<div class="list-item">
-          <span class="badge badge-${a.category === 'avoidance' ? 'failed' : 'pending'}" style="min-width:60px;text-align:center;">${escapeHtml(a.category)}</span>
-          <span class="list-item-title">${escapeHtml(a.text.slice(0, 100))}</span>
-          <span style="color:${effColor};font-size:12px;min-width:50px;text-align:right;">${a.effectiveness.toFixed(2)}</span>
-        </div>`;
-      }).join('')
-    : '<div class="empty-state"><p>暂无活跃调整</p></div>';
-
-  // Goals section
-  const goalsHtml = summary.goals?.length > 0
-    ? summary.goals.map((g) => `
-        <div class="list-item">
-          <span class="list-item-title">目标 #${g.goalIndex}</span>
-          <div style="flex:1;margin:0 12px;">
-            <div style="background:var(--bg-tertiary);border-radius:4px;height:8px;overflow:hidden;">
-              <div style="background:var(--primary);width:${Math.min(100, g.progress)}%;height:100%;border-radius:4px;"></div>
-            </div>
-          </div>
-          <span style="font-size:12px;color:var(--text-muted);min-width:40px;text-align:right;">${Math.round(g.progress)}%</span>
-        </div>`).join('')
-    : '<div class="empty-state"><p>暂无目标</p></div>';
-
-  content.innerHTML = `
-    <div class="cards-grid">
-      <div class="card">
-        <div class="card-label">活跃调整</div>
-        <div class="card-value blue">${summary.adjustments?.active ?? 0}</div>
-      </div>
-      <div class="card">
-        <div class="card-label">待处理提案</div>
-        <div class="card-value orange">${summary.proposals?.pending ?? 0}</div>
-      </div>
-      <div class="card">
-        <div class="card-label">健康趋势</div>
-        <div class="card-value ${summary.trends?.health?.direction === 'improving' ? 'green' : summary.trends?.health?.direction === 'degrading' ? 'red' : ''}">${summary.trends?.health?.direction === 'improving' ? '↑ 上升' : summary.trends?.health?.direction === 'degrading' ? '↓ 下降' : '→ 稳定'}</div>
-        <div class="card-sub">Δ ${summary.trends?.health?.delta?.toFixed(1) ?? 0}</div>
-      </div>
-      <div class="card">
-        <div class="card-label">审查问题类型</div>
-        <div class="card-value">${reviewPatterns?.categories?.length ?? 0}</div>
-      </div>
-    </div>
-
-    <div class="list-container" style="margin-bottom:20px;">
-      <div class="list-header"><span>反复出现的审查问题</span></div>
-      ${patternsHtml}
-    </div>
-
-    <div class="list-container" style="margin-bottom:20px;">
-      <div class="list-header"><span>活跃调整 (Top 10)</span></div>
-      ${adjHtml}
-    </div>
-
-    <div class="list-container">
-      <div class="list-header"><span>目标进度</span></div>
-      ${goalsHtml}
-    </div>
-  `;
-}
-
 // ---- 系统设置 ----
 async function renderSettings() {
   const content = $('#content');
@@ -1091,11 +848,6 @@ async function togglePause() {
   }
 }
 
-async function triggerScan() {
-  const res = await api('/control/scan', { method: 'POST' });
-  if (res !== null) toast('扫描已触发');
-}
-
 async function deleteTask(id) {
   if (!confirm(`确定删除任务 #${id}？此操作不可撤销。`)) return;
   const res = await api(`/tasks/${id}`, { method: 'DELETE' });
@@ -1109,7 +861,7 @@ async function approveTask(id) {
   const res = await api(`/tasks/${id}/approve`, { method: 'POST' });
   if (res !== null) {
     toast('任务已通过，已回到执行队列');
-    router();
+    navigate();
   }
 }
 
@@ -1117,7 +869,7 @@ async function skipTask(id) {
   const res = await api(`/tasks/${id}/skip`, { method: 'POST' });
   if (res !== null) {
     toast('任务已跳过');
-    router();
+    navigate();
   }
 }
 
@@ -1224,8 +976,8 @@ async function renderPlans() {
 
   content.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-      <h2 style="margin:0;">计划对话</h2>
-      <button class="btn btn-primary" data-action="startNewChat">+ 开始新对话</button>
+      <h2 style="margin:0;">计划列表</h2>
+      <button class="btn btn-primary" data-action="newPlanChat">+ 新建对话</button>
     </div>
     <div class="list-container" id="planList">
       ${!drafts || drafts.length === 0 ? '<div class="empty-state"><p>暂无计划会话，点击上方按钮开始</p></div>' :
@@ -1248,13 +1000,6 @@ async function renderPlans() {
         }).join('')}
     </div>
   `;
-}
-
-async function startNewChat() {
-  const result = await api('/plans/chat', { method: 'POST', body: '{}' });
-  if (result?.id) {
-    location.hash = `#/plans/${result.id}`;
-  }
 }
 
 async function renderPlanDetail(id) {
@@ -1537,6 +1282,14 @@ async function generatePlanFromChat(draftId) {
   await api(`/plans/${draftId}/generate`, { method: 'POST', body: '{}' });
 }
 
+async function newPlanChat() {
+  const result = await api('/plans/chat', { method: 'POST', body: '{}' });
+  if (result?.id) {
+    toast('对话已创建');
+    location.hash = `#/plans/${result.id}`;
+  }
+}
+
 async function closeChatSession(draftId) {
   await api(`/plans/${draftId}/close`, { method: 'POST', body: '{}' });
   toast('会话已关闭');
@@ -1653,8 +1406,6 @@ function setupActionDelegation() {
       case 'deleteTask': deleteTask(id); break;
       case 'approveTask': approveTask(id); break;
       case 'skipTask': skipTask(id); break;
-      case 'pluginAction': pluginAction(id, arg); break;
-      case 'startNewChat': startNewChat(); break;
       case 'generatePlanFromChat': generatePlanFromChat(id); break;
       case 'closeChatSession': closeChatSession(id); break;
       case 'resumeChatSession': resumeChatSession(id); break;
@@ -1662,6 +1413,7 @@ function setupActionDelegation() {
       case 'approvePlan': approvePlan(id); break;
       case 'rejectPlan': rejectPlan(id); break;
       case 'executePlan': executePlan(id); break;
+      case 'newPlanChat': newPlanChat(); break;
       case 'navigate': location.hash = id; break;
     }
   });
@@ -1682,7 +1434,6 @@ function init() {
   $('#menuToggle').addEventListener('click', toggleSidebar);
   // Topbar buttons (no inline onclick — CSP-friendly)
   $('#btnPatrol').addEventListener('click', togglePatrol);
-  $('#btnNewChat').addEventListener('click', startNewChat);
   updatePatrolBtn(false);
 
   // 模态框事件
