@@ -12,6 +12,7 @@ import type { PluginMonitor } from '../plugins/PluginMonitor.js';
 import type { PatrolManager } from '../core/ModeManager.js';
 import type { PlanWorkflow } from '../core/PlanWorkflow.js';
 import { handleRequest } from './routes.js';
+import { createRateLimiter } from './rateLimit.js';
 import { log } from '../utils/logger.js';
 
 const MIME_TYPES: Record<string, string> = {
@@ -26,6 +27,8 @@ const MIME_TYPES: Record<string, string> = {
 
 const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 const BODY_LIMIT_METHODS = new Set(['POST', 'PUT', 'PATCH']);
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 100;
 
 /**
  * Content-Security-Policy directives.
@@ -47,6 +50,7 @@ export const CSP_DIRECTIVES: readonly string[] = [
 export class Server {
   private server: HttpServer;
   private webDir: string;
+  private rateLimiter: (ip: string) => boolean;
 
   constructor(
     private config: Config,
@@ -68,11 +72,25 @@ export class Server {
       this.webDir = join(thisDir, '..', '..', 'src', 'web');
     }
 
+    this.rateLimiter = createRateLimiter(RATE_LIMIT_WINDOW_MS, RATE_LIMIT_MAX_REQUESTS);
+
     const ctx = { loop, taskStore, globalMemory, costTracker, config, evolutionEngine: this.evolutionEngine, pluginMonitor: this.pluginMonitor, patrolManager: this.patrolManager, planWorkflow: this.planWorkflow };
 
     this.server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       this.setSecurityHeaders(res);
       try {
+        if (this.shouldApplyRateLimit(req) && !this.rateLimiter(this.getClientIp(req))) {
+          req.resume();
+          res.writeHead(429, {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+          });
+          res.end(JSON.stringify({ error: 'Too Many Requests' }));
+          return;
+        }
+
         if (!this.isAuthorizedApiRequest(req)) {
           req.resume();
           res.writeHead(401, {
@@ -136,6 +154,36 @@ export class Server {
     if (!matches) return false;
 
     return matches[1] === this.config.values.apiToken;
+  }
+
+  private shouldApplyRateLimit(req: IncomingMessage): boolean {
+    if (!this.isApiRequest(req)) return false;
+
+    const method = req.method?.toUpperCase() ?? 'GET';
+    if (method === 'OPTIONS') return false;
+
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    } catch {
+      return false;
+    }
+
+    return !(method === 'GET' && url.pathname === '/api/health');
+  }
+
+  private getClientIp(req: IncomingMessage): string {
+    const rawForwardedFor = req.headers['x-forwarded-for'];
+    const forwardedFor = Array.isArray(rawForwardedFor) ? rawForwardedFor[0] : rawForwardedFor;
+    if (typeof forwardedFor === 'string') {
+      const firstForwardedIp = forwardedFor.split(',')[0]?.trim();
+      if (firstForwardedIp) {
+        return firstForwardedIp;
+      }
+    }
+
+    const socketIp = req.socket?.remoteAddress?.trim();
+    return socketIp && socketIp.length > 0 ? socketIp : 'unknown';
   }
 
   private isRequestBodyTooLarge(req: IncomingMessage): boolean {

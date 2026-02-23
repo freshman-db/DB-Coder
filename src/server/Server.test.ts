@@ -107,6 +107,60 @@ test('security headers are included on unauthorized API responses', async () => 
   assertSecurityHeaders(state);
 });
 
+test('rate limiter blocks API requests before auth check', async () => {
+  const server = createServer('secret-token');
+  const listener = getRequestListener(server);
+  const { response, state } = createMockResponse();
+  const instance = server as unknown as { rateLimiter: (ip: string) => boolean };
+  let resumed = false;
+
+  instance.rateLimiter = () => false;
+
+  await listener(
+    createMockRequest({
+      method: 'GET',
+      url: '/api/status',
+      headers: { host: 'localhost' },
+      resume: () => {
+        resumed = true;
+      },
+    }),
+    response,
+  );
+
+  assert.equal(resumed, true);
+  assert.equal(state.statusCode, 429);
+  assert.deepEqual(JSON.parse(state.body), { error: 'Too Many Requests' });
+  assertSecurityHeaders(state);
+});
+
+test('rate limiter exempts GET /api/health', async () => {
+  const server = createServer('secret-token');
+  const listener = getRequestListener(server);
+  const { response, state } = createMockResponse();
+  const instance = server as unknown as { rateLimiter: (ip: string) => boolean };
+  let resumed = false;
+
+  instance.rateLimiter = () => false;
+
+  await listener(
+    createMockRequest({
+      method: 'GET',
+      url: '/api/health',
+      headers: { host: 'localhost' },
+      resume: () => {
+        resumed = true;
+      },
+    }),
+    response,
+  );
+
+  assert.equal(resumed, true);
+  assert.equal(state.statusCode, 401);
+  assert.deepEqual(JSON.parse(state.body), { error: 'Unauthorized' });
+  assertSecurityHeaders(state);
+});
+
 test('security headers are included when API request exceeds body limit', async () => {
   const server = createServer('secret-token');
   const listener = getRequestListener(server);

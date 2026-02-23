@@ -116,6 +116,14 @@ test('parseEvaluation returns failed defaults for invalid JSON', () => {
   assert.equal(parsed.score.solutionProportionality, 0);
   assert.equal(parsed.score.expectedComplexity, 0);
   assert.equal(parsed.score.historicalSuccess, 0);
+  assert.equal(parsed.reasoning, 'not json');
+});
+
+test('parseEvaluation uses "Empty evaluation output" for empty input', () => {
+  const parsed = parseEvaluation('');
+
+  assert.equal(parsed.passed, false);
+  assert.equal(parsed.reasoning, 'Empty evaluation output');
 });
 
 test('parseEvaluation treats missing score fields as zero', () => {
