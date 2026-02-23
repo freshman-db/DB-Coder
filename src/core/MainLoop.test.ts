@@ -1693,31 +1693,16 @@ describe('MainLoop runReviewCycle', () => {
     assert.deepEqual(task.review_results, []);
   });
 
-  test('retries fix after failure without committing or re-reviewing failed attempts', async () => {
-    let codexFixCalls = 0;
-    let claudeFixCalls = 0;
-    const addLogCalls: TaskLogInsert[] = [];
+  test('skips cost tracking for zero-cost fixes', async () => {
     const addCostCalls: Array<{ taskId: string; amount: number }> = [];
-    const warnLogs: LogEntry[] = [];
-    const failedFixOutput = 'f'.repeat(620);
+    const addLogCalls: TaskLogInsert[] = [];
+    let codexFixCalls = 0;
 
     const { loop } = createMainLoopForCycle({
       codex: {
         execute: async () => {
           codexFixCalls++;
-          return {
-            success: false,
-            output: failedFixOutput,
-            cost_usd: 0.4,
-            duration_ms: 45,
-            stopReason: 'maxTurns',
-          };
-        },
-      },
-      claude: {
-        execute: async () => {
-          claudeFixCalls++;
-          return { success: true, output: 'claude fix', cost_usd: 0.6, duration_ms: 60 };
+          return { success: true, output: 'zero-cost fix', cost_usd: 0, duration_ms: 32 };
         },
       },
       taskStore: {
@@ -1740,36 +1725,33 @@ describe('MainLoop runReviewCycle', () => {
 
     const firstReview: MergedReviewResult = {
       passed: false,
-      mustFix: [issue('Initial review issue')],
+      mustFix: [issue('needs a no-cost fix')],
       shouldFix: [],
-      summary: 'initial-review',
+      summary: 'needs-fix',
     };
     const finalReview: MergedReviewResult = {
       passed: true,
       mustFix: [],
       shouldFix: [],
-      summary: 'final-review',
+      summary: 'approved',
     };
-    const seenRetryCounts: number[] = [];
 
     reviewInternals.checkBudgetOrAbort = async () => false;
     reviewInternals.buildFixPrompt = async () => 'Fix review issues.';
     reviewInternals.saveReviewEvent = async () => {};
     reviewInternals.dualReview = async (_task, _changedFiles, reviewRetries) => {
-      seenRetryCounts.push(reviewRetries);
-      if (seenRetryCounts.length === 1) {
-        assert.equal(reviewRetries, 0);
+      if (reviewRetries === 0) {
         return { merged: firstReview, decision: 'retry', cost_usd: 0, duration_ms: 0 };
       }
-      assert.equal(reviewRetries, 2);
+      assert.equal(reviewRetries, 1);
       return { merged: finalReview, decision: 'approve', cost_usd: 0, duration_ms: 0 };
     };
 
     const now = new Date();
     const task: Task = {
-      id: 'task-review-fix-retry-after-failure',
+      id: 'task-review-zero-cost-fix',
       project_path: '/tmp/db-coder-main-loop-test',
-      task_description: 'Retry fix when first attempt fails',
+      task_description: 'Skip addCost for zero-cost fix',
       phase: 'executing',
       priority: 1,
       plan: null,
@@ -1785,17 +1767,10 @@ describe('MainLoop runReviewCycle', () => {
       updated_at: now,
     };
 
-    const removeLogListener = log.addListener((entry) => {
-      if (entry.level === 'warn' && entry.message === 'Fix agent failed') {
-        warnLogs.push(entry);
-      }
-    });
-
     let reviewCycleResult: { aborted: true } | { aborted: false; reviewResult: MergedReviewResult; reviewRetries: number };
     try {
       reviewCycleResult = await reviewInternals.runReviewCycle(task, 'HEAD', [], '/tmp/db-coder-main-loop-test');
     } finally {
-      removeLogListener();
       reviewInternals.dualReview = originalDualReview;
       reviewInternals.buildFixPrompt = originalBuildFixPrompt;
       reviewInternals.saveReviewEvent = originalSaveReviewEvent;
@@ -1804,34 +1779,166 @@ describe('MainLoop runReviewCycle', () => {
 
     assert.equal(reviewCycleResult.aborted, false);
     if (reviewCycleResult.aborted) return;
-    assert.equal(reviewCycleResult.reviewRetries, 2);
-    assert.equal(reviewCycleResult.reviewResult.summary, 'final-review');
-    assert.deepEqual(seenRetryCounts, [0, 2]);
     assert.equal(codexFixCalls, 1);
-    assert.equal(claudeFixCalls, 1);
-    assert.deepEqual(addCostCalls, [
-      { taskId: task.id, amount: 0.4 },
-      { taskId: task.id, amount: 0.6 },
-    ]);
+    assert.deepEqual(addCostCalls, []);
+    assert.equal(addLogCalls.length, 1);
+    assert.equal(addLogCalls[0]?.phase, 'fix');
+    assert.equal(addLogCalls[0]?.agent, 'codex');
+    assert.equal(addLogCalls[0]?.cost_usd, 0);
+  });
 
-    const fixLogs = addLogCalls.filter(entry => entry.phase === 'fix');
-    assert.equal(fixLogs.length, 2);
-    assert.equal(fixLogs[0]?.agent, 'codex');
-    assert.equal(fixLogs[0]?.input_summary, 'Fix attempt 1');
-    assert.equal(fixLogs[0]?.output_summary, failedFixOutput.slice(0, 500));
-    assert.equal(fixLogs[0]?.cost_usd, 0.4);
-    assert.equal(fixLogs[1]?.agent, 'claude');
-    assert.equal(fixLogs[1]?.input_summary, 'Fix attempt 2');
-    assert.equal(fixLogs[1]?.output_summary, 'claude fix');
-    assert.equal(fixLogs[1]?.cost_usd, 0.6);
+  test('retries fix after failure without committing or re-reviewing failed attempts', async () => {
+    const { repoPath } = await initGitRepo();
+    writeFileSync(join(repoPath, 'README.md'), 'seed\nretry path change\n');
 
-    assert.ok(
-      warnLogs.some((entry) => {
-        const data = entry.data as { attempt?: number; agent?: string; stopReason?: string } | undefined;
-        return data?.attempt === 1 && data.agent === 'codex' && data.stopReason === 'maxTurns';
-      }),
-      'Expected fix failure warning log with attempt metadata',
-    );
+    let codexFixCalls = 0;
+    let claudeFixCalls = 0;
+    const addLogCalls: TaskLogInsert[] = [];
+    const addCostCalls: Array<{ taskId: string; amount: number }> = [];
+    const warnLogs: LogEntry[] = [];
+    const failedFixOutput = 'f'.repeat(620);
+
+    try {
+      const { loop } = createMainLoopForCycle({
+        config: { projectPath: repoPath },
+        codex: {
+          execute: async () => {
+            codexFixCalls++;
+            return {
+              success: false,
+              output: failedFixOutput,
+              cost_usd: 0.4,
+              duration_ms: 45,
+              stopReason: 'maxTurns',
+            };
+          },
+        },
+        claude: {
+          execute: async () => {
+            claudeFixCalls++;
+            return { success: true, output: 'claude fix', cost_usd: 0.6, duration_ms: 60 };
+          },
+        },
+        taskStore: {
+          addLog: async (entry) => {
+            addLogCalls.push(structuredClone(entry) as TaskLogInsert);
+          },
+        },
+        costTracker: {
+          addCost: async (taskId: string, amount: number) => {
+            addCostCalls.push({ taskId, amount });
+          },
+        },
+      });
+
+      const reviewInternals = getMainLoopReviewInternals(loop);
+      const originalDualReview = reviewInternals.dualReview;
+      const originalBuildFixPrompt = reviewInternals.buildFixPrompt;
+      const originalSaveReviewEvent = reviewInternals.saveReviewEvent;
+      const originalCheckBudgetOrAbort = reviewInternals.checkBudgetOrAbort;
+
+      const firstReview: MergedReviewResult = {
+        passed: false,
+        mustFix: [issue('Initial review issue')],
+        shouldFix: [],
+        summary: 'initial-review',
+      };
+      const finalReview: MergedReviewResult = {
+        passed: true,
+        mustFix: [],
+        shouldFix: [],
+        summary: 'final-review',
+      };
+      const seenRetryCounts: number[] = [];
+
+      reviewInternals.checkBudgetOrAbort = async () => false;
+      reviewInternals.buildFixPrompt = async () => 'Fix review issues.';
+      reviewInternals.saveReviewEvent = async () => {};
+      reviewInternals.dualReview = async (_task, _changedFiles, reviewRetries) => {
+        seenRetryCounts.push(reviewRetries);
+        if (seenRetryCounts.length === 1) {
+          assert.equal(reviewRetries, 0);
+          return { merged: firstReview, decision: 'retry', cost_usd: 0, duration_ms: 0 };
+        }
+        assert.equal(reviewRetries, 2);
+        return { merged: finalReview, decision: 'approve', cost_usd: 0, duration_ms: 0 };
+      };
+
+      const now = new Date();
+      const task: Task = {
+        id: 'task-review-fix-retry-after-failure',
+        project_path: repoPath,
+        task_description: 'Retry fix when first attempt fails',
+        phase: 'executing',
+        priority: 1,
+        plan: null,
+        subtasks: [],
+        review_results: [],
+        iteration: 0,
+        total_cost_usd: 0,
+        git_branch: null,
+        start_commit: null,
+        depends_on: [],
+        status: 'active',
+        created_at: now,
+        updated_at: now,
+      };
+
+      const removeLogListener = log.addListener((entry) => {
+        if (entry.level === 'warn' && entry.message === 'Fix agent failed') {
+          warnLogs.push(entry);
+        }
+      });
+
+      let reviewCycleResult: { aborted: true } | { aborted: false; reviewResult: MergedReviewResult; reviewRetries: number };
+      try {
+        reviewCycleResult = await reviewInternals.runReviewCycle(task, 'HEAD', [], repoPath);
+      } finally {
+        removeLogListener();
+        reviewInternals.dualReview = originalDualReview;
+        reviewInternals.buildFixPrompt = originalBuildFixPrompt;
+        reviewInternals.saveReviewEvent = originalSaveReviewEvent;
+        reviewInternals.checkBudgetOrAbort = originalCheckBudgetOrAbort;
+      }
+
+      assert.equal(reviewCycleResult.aborted, false);
+      if (reviewCycleResult.aborted) return;
+      assert.equal(reviewCycleResult.reviewRetries, 2);
+      assert.equal(reviewCycleResult.reviewResult.summary, 'final-review');
+      assert.deepEqual(seenRetryCounts, [0, 2]);
+      assert.equal(codexFixCalls, 1);
+      assert.equal(claudeFixCalls, 1);
+      assert.deepEqual(addCostCalls, [
+        { taskId: task.id, amount: 0.4 },
+        { taskId: task.id, amount: 0.6 },
+      ]);
+
+      const fixLogs = addLogCalls.filter(entry => entry.phase === 'fix');
+      assert.equal(fixLogs.length, 2);
+      assert.equal(fixLogs[0]?.agent, 'codex');
+      assert.equal(fixLogs[0]?.input_summary, 'Fix attempt 1');
+      assert.equal(fixLogs[0]?.output_summary, failedFixOutput.slice(0, 500));
+      assert.equal(fixLogs[0]?.cost_usd, 0.4);
+      assert.equal(fixLogs[1]?.agent, 'claude');
+      assert.equal(fixLogs[1]?.input_summary, 'Fix attempt 2');
+      assert.equal(fixLogs[1]?.output_summary, 'claude fix');
+      assert.equal(fixLogs[1]?.cost_usd, 0.6);
+
+      const commitSubjects = await runGit(repoPath, ['log', '--pretty=%s', '-5']);
+      const commitMessages = commitSubjects.split('\n').filter(Boolean);
+      assert.ok(commitMessages.includes('db-coder: fix review issues (attempt 2, claude)'));
+      assert.ok(!commitMessages.includes('db-coder: fix review issues (attempt 1, codex)'));
+
+      assert.ok(
+        warnLogs.some((entry) => {
+          const data = entry.data as { attempt?: number; agent?: string; stopReason?: string } | undefined;
+          return data?.attempt === 1 && data.agent === 'codex' && data.stopReason === 'maxTurns';
+        }),
+        'Expected fix failure warning log with attempt metadata',
+      );
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
   });
 
   test('accumulates review_results across retries instead of overwriting prior attempts', async () => {
