@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { extractJsonFromText, isRecord, tryParseJson, tryParseReview } from './parse.js';
+import { extractJsonFromText, getErrorMessage, isRecord, tryParseJson, tryParseReview } from './parse.js';
 
 test('isRecord identifies plain objects and rejects non-objects', () => {
   assert.equal(isRecord({ key: 'value' }), true);
@@ -10,6 +10,15 @@ test('isRecord identifies plain objects and rejects non-objects', () => {
   assert.equal(isRecord(null), false);
   assert.equal(isRecord(undefined), false);
   assert.equal(isRecord('text'), false);
+});
+
+test('getErrorMessage normalizes unknown errors to strings', () => {
+  assert.equal(getErrorMessage(new Error('boom')), 'boom');
+  assert.equal(getErrorMessage('plain message'), 'plain message');
+  assert.equal(getErrorMessage(42), '42');
+  assert.equal(getErrorMessage(null), 'null');
+  assert.equal(getErrorMessage(undefined), 'undefined');
+  assert.equal(getErrorMessage({}), '[object Object]');
 });
 
 test('extractJsonFromText parses clean JSON', () => {

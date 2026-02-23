@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { Memory, Task, TaskStatus } from '../memory/types.js';
+import { getErrorMessage } from '../utils/parse.js';
 
 const MCP_SERVER_NAME = 'db-coder-internal';
 const TASK_STATUSES = ['queued', 'active', 'done', 'failed', 'blocked', 'skipped', 'pending_review'] as const;
@@ -31,7 +32,7 @@ function createToolSuccess(message: string, structuredContent?: unknown): ToolRe
 }
 
 function createToolError(toolName: string, error: unknown): ToolResponse {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = getErrorMessage(error);
   return {
     content: [{ type: 'text', text: `${toolName} failed: ${message}` }],
     isError: true,
