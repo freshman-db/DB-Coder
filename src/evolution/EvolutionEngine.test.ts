@@ -4,27 +4,9 @@ import type { Config } from '../config/Config.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { ProjectAnalysis, RecurringIssueCategory, ReviewEvent, Task } from '../memory/types.js';
-import type { HealthTrend, PromptPatch, PromptVersion } from './types.js';
+import type { PromptPatch, PromptVersion } from './types.js';
 import type { TrendAnalyzer } from './TrendAnalyzer.js';
 import { EvolutionEngine } from './EvolutionEngine.js';
-
-type EvaluationEventSummary = {
-  total: number;
-  passed: number;
-  failed: number;
-  avgTotal: number;
-};
-
-type MetaReflectData = {
-  reviewEvents: ReviewEvent[];
-  recentTasks: Task[];
-  healthTrend: HealthTrend | null;
-  activeVersions: PromptVersion[];
-  passRate: number;
-  avgCost: number;
-  issueCategories: RecurringIssueCategory[];
-  evaluationStats: EvaluationEventSummary;
-};
 
 type ParsedMetaReflectOutput = {
   patches: Array<{
@@ -37,8 +19,7 @@ type ParsedMetaReflectOutput = {
 };
 
 type EvolutionEngineInternals = {
-  collectMetaReflectData(projectPath: string): Promise<MetaReflectData>;
-  buildMetaReflectPrompt(data: MetaReflectData): string;
+  buildMetaReflectPrompt(): string;
   storeProposedPatches(
     parsed: ParsedMetaReflectOutput,
     projectPath: string,
@@ -87,22 +68,8 @@ function createEvolutionEngine(
   );
 }
 
-function makeMetaReflectData(overrides: Partial<MetaReflectData> = {}): MetaReflectData {
-  return {
-    reviewEvents: [],
-    recentTasks: [],
-    healthTrend: null,
-    activeVersions: [],
-    passRate: 1,
-    avgCost: 0,
-    issueCategories: [],
-    evaluationStats: { total: 0, passed: 0, failed: 0, avgTotal: 0 },
-    ...overrides,
-  };
-}
-
 describe('EvolutionEngine.metaReflect', () => {
-  test('orchestrates collect, prompt build, plan, parse, and storage in order', async () => {
+  test('orchestrates prompt build, plan with MCP server, parse, and storage in order', async () => {
     const calls: string[] = [];
     let billedCost = 0;
 
@@ -113,7 +80,6 @@ describe('EvolutionEngine.metaReflect', () => {
     };
 
     const engine = createEvolutionEngine(taskStore, {});
-    const data = makeMetaReflectData();
     const parsed: ParsedMetaReflectOutput = {
       patches: [{
         promptName: 'plan',
@@ -124,13 +90,7 @@ describe('EvolutionEngine.metaReflect', () => {
       analysis: 'Plan checks are weak.',
     };
 
-    (engine as any).collectMetaReflectData = async (projectPath: string) => {
-      assert.equal(projectPath, '/repo');
-      calls.push('collectData');
-      return data;
-    };
-    (engine as any).buildMetaReflectPrompt = (metaReflectData: MetaReflectData) => {
-      assert.equal(metaReflectData, data);
+    (engine as any).buildMetaReflectPrompt = () => {
       calls.push('buildPrompt');
       return 'meta prompt';
     };
@@ -151,10 +111,11 @@ describe('EvolutionEngine.metaReflect', () => {
     };
 
     const claude = {
-      plan: async (prompt: string, cwd: string, options: { maxTurns: number }) => {
+      plan: async (prompt: string, cwd: string, options: { maxTurns: number; internalMcpServers?: Record<string, unknown> }) => {
         assert.equal(prompt, 'meta prompt');
         assert.equal(cwd, '/repo');
-        assert.deepEqual(options, { maxTurns: 5 });
+        assert.equal(options.maxTurns, 10);
+        assert.ok(options.internalMcpServers?.['db-coder-system-data'], 'should pass MCP server');
         calls.push('claudePlan');
         return {
           success: true,
@@ -167,7 +128,7 @@ describe('EvolutionEngine.metaReflect', () => {
 
     await engine.metaReflect('/repo', claude as any);
 
-    assert.deepEqual(calls, ['collectData', 'buildPrompt', 'claudePlan', 'parseOutput', 'storePatches']);
+    assert.deepEqual(calls, ['buildPrompt', 'claudePlan', 'parseOutput', 'storePatches']);
     assert.equal(billedCost, 1.23);
   });
 
@@ -182,10 +143,6 @@ describe('EvolutionEngine.metaReflect', () => {
     };
     const engine = createEvolutionEngine(taskStore, {});
 
-    (engine as any).collectMetaReflectData = async () => {
-      calls.push('collectData');
-      return makeMetaReflectData();
-    };
     (engine as any).buildMetaReflectPrompt = () => {
       calls.push('buildPrompt');
       return 'meta prompt';
@@ -199,7 +156,8 @@ describe('EvolutionEngine.metaReflect', () => {
     };
 
     const claude = {
-      plan: async () => {
+      plan: async (_prompt: string, _cwd: string, options: { internalMcpServers?: Record<string, unknown> }) => {
+        assert.ok(options.internalMcpServers?.['db-coder-system-data']);
         calls.push('claudePlan');
         return {
           success: true,
@@ -212,294 +170,30 @@ describe('EvolutionEngine.metaReflect', () => {
 
     await engine.metaReflect('/repo', claude as any);
 
-    assert.deepEqual(calls, ['collectData', 'buildPrompt', 'claudePlan', 'parseOutput']);
+    assert.deepEqual(calls, ['buildPrompt', 'claudePlan', 'parseOutput']);
     assert.equal(billedCost, 0);
   });
 });
 
-describe('EvolutionEngine.collectMetaReflectData', () => {
-  test('collects review/task metrics and returns the composed payload', async () => {
-    const reviewEvents: ReviewEvent[] = [
-      {
-        id: 1,
-        task_id: 'task-1',
-        attempt: 1,
-        passed: true,
-        must_fix_count: 0,
-        should_fix_count: 1,
-        issue_categories: ['style'],
-        fix_agent: null,
-        duration_ms: 100,
-        cost_usd: 0.03,
-        created_at: new Date('2026-01-01T00:00:00.000Z'),
-      },
-      {
-        id: 2,
-        task_id: 'task-2',
-        attempt: 1,
-        passed: false,
-        must_fix_count: 2,
-        should_fix_count: 0,
-        issue_categories: ['null-safety'],
-        fix_agent: 'codex',
-        duration_ms: 200,
-        cost_usd: 0.04,
-        created_at: new Date('2026-01-01T00:01:00.000Z'),
-      },
-      {
-        id: 3,
-        task_id: 'task-3',
-        attempt: 2,
-        passed: true,
-        must_fix_count: 0,
-        should_fix_count: 0,
-        issue_categories: [],
-        fix_agent: 'claude',
-        duration_ms: 150,
-        cost_usd: 0.05,
-        created_at: new Date('2026-01-01T00:02:00.000Z'),
-      },
-    ];
-
-    const recentTasks = Array.from({ length: 25 }, (_, index) => makeTask(index + 1, index + 1));
-
-    const healthTrend: HealthTrend = {
-      current: 84,
-      previous: 80,
-      delta: 4,
-      direction: 'improving',
-      dataPoints: 10,
-    };
-
-    const activeVersions: PromptVersion[] = [
-      {
-        id: 7,
-        project_path: '/repo',
-        prompt_name: 'scan',
-        version: 2,
-        patches: [{ op: 'append', content: 'Add one checklist item.', reason: 'Reduce missed issues.' }],
-        rationale: 'Improve scan consistency',
-        confidence: 0.82,
-        effectiveness: 0.15,
-        status: 'active',
-        baseline_metrics: { passRate: 0.6, avgCostUsd: 1.2, issueCount: 12, tasksEvaluated: 10 },
-        current_metrics: { passRate: 0.75, avgCostUsd: 1.1, issueCount: 9, tasksEvaluated: 8 },
-        tasks_evaluated: 8,
-        activated_at: new Date('2026-01-02T00:00:00.000Z'),
-        created_at: new Date('2026-01-01T00:00:00.000Z'),
-        updated_at: new Date('2026-01-02T00:00:00.000Z'),
-      },
-    ];
-
-    const issueCategories: RecurringIssueCategory[] = [
-      { category: 'null-safety', count: 4 },
-      { category: 'type-error', count: 3 },
-    ];
-
-    const evalEvents = [
-      {
-        id: 1, task_id: 'task-1', passed: true,
-        score: { problemLegitimacy: 2, solutionProportionality: 1, expectedComplexity: 1, historicalSuccess: 1, total: 5 },
-        reasoning: 'ok', cost_usd: 0.01, duration_ms: 50, created_at: new Date('2026-01-01'),
-      },
-      {
-        id: 2, task_id: 'task-2', passed: false,
-        score: { problemLegitimacy: -1, solutionProportionality: 0, expectedComplexity: -1, historicalSuccess: -1, total: -3 },
-        reasoning: 'bad', cost_usd: 0.01, duration_ms: 40, created_at: new Date('2026-01-01'),
-      },
-    ];
-
-    const taskStore: Partial<TaskStore> = {
-      getRecentReviewEvents: async (projectPath: string, limit = 20) => {
-        assert.equal(projectPath, '/repo');
-        assert.equal(limit, 20);
-        return reviewEvents;
-      },
-      listTasks: async (projectPath: string, status) => {
-        assert.equal(projectPath, '/repo');
-        assert.equal(status, 'done');
-        return recentTasks;
-      },
-      getActivePromptVersions: async (projectPath: string) => {
-        assert.equal(projectPath, '/repo');
-        return activeVersions;
-      },
-      getRecurringIssueCategories: async (projectPath: string, limit = 10) => {
-        assert.equal(projectPath, '/repo');
-        assert.equal(limit, 10);
-        return issueCategories;
-      },
-      getRecentEvaluationEvents: async (projectPath: string, limit = 20) => {
-        assert.equal(projectPath, '/repo');
-        assert.equal(limit, 20);
-        return evalEvents;
-      },
-    };
-
-    const trendAnalyzer: Partial<TrendAnalyzer> = {
-      getHealthTrend: async (projectPath: string) => {
-        assert.equal(projectPath, '/repo');
-        return healthTrend;
-      },
-    };
-
-    const engine = createEvolutionEngine(taskStore, trendAnalyzer);
-    const internals = engine as unknown as EvolutionEngineInternals;
-    const result = await internals.collectMetaReflectData('/repo');
-
-    const expectedPassRate = reviewEvents.filter(event => event.passed).length / reviewEvents.length;
-    const expectedAvgCost = recentTasks.slice(-20).reduce((sum, task) => sum + task.total_cost_usd, 0) / 20;
-
-    assert.deepEqual(result.reviewEvents, reviewEvents);
-    assert.deepEqual(result.recentTasks, recentTasks);
-    assert.deepEqual(result.healthTrend, healthTrend);
-    assert.deepEqual(result.activeVersions, activeVersions);
-    assert.equal(result.passRate, expectedPassRate);
-    assert.equal(result.avgCost, expectedAvgCost);
-    assert.deepEqual(result.issueCategories, issueCategories);
-    assert.deepEqual(result.evaluationStats, { total: 2, passed: 1, failed: 1, avgTotal: 1 });
-  });
-
-  test('throws when projectPath is nullish or empty', async () => {
-    const engine = createEvolutionEngine({}, {});
-    const internals = engine as unknown as EvolutionEngineInternals;
-
-    await assert.rejects(
-      internals.collectMetaReflectData(undefined as unknown as string),
-      /projectPath is required for meta-reflection/,
-    );
-
-    await assert.rejects(
-      internals.collectMetaReflectData(null as unknown as string),
-      /projectPath is required for meta-reflection/,
-    );
-
-    await assert.rejects(
-      internals.collectMetaReflectData('   '),
-      /projectPath is required for meta-reflection/,
-    );
-  });
-});
-
 describe('EvolutionEngine.buildMetaReflectPrompt', () => {
-  test('builds a prompt with metrics, active patches, and recent failures', () => {
-    const data: MetaReflectData = {
-      reviewEvents: [
-        {
-          id: 1,
-          task_id: 'task-12345678',
-          attempt: 1,
-          passed: false,
-          must_fix_count: 2,
-          should_fix_count: 1,
-          issue_categories: ['null-safety', 'types'],
-          fix_agent: null,
-          duration_ms: 50,
-          cost_usd: 0.02,
-          created_at: new Date('2026-01-01T00:00:00.000Z'),
-        },
-        {
-          id: 2,
-          task_id: 'task-99999999',
-          attempt: 1,
-          passed: true,
-          must_fix_count: 0,
-          should_fix_count: 0,
-          issue_categories: [],
-          fix_agent: null,
-          duration_ms: 40,
-          cost_usd: 0.01,
-          created_at: new Date('2026-01-01T00:01:00.000Z'),
-        },
-      ],
-      recentTasks: [makeTask(1, 1.11), makeTask(2, 2.22)],
-      healthTrend: {
-        current: 77,
-        previous: 80,
-        delta: -3,
-        direction: 'degrading',
-        dataPoints: 10,
-      },
-      activeVersions: [
-        {
-          id: 10,
-          project_path: '/repo',
-          prompt_name: 'scan',
-          version: 3,
-          patches: [{ op: 'append', content: 'Validate nulls.', reason: 'Reduce runtime errors.' }],
-          rationale: 'Guard null access',
-          confidence: 0.74,
-          effectiveness: 0.236,
-          status: 'active',
-          baseline_metrics: null,
-          current_metrics: null,
-          tasks_evaluated: 5,
-          activated_at: new Date('2026-01-02T00:00:00.000Z'),
-          created_at: new Date('2026-01-01T00:00:00.000Z'),
-          updated_at: new Date('2026-01-02T00:00:00.000Z'),
-        },
-      ],
-      passRate: 0.5,
-      avgCost: 0.6789,
-      issueCategories: [{ category: 'null-safety', count: 4 }],
-      evaluationStats: { total: 10, passed: 7, failed: 3, avgTotal: 4.5 },
-    };
-
+  test('builds a prompt that instructs Claude to use MCP tools', () => {
     const engine = createEvolutionEngine({}, {});
     const internals = engine as unknown as EvolutionEngineInternals;
-    const prompt = internals.buildMetaReflectPrompt(data);
+    const prompt = internals.buildMetaReflectPrompt();
 
-    assert.match(prompt, /Review pass rate: 50\.0%/);
-    assert.match(prompt, /Average task cost: \$0\.6789/);
-    assert.match(prompt, /Health trend: degrading \(77\/100\)/);
-    assert.match(prompt, /Recurring issue categories: null-safety\(4\)/);
-    assert.match(prompt, /Total completed tasks: 2/);
-    assert.match(prompt, /- scan v3: effectiveness=0\.24, tasks=5/);
-    assert.match(prompt, /Task task-123: must_fix=2, should_fix=1, categories=\["null-safety","types"\]/);
-    assert.match(prompt, /Total evaluations: 10/);
-    assert.match(prompt, /Passed: 7, Rejected: 3/);
-    assert.match(prompt, /Average score: 4\.5\/8/);
-  });
-
-  test('uses safe defaults when fields are nullish or invalid', () => {
-    const data = {
-      reviewEvents: null,
-      recentTasks: undefined,
-      healthTrend: null,
-      activeVersions: undefined,
-      passRate: Number.NaN,
-      avgCost: Number.NaN,
-      issueCategories: null,
-    } as unknown as MetaReflectData;
-
-    const engine = createEvolutionEngine({}, {});
-    const internals = engine as unknown as EvolutionEngineInternals;
-    const prompt = internals.buildMetaReflectPrompt(data);
-
-    assert.match(prompt, /Review pass rate: 0\.0%/);
-    assert.match(prompt, /Average task cost: \$0\.0000/);
-    assert.match(prompt, /Health trend: unknown \(N\/A\/100\)/);
-    assert.match(prompt, /Recurring issue categories: none/);
-    assert.match(prompt, /Total completed tasks: 0/);
-    assert.match(prompt, /No active prompt patches\./);
-    assert.match(prompt, /## Recent Review Failures\nNone/);
-    assert.match(prompt, /Total evaluations: 0/);
-    assert.match(prompt, /No evaluations yet/);
-  });
-
-  test('throws when data is nullish', () => {
-    const engine = createEvolutionEngine({}, {});
-    const internals = engine as unknown as EvolutionEngineInternals;
-
-    assert.throws(
-      () => internals.buildMetaReflectPrompt(undefined as unknown as MetaReflectData),
-      /meta-reflect data is required to build prompt/,
-    );
-
-    assert.throws(
-      () => internals.buildMetaReflectPrompt(null as unknown as MetaReflectData),
-      /meta-reflect data is required to build prompt/,
-    );
+    assert.match(prompt, /get_health_trend/);
+    assert.match(prompt, /get_task_detail/);
+    assert.match(prompt, /get_review_details/);
+    assert.match(prompt, /get_adjustment_summary/);
+    assert.match(prompt, /get_prompt_versions/);
+    assert.match(prompt, /get_cost_trend/);
+    assert.match(prompt, /get_goal_progress/);
+    assert.match(prompt, /get_recent_tasks/);
+    assert.match(prompt, /get_task_logs/);
+    assert.match(prompt, /search_memories/);
+    assert.match(prompt, /Available Prompt Names/);
+    assert.match(prompt, /brain_system, scan, plan, reflect, executor, reviewer, evaluator/);
+    assert.match(prompt, /"patches"/);
   });
 });
 

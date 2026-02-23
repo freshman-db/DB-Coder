@@ -166,6 +166,237 @@ export function createSystemDataMcpServer(deps: SystemDataMcpDeps) {
           }
         },
       ),
+
+      tool(
+        'get_task_detail',
+        'Get full details of a single task including plan, subtasks, review results, and execution logs.',
+        { task_id: z.string().min(1) },
+        async ({ task_id }) => {
+          try {
+            const [task, logs, reviews] = await Promise.all([
+              taskStore.getTask(task_id),
+              taskStore.getTaskLogs(task_id),
+              taskStore.getReviewEvents(task_id),
+            ]);
+            if (!task) return success(`Task ${task_id} not found.`, null);
+            return success(`Task ${task_id}: ${task.status}`, {
+              id: task.id,
+              description: task.task_description,
+              status: task.status,
+              phase: task.phase,
+              priority: task.priority,
+              plan: task.plan,
+              subtasks: task.subtasks,
+              reviewResults: task.review_results,
+              iteration: task.iteration,
+              costUsd: task.total_cost_usd,
+              gitBranch: task.git_branch,
+              dependsOn: task.depends_on,
+              createdAt: task.created_at instanceof Date ? task.created_at.toISOString() : String(task.created_at),
+              logs: logs.map(l => ({
+                phase: l.phase,
+                agent: l.agent,
+                input: l.input_summary,
+                output: l.output_summary,
+                costUsd: l.cost_usd,
+                durationMs: l.duration_ms,
+                date: l.created_at instanceof Date ? l.created_at.toISOString() : String(l.created_at),
+              })),
+              reviews: reviews.map(r => ({
+                attempt: r.attempt,
+                passed: r.passed,
+                mustFixCount: r.must_fix_count,
+                shouldFixCount: r.should_fix_count,
+                issueCategories: r.issue_categories,
+                fixAgent: r.fix_agent,
+                costUsd: r.cost_usd,
+              })),
+            });
+          } catch (e) {
+            return error('get_task_detail', e);
+          }
+        },
+      ),
+
+      tool(
+        'get_recent_tasks',
+        'Get recent tasks with full descriptions. Optionally filter by status.',
+        {
+          limit: z.number().int().min(1).max(50).optional(),
+          status: z.enum(['queued', 'active', 'done', 'failed', 'blocked', 'skipped', 'pending_review']).optional(),
+        },
+        async ({ limit, status }) => {
+          try {
+            const tasks = await taskStore.listTasks(projectPath, status);
+            const sliced = tasks.slice(0, limit ?? 20);
+            const mapped = sliced.map(t => ({
+              id: t.id,
+              description: t.task_description,
+              status: t.status,
+              phase: t.phase,
+              priority: t.priority,
+              costUsd: t.total_cost_usd,
+              createdAt: t.created_at instanceof Date ? t.created_at.toISOString() : String(t.created_at),
+            }));
+            return success(`${mapped.length} task(s).`, { tasks: mapped });
+          } catch (e) {
+            return error('get_recent_tasks', e);
+          }
+        },
+      ),
+
+      tool(
+        'get_task_logs',
+        'Get execution logs for a task showing each phase\'s input/output/cost/duration.',
+        { task_id: z.string().min(1) },
+        async ({ task_id }) => {
+          try {
+            const logs = await taskStore.getTaskLogs(task_id);
+            const mapped = logs.map(l => ({
+              phase: l.phase,
+              agent: l.agent,
+              input: l.input_summary,
+              output: l.output_summary,
+              costUsd: l.cost_usd,
+              durationMs: l.duration_ms,
+              date: l.created_at instanceof Date ? l.created_at.toISOString() : String(l.created_at),
+            }));
+            return success(`${mapped.length} log(s) for task ${task_id}.`, { logs: mapped });
+          } catch (e) {
+            return error('get_task_logs', e);
+          }
+        },
+      ),
+
+      tool(
+        'get_review_details',
+        'Get all review rounds for a single task with issue details.',
+        { task_id: z.string().min(1) },
+        async ({ task_id }) => {
+          try {
+            const reviews = await taskStore.getReviewEvents(task_id);
+            const mapped = reviews.map(r => ({
+              attempt: r.attempt,
+              passed: r.passed,
+              mustFixCount: r.must_fix_count,
+              shouldFixCount: r.should_fix_count,
+              issueCategories: r.issue_categories,
+              fixAgent: r.fix_agent,
+              durationMs: r.duration_ms,
+              costUsd: r.cost_usd,
+              date: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+            }));
+            return success(`${mapped.length} review(s) for task ${task_id}.`, { reviews: mapped });
+          } catch (e) {
+            return error('get_review_details', e);
+          }
+        },
+      ),
+
+      tool(
+        'get_adjustment_summary',
+        'Get currently active adjustments with effectiveness scores and categories.',
+        { limit: z.number().int().min(1).max(50).optional() },
+        async ({ limit }) => {
+          try {
+            const adjustments = await taskStore.getActiveAdjustments(projectPath, limit ?? 20);
+            const mapped = adjustments.map(a => ({
+              id: a.id,
+              text: a.text,
+              category: a.category,
+              effectiveness: a.effectiveness,
+              taskId: a.task_id,
+              createdAt: a.created_at instanceof Date ? a.created_at.toISOString() : String(a.created_at),
+            }));
+            return success(`${mapped.length} active adjustment(s).`, { adjustments: mapped });
+          } catch (e) {
+            return error('get_adjustment_summary', e);
+          }
+        },
+      ),
+
+      tool(
+        'get_prompt_versions',
+        'Get prompt patch history. Without prompt_name returns all active versions; with it returns version history.',
+        { prompt_name: z.string().optional() },
+        async ({ prompt_name }) => {
+          try {
+            if (prompt_name) {
+              const history = await taskStore.getPromptVersionHistory(projectPath, prompt_name as any, 20);
+              const mapped = history.map(v => ({
+                version: v.version,
+                status: v.status,
+                patches: v.patches,
+                rationale: v.rationale,
+                confidence: v.confidence,
+                effectiveness: v.effectiveness,
+                tasksEvaluated: v.tasks_evaluated,
+                baselineMetrics: v.baseline_metrics,
+                currentMetrics: v.current_metrics,
+                activatedAt: v.activated_at instanceof Date ? v.activated_at.toISOString() : v.activated_at ? String(v.activated_at) : null,
+                createdAt: v.created_at instanceof Date ? v.created_at.toISOString() : String(v.created_at),
+              }));
+              return success(`${mapped.length} version(s) for "${prompt_name}".`, { versions: mapped });
+            }
+            const active = await taskStore.getActivePromptVersions(projectPath);
+            const mapped = active.map(v => ({
+              promptName: v.prompt_name,
+              version: v.version,
+              effectiveness: v.effectiveness,
+              tasksEvaluated: v.tasks_evaluated,
+              confidence: v.confidence,
+              activatedAt: v.activated_at instanceof Date ? v.activated_at.toISOString() : v.activated_at ? String(v.activated_at) : null,
+            }));
+            return success(`${mapped.length} active prompt version(s).`, { versions: mapped });
+          } catch (e) {
+            return error('get_prompt_versions', e);
+          }
+        },
+      ),
+
+      tool(
+        'get_cost_trend',
+        'Get daily cost trend showing spending over recent days.',
+        { days: z.number().int().min(1).max(90).optional() },
+        async ({ days }) => {
+          try {
+            const costs = await taskStore.getRecentCosts(days ?? 7);
+            return success(`${costs.length} day(s) of cost data.`, { costs });
+          } catch (e) {
+            return error('get_cost_trend', e);
+          }
+        },
+      ),
+
+      tool(
+        'get_goal_progress',
+        'Get evolution goal progress. Without goal_index returns latest progress for all goals; with it returns history for that goal.',
+        { goal_index: z.number().int().min(0).optional() },
+        async ({ goal_index }) => {
+          try {
+            if (goal_index !== undefined) {
+              const history = await taskStore.getGoalProgressHistory(projectPath, goal_index, 10);
+              const mapped = history.map(g => ({
+                progressPct: g.progress_pct,
+                evidence: g.evidence,
+                scanId: g.scan_id,
+                date: g.created_at instanceof Date ? g.created_at.toISOString() : String(g.created_at),
+              }));
+              return success(`${mapped.length} progress record(s) for goal #${goal_index}.`, { history: mapped });
+            }
+            const latest = await taskStore.getLatestGoalProgress(projectPath);
+            const mapped = latest.map(g => ({
+              goalIndex: g.goal_index,
+              progressPct: g.progress_pct,
+              evidence: g.evidence,
+              date: g.created_at instanceof Date ? g.created_at.toISOString() : String(g.created_at),
+            }));
+            return success(`${mapped.length} goal(s) with progress.`, { goals: mapped });
+          } catch (e) {
+            return error('get_goal_progress', e);
+          }
+        },
+      ),
     ],
   });
 }

@@ -3,7 +3,8 @@ import test from 'node:test';
 
 import { createSystemDataMcpServer, type SystemDataMcpDeps } from '../SystemDataMcp.js';
 import type { EvaluationScore } from '../../core/types.js';
-import type { Memory, RecurringIssueCategory, ReviewEvent, ScanResult, Task, TaskStatus } from '../../memory/types.js';
+import type { Memory, RecurringIssueCategory, ReviewEvent, ScanResult, Task, TaskLog, TaskStatus } from '../../memory/types.js';
+import type { Adjustment, GoalProgress, PromptVersion } from '../../evolution/types.js';
 
 type ToolResult = {
   content: Array<{ type: string; text: string }>;
@@ -27,6 +28,15 @@ type GetRecurringIssueCategoriesFn = SystemDataMcpDeps['taskStore']['getRecurrin
 type ListTasksFn = SystemDataMcpDeps['taskStore']['listTasks'];
 type GetRecentEvaluationEventsFn = SystemDataMcpDeps['taskStore']['getRecentEvaluationEvents'];
 type SearchMemoriesFn = SystemDataMcpDeps['globalMemory']['search'];
+type GetTaskFn = SystemDataMcpDeps['taskStore']['getTask'];
+type GetTaskLogsFn = SystemDataMcpDeps['taskStore']['getTaskLogs'];
+type GetReviewEventsFn = SystemDataMcpDeps['taskStore']['getReviewEvents'];
+type GetActiveAdjustmentsFn = SystemDataMcpDeps['taskStore']['getActiveAdjustments'];
+type GetActivePromptVersionsFn = SystemDataMcpDeps['taskStore']['getActivePromptVersions'];
+type GetPromptVersionHistoryFn = SystemDataMcpDeps['taskStore']['getPromptVersionHistory'];
+type GetRecentCostsFn = SystemDataMcpDeps['taskStore']['getRecentCosts'];
+type GetLatestGoalProgressFn = SystemDataMcpDeps['taskStore']['getLatestGoalProgress'];
+type GetGoalProgressHistoryFn = SystemDataMcpDeps['taskStore']['getGoalProgressHistory'];
 type EvaluationEvent = Awaited<ReturnType<GetRecentEvaluationEventsFn>>[number];
 
 function createScanRecord(overrides: Partial<ScanResult> = {}): ScanResult {
@@ -109,6 +119,70 @@ function createEvaluationEvent(overrides: Partial<EvaluationEvent> = {}): Evalua
   };
 }
 
+function createTaskLogRecord(overrides: Partial<TaskLog> = {}): TaskLog {
+  return {
+    id: 1,
+    task_id: 'task-1',
+    phase: 'execute',
+    agent: 'claude',
+    input_summary: 'Fix the bug',
+    output_summary: 'Bug fixed',
+    cost_usd: 0.5,
+    duration_ms: 3000,
+    created_at: new Date('2026-02-01T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+function createAdjustmentRecord(overrides: Partial<Adjustment> = {}): Adjustment {
+  return {
+    id: 1,
+    project_path: '/repo',
+    task_id: null,
+    text: 'Always validate inputs',
+    category: 'standard',
+    effectiveness: 0.5,
+    status: 'active',
+    created_at: new Date('2026-02-01T00:00:00.000Z'),
+    updated_at: new Date('2026-02-01T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+function createPromptVersionRecord(overrides: Partial<PromptVersion> = {}): PromptVersion {
+  return {
+    id: 1,
+    project_path: '/repo',
+    prompt_name: 'scan',
+    version: 1,
+    patches: [{ op: 'append', content: 'Check nulls.', reason: 'Safety.' }],
+    rationale: 'Improve safety',
+    confidence: 0.8,
+    effectiveness: 0.1,
+    status: 'active',
+    baseline_metrics: null,
+    current_metrics: null,
+    tasks_evaluated: 5,
+    activated_at: new Date('2026-02-01T00:00:00.000Z'),
+    created_at: new Date('2026-01-15T00:00:00.000Z'),
+    updated_at: new Date('2026-02-01T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+function createGoalProgressRecord(overrides: Partial<GoalProgress> = {}): GoalProgress {
+  return {
+    id: 1,
+    project_path: '/repo',
+    goal_index: 0,
+    progress_pct: 45,
+    evidence: '3 related tasks done',
+    scan_id: 1,
+    created_at: new Date('2026-02-01T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
 function createMemoryRecord(overrides: Partial<Memory> = {}): Memory {
   return {
     id: 1,
@@ -143,71 +217,88 @@ function createServer(overrides: {
   listTasks?: ListTasksFn;
   getRecentEvaluationEvents?: GetRecentEvaluationEventsFn;
   searchMemories?: SearchMemoriesFn;
+  getTask?: GetTaskFn;
+  getTaskLogs?: GetTaskLogsFn;
+  getReviewEvents?: GetReviewEventsFn;
+  getActiveAdjustments?: GetActiveAdjustmentsFn;
+  getActivePromptVersions?: GetActivePromptVersionsFn;
+  getPromptVersionHistory?: GetPromptVersionHistoryFn;
+  getRecentCosts?: GetRecentCostsFn;
+  getLatestGoalProgress?: GetLatestGoalProgressFn;
+  getGoalProgressHistory?: GetGoalProgressHistoryFn;
 } = {}): {
   server: ReturnType<typeof createSystemDataMcpServer>;
-  calls: {
-    getRecentScans: Array<{ projectPath: string; limit: number }>;
-    getRecentReviewEvents: Array<{ projectPath: string; limit: number }>;
-    getRecurringIssueCategories: Array<{ projectPath: string; limit: number }>;
-    listTasks: Array<{ projectPath: string; status: TaskStatus | undefined }>;
-    getRecentEvaluationEvents: Array<{ projectPath: string; limit: number }>;
-    searchMemories: Array<{ query: string; limit: number }>;
-  };
+  calls: Record<string, unknown[]>;
 } {
-  const calls = {
-    getRecentScans: [] as Array<{ projectPath: string; limit: number }>,
-    getRecentReviewEvents: [] as Array<{ projectPath: string; limit: number }>,
-    getRecurringIssueCategories: [] as Array<{ projectPath: string; limit: number }>,
-    listTasks: [] as Array<{ projectPath: string; status: TaskStatus | undefined }>,
-    getRecentEvaluationEvents: [] as Array<{ projectPath: string; limit: number }>,
-    searchMemories: [] as Array<{ query: string; limit: number }>,
-  };
-
-  const getRecentScansImpl: GetRecentScansFn = overrides.getRecentScans
-    ?? (async (_projectPath, limit = 10) => [createScanRecord()].slice(0, limit));
-
-  const getRecentReviewEventsImpl: GetRecentReviewEventsFn = overrides.getRecentReviewEvents
-    ?? (async (_projectPath, limit = 20) => [createReviewEvent()].slice(0, limit));
-
-  const getRecurringIssueCategoriesImpl: GetRecurringIssueCategoriesFn = overrides.getRecurringIssueCategories
-    ?? (async (_projectPath, _limit = 10) => [{ category: 'quality', count: 1 }]);
-
-  const listTasksImpl: ListTasksFn = overrides.listTasks
-    ?? (async (_projectPath, status) => [createTaskRecord({ status: status ?? 'done' })]);
-
-  const getRecentEvaluationEventsImpl: GetRecentEvaluationEventsFn = overrides.getRecentEvaluationEvents
-    ?? (async (_projectPath, limit = 20) => [createEvaluationEvent()].slice(0, limit));
-
-  const searchMemoriesImpl: SearchMemoriesFn = overrides.searchMemories
-    ?? (async (_query, limit = 10) => [createMemoryRecord()].slice(0, limit));
+  const calls: Record<string, unknown[]> = {};
+  function track(name: string, args: unknown) {
+    if (!calls[name]) calls[name] = [];
+    calls[name].push(args);
+  }
 
   const taskStore: SystemDataMcpDeps['taskStore'] = {
-    async getRecentScans(projectPath: string, limit = 10): Promise<ScanResult[]> {
-      calls.getRecentScans.push({ projectPath, limit });
-      return getRecentScansImpl(projectPath, limit);
+    async getRecentScans(projectPath: string, limit = 10) {
+      track('getRecentScans', { projectPath, limit });
+      return (overrides.getRecentScans ?? (async (_p, l = 10) => [createScanRecord()].slice(0, l)))(projectPath, limit);
     },
-    async getRecentReviewEvents(projectPath: string, limit = 20): Promise<ReviewEvent[]> {
-      calls.getRecentReviewEvents.push({ projectPath, limit });
-      return getRecentReviewEventsImpl(projectPath, limit);
+    async getRecentReviewEvents(projectPath: string, limit = 20) {
+      track('getRecentReviewEvents', { projectPath, limit });
+      return (overrides.getRecentReviewEvents ?? (async (_p, l = 20) => [createReviewEvent()].slice(0, l)))(projectPath, limit);
     },
-    async getRecurringIssueCategories(projectPath: string, limit = 10): Promise<RecurringIssueCategory[]> {
-      calls.getRecurringIssueCategories.push({ projectPath, limit });
-      return getRecurringIssueCategoriesImpl(projectPath, limit);
+    async getRecurringIssueCategories(projectPath: string, limit = 10) {
+      track('getRecurringIssueCategories', { projectPath, limit });
+      return (overrides.getRecurringIssueCategories ?? (async () => [{ category: 'quality', count: 1 }]))(projectPath, limit);
     },
-    async listTasks(projectPath: string, status?: TaskStatus): Promise<Task[]> {
-      calls.listTasks.push({ projectPath, status });
-      return listTasksImpl(projectPath, status);
+    async listTasks(projectPath: string, status?: TaskStatus) {
+      track('listTasks', { projectPath, status });
+      return (overrides.listTasks ?? (async (_p, s) => [createTaskRecord({ status: s ?? 'done' })]))(projectPath, status);
     },
-    async getRecentEvaluationEvents(projectPath: string, limit = 20): Promise<EvaluationEvent[]> {
-      calls.getRecentEvaluationEvents.push({ projectPath, limit });
-      return getRecentEvaluationEventsImpl(projectPath, limit);
+    async getRecentEvaluationEvents(projectPath: string, limit = 20) {
+      track('getRecentEvaluationEvents', { projectPath, limit });
+      return (overrides.getRecentEvaluationEvents ?? (async (_p, l = 20) => [createEvaluationEvent()].slice(0, l)))(projectPath, limit);
+    },
+    async getTask(id: string) {
+      track('getTask', { id });
+      return (overrides.getTask ?? (async () => createTaskRecord()))(id);
+    },
+    async getTaskLogs(taskId: string) {
+      track('getTaskLogs', { taskId });
+      return (overrides.getTaskLogs ?? (async () => [createTaskLogRecord()]))(taskId);
+    },
+    async getReviewEvents(taskId: string) {
+      track('getReviewEvents', { taskId });
+      return (overrides.getReviewEvents ?? (async () => [createReviewEvent()]))(taskId);
+    },
+    async getActiveAdjustments(projectPath: string, limit = 20) {
+      track('getActiveAdjustments', { projectPath, limit });
+      return (overrides.getActiveAdjustments ?? (async () => [createAdjustmentRecord()]))(projectPath, limit);
+    },
+    async getActivePromptVersions(projectPath: string) {
+      track('getActivePromptVersions', { projectPath });
+      return (overrides.getActivePromptVersions ?? (async () => [createPromptVersionRecord()]))(projectPath);
+    },
+    async getPromptVersionHistory(projectPath: string, promptName: string, limit = 20) {
+      track('getPromptVersionHistory', { projectPath, promptName, limit });
+      return (overrides.getPromptVersionHistory ?? (async () => [createPromptVersionRecord()]))(projectPath, promptName as any, limit);
+    },
+    async getRecentCosts(days = 7) {
+      track('getRecentCosts', { days });
+      return (overrides.getRecentCosts ?? (async () => [{ date: '2026-02-01', total_cost_usd: 1.5, task_count: 3 }]))(days);
+    },
+    async getLatestGoalProgress(projectPath: string) {
+      track('getLatestGoalProgress', { projectPath });
+      return (overrides.getLatestGoalProgress ?? (async () => [createGoalProgressRecord()]))(projectPath);
+    },
+    async getGoalProgressHistory(projectPath: string, goalIndex: number, limit = 10) {
+      track('getGoalProgressHistory', { projectPath, goalIndex, limit });
+      return (overrides.getGoalProgressHistory ?? (async () => [createGoalProgressRecord()]))(projectPath, goalIndex, limit);
     },
   } as unknown as SystemDataMcpDeps['taskStore'];
 
   const globalMemory: SystemDataMcpDeps['globalMemory'] = {
     async search(query: string, limit = 10): Promise<Memory[]> {
-      calls.searchMemories.push({ query, limit });
-      return searchMemoriesImpl(query, limit);
+      track('searchMemories', { query, limit });
+      return (overrides.searchMemories ?? (async (_q, l = 10) => [createMemoryRecord()].slice(0, l)))(query, limit);
     },
   } as unknown as SystemDataMcpDeps['globalMemory'];
 
@@ -230,10 +321,18 @@ test('createSystemDataMcpServer registers all expected tools', () => {
   const runtime = server as SystemDataMcpRuntimeServer;
   const toolNames = Object.keys(runtime.instance._registeredTools).sort();
   assert.deepEqual(toolNames, [
+    'get_adjustment_summary',
+    'get_cost_trend',
     'get_evaluation_scores',
+    'get_goal_progress',
     'get_health_trend',
+    'get_prompt_versions',
+    'get_recent_tasks',
     'get_recurring_issues',
+    'get_review_details',
     'get_review_history',
+    'get_task_detail',
+    'get_task_logs',
     'get_task_outcomes',
     'search_memories',
   ]);
@@ -623,6 +722,86 @@ test('all SystemData MCP tools return tool errors when dependencies throw', asyn
       },
       expectedError: /search_memories failed: memory index unavailable/,
     },
+    {
+      toolName: 'get_task_detail',
+      args: { task_id: 'task-1' },
+      overrides: {
+        getTask: async () => {
+          throw new Error('task lookup failed');
+        },
+      },
+      expectedError: /get_task_detail failed: task lookup failed/,
+    },
+    {
+      toolName: 'get_recent_tasks',
+      args: {},
+      overrides: {
+        listTasks: async () => {
+          throw new Error('task list failed');
+        },
+      },
+      expectedError: /get_recent_tasks failed: task list failed/,
+    },
+    {
+      toolName: 'get_task_logs',
+      args: { task_id: 'task-1' },
+      overrides: {
+        getTaskLogs: async () => {
+          throw new Error('logs unavailable');
+        },
+      },
+      expectedError: /get_task_logs failed: logs unavailable/,
+    },
+    {
+      toolName: 'get_review_details',
+      args: { task_id: 'task-1' },
+      overrides: {
+        getReviewEvents: async () => {
+          throw new Error('review fetch failed');
+        },
+      },
+      expectedError: /get_review_details failed: review fetch failed/,
+    },
+    {
+      toolName: 'get_adjustment_summary',
+      args: {},
+      overrides: {
+        getActiveAdjustments: async () => {
+          throw new Error('adjustments unavailable');
+        },
+      },
+      expectedError: /get_adjustment_summary failed: adjustments unavailable/,
+    },
+    {
+      toolName: 'get_prompt_versions',
+      args: {},
+      overrides: {
+        getActivePromptVersions: async () => {
+          throw new Error('versions unavailable');
+        },
+      },
+      expectedError: /get_prompt_versions failed: versions unavailable/,
+    },
+    {
+      toolName: 'get_cost_trend',
+      args: {},
+      overrides: {
+        getRecentCosts: async () => {
+          throw new Error('costs unavailable');
+        },
+      },
+      expectedError: /get_cost_trend failed: costs unavailable/,
+    },
+    {
+      toolName: 'get_goal_progress',
+      args: {},
+      overrides: {
+        getLatestGoalProgress: async () => {
+          throw new Error('goals unavailable');
+        },
+      },
+      expectedError: /get_goal_progress failed: goals unavailable/,
+    },
   ];
 
   for (const testCase of cases) {
@@ -633,4 +812,197 @@ test('all SystemData MCP tools return tool errors when dependencies throw', asyn
     assert.equal(result.isError, true, `${testCase.toolName} should return isError=true`);
     assert.match(readText(result), testCase.expectedError);
   }
+});
+
+// --- New tool tests ---
+
+test('get_task_detail returns full task with logs and reviews', async () => {
+  const task = createTaskRecord({
+    id: 'task-abc',
+    task_description: 'Fix auth bug',
+    plan: { steps: ['step1'] },
+    subtasks: [{ id: 'sub-1', description: 'Subtask 1', status: 'done', executor: 'claude' }],
+  });
+  const logs = [createTaskLogRecord({ task_id: 'task-abc', phase: 'execute' })];
+  const reviews = [createReviewEvent({ task_id: 'task-abc', passed: false, must_fix_count: 1 })];
+
+  const { server } = createServer({
+    getTask: async (id) => id === 'task-abc' ? task : null,
+    getTaskLogs: async () => logs,
+    getReviewEvents: async () => reviews,
+  });
+  const handler = getToolHandler(server, 'get_task_detail');
+
+  const result = await handler({ task_id: 'task-abc' }, {});
+  assert.equal(result.isError, undefined);
+  const payload = result.structuredContent as Record<string, unknown>;
+  assert.equal(payload.id, 'task-abc');
+  assert.equal(payload.description, 'Fix auth bug');
+  assert.deepEqual(payload.plan, { steps: ['step1'] });
+  assert.equal((payload.logs as unknown[]).length, 1);
+  assert.equal((payload.reviews as unknown[]).length, 1);
+});
+
+test('get_task_detail returns null for non-existent task', async () => {
+  const { server } = createServer({
+    getTask: async () => null,
+    getTaskLogs: async () => [],
+    getReviewEvents: async () => [],
+  });
+  const handler = getToolHandler(server, 'get_task_detail');
+
+  const result = await handler({ task_id: 'missing' }, {});
+  assert.equal(result.isError, undefined);
+  assert.match(readText(result), /not found/);
+  assert.equal(result.structuredContent, null);
+});
+
+test('get_recent_tasks returns tasks with full descriptions and respects status filter', async () => {
+  const tasks = [
+    createTaskRecord({ id: 'task-1', task_description: 'First task', status: 'done' }),
+    createTaskRecord({ id: 'task-2', task_description: 'Second task', status: 'done' }),
+  ];
+
+  const { server, calls } = createServer({
+    listTasks: async (_p, status) => status === 'done' ? tasks : [],
+  });
+  const handler = getToolHandler(server, 'get_recent_tasks');
+
+  const result = await handler({ status: 'done', limit: 1 }, {});
+  assert.equal(result.isError, undefined);
+  const payload = result.structuredContent as { tasks: Array<{ id: string; description: string }> };
+  assert.equal(payload.tasks.length, 1);
+  assert.equal(payload.tasks[0].id, 'task-1');
+  assert.deepEqual(calls.listTasks, [{ projectPath: '/repo', status: 'done' }]);
+});
+
+test('get_task_logs returns mapped log entries', async () => {
+  const logs = [
+    createTaskLogRecord({ phase: 'plan', agent: 'claude', cost_usd: 0.1 }),
+    createTaskLogRecord({ id: 2, phase: 'execute', agent: 'codex', cost_usd: 0.8 }),
+  ];
+
+  const { server } = createServer({ getTaskLogs: async () => logs });
+  const handler = getToolHandler(server, 'get_task_logs');
+
+  const result = await handler({ task_id: 'task-1' }, {});
+  assert.equal(result.isError, undefined);
+  const payload = result.structuredContent as { logs: Array<{ phase: string; agent: string; costUsd: number | null }> };
+  assert.equal(payload.logs.length, 2);
+  assert.equal(payload.logs[0].phase, 'plan');
+  assert.equal(payload.logs[1].costUsd, 0.8);
+});
+
+test('get_review_details returns all review rounds for a task', async () => {
+  const reviews = [
+    createReviewEvent({ attempt: 1, passed: false, must_fix_count: 2 }),
+    createReviewEvent({ id: 2, attempt: 2, passed: true, must_fix_count: 0 }),
+  ];
+
+  const { server, calls } = createServer({ getReviewEvents: async () => reviews });
+  const handler = getToolHandler(server, 'get_review_details');
+
+  const result = await handler({ task_id: 'task-1' }, {});
+  assert.equal(result.isError, undefined);
+  const payload = result.structuredContent as { reviews: Array<{ attempt: number; passed: boolean }> };
+  assert.equal(payload.reviews.length, 2);
+  assert.equal(payload.reviews[0].passed, false);
+  assert.equal(payload.reviews[1].passed, true);
+  assert.deepEqual(calls.getReviewEvents, [{ taskId: 'task-1' }]);
+});
+
+test('get_adjustment_summary returns active adjustments', async () => {
+  const adjustments = [
+    createAdjustmentRecord({ text: 'Always validate', effectiveness: 0.7, category: 'standard' }),
+    createAdjustmentRecord({ id: 2, text: 'Avoid global state', effectiveness: 0.3, category: 'avoidance' }),
+  ];
+
+  const { server } = createServer({ getActiveAdjustments: async () => adjustments });
+  const handler = getToolHandler(server, 'get_adjustment_summary');
+
+  const result = await handler({ limit: 5 }, {});
+  assert.equal(result.isError, undefined);
+  const payload = result.structuredContent as { adjustments: Array<{ text: string; effectiveness: number }> };
+  assert.equal(payload.adjustments.length, 2);
+  assert.equal(payload.adjustments[0].effectiveness, 0.7);
+});
+
+test('get_prompt_versions returns active versions when no prompt_name given', async () => {
+  const versions = [createPromptVersionRecord({ prompt_name: 'scan', version: 2, effectiveness: 0.15 })];
+
+  const { server, calls } = createServer({ getActivePromptVersions: async () => versions });
+  const handler = getToolHandler(server, 'get_prompt_versions');
+
+  const result = await handler({}, {});
+  assert.equal(result.isError, undefined);
+  const payload = result.structuredContent as { versions: Array<{ promptName: string }> };
+  assert.equal(payload.versions.length, 1);
+  assert.equal(payload.versions[0].promptName, 'scan');
+  assert.deepEqual(calls.getActivePromptVersions, [{ projectPath: '/repo' }]);
+});
+
+test('get_prompt_versions returns history when prompt_name given', async () => {
+  const history = [
+    createPromptVersionRecord({ version: 2, status: 'active' }),
+    createPromptVersionRecord({ id: 2, version: 1, status: 'superseded' }),
+  ];
+
+  const { server, calls } = createServer({ getPromptVersionHistory: async () => history });
+  const handler = getToolHandler(server, 'get_prompt_versions');
+
+  const result = await handler({ prompt_name: 'scan' }, {});
+  assert.equal(result.isError, undefined);
+  const payload = result.structuredContent as { versions: Array<{ version: number; status: string }> };
+  assert.equal(payload.versions.length, 2);
+  assert.equal(payload.versions[0].status, 'active');
+  assert.deepEqual(calls.getPromptVersionHistory, [{ projectPath: '/repo', promptName: 'scan', limit: 20 }]);
+});
+
+test('get_cost_trend returns daily costs', async () => {
+  const costs = [
+    { date: '2026-02-03', total_cost_usd: 2.5, task_count: 5 },
+    { date: '2026-02-02', total_cost_usd: 1.8, task_count: 3 },
+  ];
+
+  const { server, calls } = createServer({ getRecentCosts: async () => costs });
+  const handler = getToolHandler(server, 'get_cost_trend');
+
+  const result = await handler({ days: 3 }, {});
+  assert.equal(result.isError, undefined);
+  const payload = result.structuredContent as { costs: typeof costs };
+  assert.equal(payload.costs.length, 2);
+  assert.deepEqual(calls.getRecentCosts, [{ days: 3 }]);
+});
+
+test('get_goal_progress returns latest progress for all goals', async () => {
+  const progress = [
+    createGoalProgressRecord({ goal_index: 0, progress_pct: 45 }),
+    createGoalProgressRecord({ id: 2, goal_index: 1, progress_pct: 80 }),
+  ];
+
+  const { server, calls } = createServer({ getLatestGoalProgress: async () => progress });
+  const handler = getToolHandler(server, 'get_goal_progress');
+
+  const result = await handler({}, {});
+  assert.equal(result.isError, undefined);
+  const payload = result.structuredContent as { goals: Array<{ goalIndex: number; progressPct: number }> };
+  assert.equal(payload.goals.length, 2);
+  assert.equal(payload.goals[1].progressPct, 80);
+  assert.deepEqual(calls.getLatestGoalProgress, [{ projectPath: '/repo' }]);
+});
+
+test('get_goal_progress returns history for a specific goal', async () => {
+  const history = [
+    createGoalProgressRecord({ progress_pct: 60 }),
+    createGoalProgressRecord({ id: 2, progress_pct: 45 }),
+  ];
+
+  const { server, calls } = createServer({ getGoalProgressHistory: async () => history });
+  const handler = getToolHandler(server, 'get_goal_progress');
+
+  const result = await handler({ goal_index: 0 }, {});
+  assert.equal(result.isError, undefined);
+  const payload = result.structuredContent as { history: Array<{ progressPct: number }> };
+  assert.equal(payload.history.length, 2);
+  assert.deepEqual(calls.getGoalProgressHistory, [{ projectPath: '/repo', goalIndex: 0, limit: 10 }]);
 });
