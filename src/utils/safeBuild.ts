@@ -1,8 +1,8 @@
 import { join } from 'node:path';
-import { rename, rm, cp } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { runProcess } from './process.js';
-import { log } from './logger.js';
+import { rename as fsRename, rm as fsRm, cp as fsCp } from 'node:fs/promises';
+import { existsSync as fsExistsSync } from 'node:fs';
+import { runProcess as defaultRunProcess } from './process.js';
+import { log as defaultLog } from './logger.js';
 
 export interface BuildResult {
   success: boolean;
@@ -10,11 +10,30 @@ export interface BuildResult {
   durationMs: number;
 }
 
+export interface SafeBuildDeps {
+  runProcess: (command: string, args: string[], options?: { cwd?: string; timeout?: number }) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
+  rename: (from: string, to: string) => Promise<void>;
+  rm: (target: string, options?: { recursive?: boolean; force?: boolean }) => Promise<void>;
+  cp: (source: string, target: string, options?: { recursive?: boolean }) => Promise<void>;
+  existsSync: (path: string) => boolean;
+  log: { info: (message: string, meta?: unknown) => void; warn: (message: string, meta?: unknown) => void };
+}
+
+const defaultDeps: SafeBuildDeps = {
+  runProcess: defaultRunProcess,
+  rename: fsRename,
+  rm: fsRm,
+  cp: fsCp,
+  existsSync: fsExistsSync,
+  log: defaultLog,
+};
+
 /**
  * Compile TypeScript to a temporary directory, then atomically swap with dist/.
  * If compilation fails, dist/ remains untouched.
  */
-export async function safeBuild(projectPath: string): Promise<BuildResult> {
+export async function safeBuild(projectPath: string, deps: SafeBuildDeps = defaultDeps): Promise<BuildResult> {
+  const { runProcess, rename, rm, cp, existsSync, log } = deps;
   const distDir = join(projectPath, 'dist');
   const tmpDir = join(projectPath, 'dist.tmp');
   const oldDir = join(projectPath, 'dist.old');
