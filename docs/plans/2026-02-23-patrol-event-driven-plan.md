@@ -4,7 +4,7 @@
 
 **Goal:** Refactor MainLoop into an event-driven architecture with Guards (reliability), Observers (observability), Strategies (intelligence), and Superpowers skill integration.
 
-**Architecture:** CycleEventBus wraps each MainLoop phase. New functionality is added as event listeners without modifying core control flow. Superpowers skills are injected into session prompts via SkillInjector listener.
+**Architecture:** CycleEventBus wraps each MainLoop phase. New functionality is added as event listeners without modifying core control flow. Superpowers skills are used natively by Claude Code sessions — prompts reference skills by name and sessions invoke them via the Skill tool.
 
 **Tech Stack:** TypeScript 5.7+, Node.js 22+, node:test, postgres (porsager)
 
@@ -1257,150 +1257,109 @@ git commit -m "feat: add NotificationObserver, WebUIRealtimeObserver, and observ
 
 ---
 
-## Task 10: SkillInjector (Superpowers Integration)
+## Task 10: Superpowers Prompt Integration (Native Plugin Access)
 
 **Files:**
-- Create: `src/core/skills/directives.ts`
-- Create: `src/core/skills/SkillInjector.ts`
-- Create: `src/core/skills/index.ts`
-- Test: `src/core/skills/SkillInjector.test.ts`
+- Modify: `src/core/MainLoop.ts` (workerExecute, workerFix, brainReflect prompts)
 
-**Step 1: Write skill directives**
+The superpowers plugin is installed at `~/.claude/plugins/` and automatically loaded by
+every `claude` CLI session. No custom SkillInjector needed — sessions invoke skills
+natively via the Skill tool. We just add skill references to the task prompts.
 
-```typescript
-// src/core/skills/directives.ts
+**Step 1: Update workerExecute prompt (line ~603)**
 
-/** Concise TDD + verification directives for worker sessions (~200 tokens) */
-export const WORKER_DIRECTIVES = `
-## Development Process
-1. TDD: Write a failing test FIRST. Run it to confirm failure. Then write minimal implementation. Run tests to confirm pass.
-2. Verification: Before claiming done, run the full test suite and show evidence of pass.
-3. No guessing: Never say "should work" — run the command and show output.
-4. One thing at a time: Make one logical change, test, commit. Repeat.
-`.trim();
-
-/** Systematic debugging directives for workerFix sessions (~150 tokens) */
-export const WORKER_FIX_DIRECTIVES = `
-## Debugging Process (mandatory phases)
-Phase 1 — ROOT CAUSE: Read error messages. Reproduce consistently. Check recent changes. Trace data flow.
-Phase 2 — ANALYZE: Find working examples. Compare with broken code. Identify differences.
-Phase 3 — HYPOTHESIZE: Form ONE hypothesis. Test minimally. Verify before continuing.
-Phase 4 — IMPLEMENT: Write failing test for the bug. Fix at root cause. Verify fix.
-NEVER skip phases. NEVER "try changing X and see if it works." Max 3 attempts before escalating.
-`.trim();
-
-/** Code review directives for brain reflect sessions (~100 tokens) */
-export const REFLECT_DIRECTIVES = `
-## Reflection Process
-1. Assess: Did the task achieve its goal? Were there unexpected side effects?
-2. Quality: Check code changes for type safety, error handling, test coverage.
-3. Learn: If something failed or was surprising, record the lesson in CLAUDE.md.
-4. Evidence: Base all assessments on actual code/test output, not assumptions.
-`.trim();
-```
-
-**Step 2: Write SkillInjector**
+Change the prompt and appendSystemPrompt to reference superpowers skills:
 
 ```typescript
-// src/core/skills/SkillInjector.ts
-import type { CycleEvent } from '../CycleEvents.js';
-import { WORKER_DIRECTIVES, WORKER_FIX_DIRECTIVES, REFLECT_DIRECTIVES } from './directives.js';
-import { log } from '../../utils/logger.js';
+private async workerExecute(task: Task): Promise<SessionResult> {
+  const prompt = `Execute this coding task:
 
-/**
- * Injects superpowers skill directives into session system prompts
- * by modifying CycleEvent data before sessions run.
- *
- * Registered as an EventBus listener on before:execute, before:fix, before:reflect.
- */
-export class SkillInjector {
-  handle(event: CycleEvent): void {
-    switch (event.phase) {
-      case 'execute':
-        event.data.skillDirectives = WORKER_DIRECTIVES;
-        log.debug('SkillInjector: injected worker directives');
-        break;
-      case 'fix':
-        event.data.skillDirectives = WORKER_FIX_DIRECTIVES;
-        log.debug('SkillInjector: injected workerFix directives');
-        break;
-      case 'reflect':
-        event.data.skillDirectives = REFLECT_DIRECTIVES;
-        log.debug('SkillInjector: injected reflect directives');
-        break;
-    }
-  }
+${task.task_description}
+
+Read CLAUDE.md for project context and environment rules.
+
+## Process
+1. Use superpowers:test-driven-development — write a failing test first, verify it fails, then implement.
+2. After making changes, run the test suite to verify.
+3. Use superpowers:verification-before-completion before claiming done — show evidence, not assumptions.
+4. Commit with a descriptive message.
+Do NOT modify CLAUDE.md — only the brain does that.`;
+
+  return this.workerSession.run(prompt, {
+    permissionMode: 'bypassPermissions',
+    maxTurns: 30,
+    maxBudget: this.config.values.claude.maxTaskBudget,
+    cwd: this.config.projectPath,
+    timeout: this.config.values.autonomy.subtaskTimeout * 1000,
+    model: this.config.values.claude.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
+    appendSystemPrompt: 'You are a coding worker. Execute the task precisely. You have access to superpowers skills — use them when instructed. Read CLAUDE.md for project context.',
+  });
 }
 ```
 
-**Step 3: Write skills index**
+**Step 2: Update workerFix prompt (line ~622)**
 
 ```typescript
-// src/core/skills/index.ts
-import type { CycleEventBus } from '../CycleEventBus.js';
-import { SkillInjector } from './SkillInjector.js';
+private async workerFix(sessionId: string, errors: string, task: Task): Promise<SessionResult> {
+  return this.workerSession.run(
+    `The previous changes failed verification:
+${errors}
 
-export function registerSkillInjector(bus: CycleEventBus): SkillInjector {
-  const injector = new SkillInjector();
-  bus.on('before:execute', (e) => injector.handle(e));
-  bus.on('before:fix', (e) => injector.handle(e));
-  bus.on('before:reflect', (e) => injector.handle(e));
-  return injector;
+Use superpowers:systematic-debugging to investigate the root cause.
+Follow all 4 phases: investigate → analyze → hypothesize → implement.
+Do NOT guess or "try changing X". Find the actual root cause first.
+
+The original task was: ${task.task_description}`,
+    {
+      permissionMode: 'bypassPermissions',
+      maxTurns: 15,
+      maxBudget: this.config.values.claude.maxTaskBudget / 2,
+      cwd: this.config.projectPath,
+      timeout: 120_000,
+      resumeSessionId: sessionId,
+      model: this.config.values.claude.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
+    },
+  );
 }
-
-export { SkillInjector };
-export { WORKER_DIRECTIVES, WORKER_FIX_DIRECTIVES, REFLECT_DIRECTIVES } from './directives.js';
 ```
 
-**Step 4: Write test**
+**Step 3: Update brainReflect prompt (line ~675)**
 
 ```typescript
-// src/core/skills/SkillInjector.test.ts
-import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
-import { SkillInjector } from './SkillInjector.js';
-import { WORKER_DIRECTIVES, WORKER_FIX_DIRECTIVES, REFLECT_DIRECTIVES } from './directives.js';
-import type { CycleEvent } from '../CycleEvents.js';
+private async brainReflect(
+  task: Task,
+  outcome: string,
+  verification: { passed: boolean; reason?: string },
+  projectPath: string,
+): Promise<void> {
+  const prompt = `Reflect on this completed task:
 
-describe('SkillInjector', () => {
-  const injector = new SkillInjector();
+Task: ${task.task_description}
+Outcome: ${outcome}
+Verification: ${verification.passed ? 'PASSED' : `FAILED — ${verification.reason}`}
 
-  it('injects worker directives for execute phase', () => {
-    const event: CycleEvent = { phase: 'execute', timing: 'before', data: {}, timestamp: Date.now() };
-    injector.handle(event);
-    assert.equal(event.data.skillDirectives, WORKER_DIRECTIVES);
-  });
+Use superpowers:requesting-code-review to review the code changes if the task was merged.
 
-  it('injects fix directives for fix phase', () => {
-    const event: CycleEvent = { phase: 'fix', timing: 'before', data: {}, timestamp: Date.now() };
-    injector.handle(event);
-    assert.equal(event.data.skillDirectives, WORKER_FIX_DIRECTIVES);
-  });
+1. What went well? What could be improved?
+2. If there are lessons learned, update CLAUDE.md "踩过的坑" section.
+3. Use claude-mem to save important experiences for future reference.
+4. If you notice patterns (recurring issues, good practices), add them to CLAUDE.md.
 
-  it('injects reflect directives for reflect phase', () => {
-    const event: CycleEvent = { phase: 'reflect', timing: 'before', data: {}, timestamp: Date.now() };
-    injector.handle(event);
-    assert.equal(event.data.skillDirectives, REFLECT_DIRECTIVES);
-  });
-
-  it('does nothing for other phases', () => {
-    const event: CycleEvent = { phase: 'decide', timing: 'before', data: {}, timestamp: Date.now() };
-    injector.handle(event);
-    assert.equal(event.data.skillDirectives, undefined);
-  });
-});
+Keep CLAUDE.md concise — only add genuinely useful rules.`;
+  // ... rest unchanged
+}
 ```
 
-**Step 5: Run tests**
+**Step 4: Run existing tests to verify no regression**
 
-Run: `npm run build && node --test dist/core/skills/SkillInjector.test.js`
-Expected: All 4 tests PASS
+Run: `npm run build && npm test`
+Expected: All existing tests PASS (prompt changes don't affect test behavior)
 
-**Step 6: Commit**
+**Step 5: Commit**
 
 ```bash
-git add src/core/skills/
-git commit -m "feat: add SkillInjector for superpowers integration into cycle phases"
+git add src/core/MainLoop.ts
+git commit -m "feat: integrate superpowers skills into worker/brain session prompts"
 ```
 
 ---
@@ -1788,8 +1747,7 @@ git commit -m "feat: add TaskQualityEvaluator, DynamicPriorityStrategy, and stra
 ## Task 13: Wire Everything in index.ts + Integration Test
 
 **Files:**
-- Modify: `src/index.ts` (register guards, observers, strategies, skills)
-- Modify: `src/core/MainLoop.ts` (use skill directives from event data in session prompts)
+- Modify: `src/index.ts` (register guards, observers, strategies)
 - Test: `src/core/integration.test.ts`
 
 **Step 1: Write integration test**
@@ -1802,7 +1760,6 @@ import { CycleEventBus } from './CycleEventBus.js';
 import { registerGuards } from './guards/index.js';
 import { registerObservers } from './observers/index.js';
 import { registerStrategies } from './strategies/index.js';
-import { registerSkillInjector } from './skills/index.js';
 import type { CycleEvent } from './CycleEvents.js';
 
 describe('Full EventBus integration', () => {
@@ -1821,21 +1778,8 @@ describe('Full EventBus integration', () => {
       getProjectHealth: async () => ({ tscErrors: 5, recentSuccessRate: 0.8, blockedTaskCount: 1 }),
     });
 
-    registerSkillInjector(bus);
-
     // Should not throw
     bus.emit({ phase: 'decide', timing: 'before', data: {}, timestamp: Date.now() });
-  });
-
-  it('skill directives are injected into execute events', async () => {
-    const bus = new CycleEventBus();
-    registerSkillInjector(bus);
-
-    const event: CycleEvent = { phase: 'execute', timing: 'before', data: {}, timestamp: Date.now() };
-    await bus.emitAndWait(event);
-
-    assert.ok(typeof event.data.skillDirectives === 'string');
-    assert.ok((event.data.skillDirectives as string).includes('TDD'));
   });
 
   it('empty diff guard blocks on zero changes', async () => {
@@ -1866,7 +1810,6 @@ import { CycleEventBus } from './core/CycleEventBus.js';
 import { registerGuards } from './core/guards/index.js';
 import { registerObservers } from './core/observers/index.js';
 import { registerStrategies } from './core/strategies/index.js';
-import { registerSkillInjector } from './core/skills/index.js';
 import { getDiffStats } from './utils/git.js';
 
 // After creating costTracker, before creating MainLoop:
@@ -1892,33 +1835,19 @@ const { failureLearning, qualityEvaluator, dynamicPriority } = registerStrategie
   }),
 });
 
-registerSkillInjector(eventBus);
-
 const mainLoop = new MainLoop(config, taskQueue, codexBridge, taskStore, costTracker, eventBus);
 ```
 
-**Step 3: Update MainLoop to consume skill directives from event data**
-
-In `workerExecute()`, read directives from event and append to system prompt:
-
-```typescript
-// In workerExecute(), before calling workerSession.run():
-const skillDirectives = /* from before:execute event */ '';
-// Append to existing appendSystemPrompt
-```
-
-Note: This requires passing event data into the phase methods. The simplest way is to emit the before event, read `event.data.skillDirectives`, and use it.
-
-**Step 4: Run full test suite**
+**Step 3: Run full test suite**
 
 Run: `npm run build && npm test`
 Expected: All tests PASS including new integration test
 
-**Step 5: Commit**
+**Step 4: Commit**
 
 ```bash
-git add src/index.ts src/core/MainLoop.ts src/core/integration.test.ts
-git commit -m "feat: wire EventBus with guards, observers, strategies, and skill injector"
+git add src/index.ts src/core/integration.test.ts
+git commit -m "feat: wire EventBus with guards, observers, and strategies"
 ```
 
 ---
