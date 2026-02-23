@@ -149,23 +149,79 @@ test('tryParseReview finds the review JSON object even when earlier JSON exists'
   assert.equal(parsed.issues.length, 1);
 });
 
-test('tryParseReview falls back to text heuristics when JSON is unavailable', () => {
-  const parsed = tryParseReview('Critical bug found in login flow.');
+test('tryParseReview keeps valid issues with accepted severity values', () => {
+  const parsed = tryParseReview(
+    '{"passed":true,"issues":[{"severity":"high","description":"bug","source":"claude"}]}',
+  );
+
+  assert.equal(parsed.issues.length, 1);
+  assert.deepEqual(parsed.issues[0], {
+    severity: 'high',
+    description: 'bug',
+    file: undefined,
+    line: undefined,
+    suggestion: undefined,
+    source: 'claude',
+  });
+});
+
+test('tryParseReview filters issues with invalid severity values', () => {
+  const parsed = tryParseReview(
+    '{"passed":false,"issues":[{"severity":"major","description":"bug","source":"claude"}]}',
+  );
+
+  assert.deepEqual(parsed.issues, []);
+});
+
+test('tryParseReview filters issues without description', () => {
+  const parsed = tryParseReview(
+    '{"passed":false,"issues":[{"severity":"high","source":"claude"}]}',
+  );
+
+  assert.deepEqual(parsed.issues, []);
+});
+
+test('tryParseReview keeps only valid issues from a mixed issues list', () => {
+  const parsed = tryParseReview(
+    JSON.stringify({
+      passed: false,
+      issues: [
+        { severity: 'low', description: 'valid low', source: 'claude' },
+        { severity: 'major', description: 'invalid severity', source: 'claude' },
+        { severity: 'critical', description: 'valid critical', source: 'codex' },
+      ],
+    }),
+  );
+
+  assert.equal(parsed.issues.length, 2);
+  assert.deepEqual(parsed.issues.map((issue) => issue.severity), ['low', 'critical']);
+});
+
+test('tryParseReview fallback is fail-closed for non-JSON positive text', () => {
+  const parsed = tryParseReview('error handling looks good');
 
   assert.equal(parsed.passed, false);
   assert.deepEqual(parsed.issues, []);
-  assert.equal(parsed.summary, 'Critical bug found in login flow.');
+  assert.equal(parsed.summary, 'error handling looks good');
 });
 
-test('tryParseReview handles empty or non-string input safely', () => {
+test('tryParseReview fallback returns failed review for issue text', () => {
+  const parsed = tryParseReview('Found critical security vulnerability');
+
+  assert.equal(parsed.passed, false);
+  assert.deepEqual(parsed.issues, []);
+  assert.equal(parsed.summary, 'Found critical security vulnerability');
+});
+
+test('tryParseReview handles empty or non-string input safely with fail-closed fallback', () => {
   assert.deepEqual(tryParseReview(''), {
-    passed: true,
+    passed: false,
     issues: [],
     summary: '',
   });
 
   assert.deepEqual(tryParseReview(undefined as unknown as string), {
-    passed: true,
+    passed: false,
     issues: [],
     summary: '',
   });

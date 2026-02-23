@@ -1,5 +1,8 @@
-import type { ReviewResult } from '../bridges/CodingAgent.js';
+import type { ReviewIssue, ReviewResult } from '../bridges/CodingAgent.js';
 import { SUMMARY_PREVIEW_LEN } from '../types/constants.js';
+
+export const VALID_SEVERITIES = new Set(['critical', 'high', 'medium', 'low'] as const);
+export type ValidSeverity = 'critical' | 'high' | 'medium' | 'low';
 
 export function truncate(value: string, maxLen: number): string {
   return value.length <= maxLen ? value : value.slice(0, maxLen) + '…';
@@ -107,14 +110,30 @@ export function tryParseReview(text: string): Omit<ReviewResult, 'cost_usd'> {
   if (isRecord(parsed)) {
     return {
       passed: Boolean(parsed.passed),
-      issues: Array.isArray(parsed.issues) ? parsed.issues : [],
+      issues: Array.isArray(parsed.issues)
+        ? parsed.issues
+            .filter(
+              (issue): issue is ReviewIssue =>
+                isRecord(issue)
+                && typeof issue.description === 'string'
+                && typeof issue.severity === 'string'
+                && VALID_SEVERITIES.has(issue.severity as ValidSeverity),
+            )
+            .map((issue) => ({
+              description: String(issue.description),
+              severity: issue.severity as ReviewIssue['severity'],
+              file: typeof issue.file === 'string' ? issue.file : undefined,
+              line: typeof issue.line === 'number' ? issue.line : undefined,
+              suggestion: typeof issue.suggestion === 'string' ? issue.suggestion : undefined,
+              source: issue.source === 'claude' || issue.source === 'codex' ? issue.source : 'claude',
+            }))
+        : [],
       summary: typeof parsed.summary === 'string' ? parsed.summary : '',
     };
   }
 
-  const hasIssues = /critical|error|bug|vulnerability|security/i.test(output);
   return {
-    passed: !hasIssues,
+    passed: false,
     issues: [],
     summary: output.slice(0, SUMMARY_PREVIEW_LEN),
   };
