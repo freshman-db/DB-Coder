@@ -1,0 +1,272 @@
+[supervisor 2026-02-23 08:32:27] Supervisor started (pid=2056505, ppid=2056503)
+[supervisor 2026-02-23 08:32:27] Working directory: /home/db/projects/db-coder
+[supervisor 2026-02-23 08:32:27] Node: v24.13.0
+[supervisor 2026-02-23 08:32:27] Starting db-coder (child)...
+[supervisor 2026-02-23 08:32:27] Child started (pid=2056536)
+[36m[2026-02-23T00:32:27.800Z] [INFO][0m Starting db-coder for project: /home/db/projects/db-coder
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42710',
+  message: 'extension "pg_trgm" already exists, skipping',
+  file: 'extension.c',
+  line: '1795',
+  routine: 'CreateExtension'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "memories" already exists, skipping',
+  file: 'parse_utilcmd.c',
+  line: '207',
+  routine: 'transformCreateStmt'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "idx_memories_title_trgm" already exists, skipping',
+  file: 'index.c',
+  line: '877',
+  routine: 'index_create'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "idx_memories_content_trgm" already exists, skipping',
+  file: 'index.c',
+  line: '877',
+  routine: 'index_create'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "idx_memories_tags" already exists, skipping',
+  file: 'index.c',
+  line: '877',
+  routine: 'index_create'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "idx_memories_fts" already exists, skipping',
+  file: 'index.c',
+  line: '877',
+  routine: 'index_create'
+}
+[36m[2026-02-23T00:32:27.845Z] [INFO][0m GlobalMemory initialized
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "tasks" already exists, skipping',
+  file: 'parse_utilcmd.c',
+  line: '207',
+  routine: 'transformCreateStmt'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "task_logs" already exists, skipping',
+  file: 'parse_utilcmd.c',
+  line: '207',
+  routine: 'transformCreateStmt'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "scan_results" already exists, skipping',
+  file: 'parse_utilcmd.c',
+  line: '207',
+  routine: 'transformCreateStmt'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "daily_costs" already exists, skipping',
+  file: 'parse_utilcmd.c',
+  line: '207',
+  routine: 'transformCreateStmt'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "idx_tasks_description_trgm" already exists, skipping',
+  file: 'index.c',
+  line: '877',
+  routine: 'index_create'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "adjustments" already exists, skipping',
+  file: 'parse_utilcmd.c',
+  line: '207',
+  routine: 'transformCreateStmt'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "goal_progress" already exists, skipping',
+  file: 'parse_utilcmd.c',
+  line: '207',
+  routine: 'transformCreateStmt'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "config_proposals" already exists, skipping',
+  file: 'parse_utilcmd.c',
+  line: '207',
+  routine: 'transformCreateStmt'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "review_events" already exists, skipping',
+  file: 'parse_utilcmd.c',
+  line: '207',
+  routine: 'transformCreateStmt'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42701',
+  message: 'column "depends_on" of relation "tasks" already exists, skipping',
+  file: 'tablecmds.c',
+  line: '7340',
+  routine: 'check_for_column_name_collision'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "prompt_versions" already exists, skipping',
+  file: 'parse_utilcmd.c',
+  line: '207',
+  routine: 'transformCreateStmt'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "idx_prompt_versions_active" already exists, skipping',
+  file: 'index.c',
+  line: '877',
+  routine: 'index_create'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "plan_drafts" already exists, skipping',
+  file: 'parse_utilcmd.c',
+  line: '207',
+  routine: 'transformCreateStmt'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42701',
+  message: 'column "chat_session_id" of relation "plan_drafts" already exists, skipping',
+  file: 'tablecmds.c',
+  line: '7340',
+  routine: 'check_for_column_name_collision'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42701',
+  message: 'column "chat_status" of relation "plan_drafts" already exists, skipping',
+  file: 'tablecmds.c',
+  line: '7340',
+  routine: 'check_for_column_name_collision'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "plan_chat_messages" already exists, skipping',
+  file: 'parse_utilcmd.c',
+  line: '207',
+  routine: 'transformCreateStmt'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42701',
+  message: 'column "evaluation_score" of relation "tasks" already exists, skipping',
+  file: 'tablecmds.c',
+  line: '7340',
+  routine: 'check_for_column_name_collision'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42701',
+  message: 'column "evaluation_reasoning" of relation "tasks" already exists, skipping',
+  file: 'tablecmds.c',
+  line: '7340',
+  routine: 'check_for_column_name_collision'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "evaluation_events" already exists, skipping',
+  file: 'parse_utilcmd.c',
+  line: '207',
+  routine: 'transformCreateStmt'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42P07',
+  message: 'relation "service_state" already exists, skipping',
+  file: 'parse_utilcmd.c',
+  line: '207',
+  routine: 'transformCreateStmt'
+}
+[36m[2026-02-23T00:32:27.850Z] [INFO][0m TaskStore initialized
+[36m[2026-02-23T00:32:27.851Z] [INFO][0m Discovered 5 MCP servers: context7, github, serena, playwright, mcp-search
+[36m[2026-02-23T00:32:27.854Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T00:32:27.856Z] [INFO][0m Server listening on http://127.0.0.1:18800
+[36m[2026-02-23T00:32:27.858Z] [INFO][0m Resuming patrol from previous session
+[36m[2026-02-23T00:32:27.858Z] [INFO][0m Patrol starting
+[36m[2026-02-23T00:32:27.862Z] [INFO][0m Main loop started
+[36m[2026-02-23T00:32:27.885Z] [INFO][0m Force-deleted branch: db-coder/9363a63d
+[36m[2026-02-23T00:32:28.235Z] [INFO][0m Scanning project (normal): /home/db/projects/db-coder
+[36m[2026-02-23T00:32:28.512Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
+[36m[2026-02-23T00:36:24.597Z] [INFO][0m Scan complete. Health: 60/100, Issues: 8, Opportunities: 4
+[36m[2026-02-23T00:36:24.599Z] [INFO][0m Creating task plan...
+[36m[2026-02-23T00:36:24.697Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
+[36m[2026-02-23T00:36:24.699Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T00:40:57.753Z] [INFO][0m Plan created: 6 tasks
+[36m[2026-02-23T00:40:57.788Z] [INFO][0m Queued task [P1]: Fix patchUtils.ts indexOf -1 bug that silently loses section
+[36m[2026-02-23T00:40:57.816Z] [INFO][0m Queued task [P1]: Derive validCategories (Brain.ts:169) and validPromptNames (
+[36m[2026-02-23T00:40:57.844Z] [INFO][0m Queued task [P1]: Fix three type safety and observability issues in EvolutionE
+[36m[2026-02-23T00:40:57.871Z] [INFO][0m Queued task [P2]: Create a safeTool() wrapper in SystemDataMcp.ts to eliminate
+[36m[2026-02-23T00:40:57.895Z] [INFO][0m Queued task [P2]: Extract duplicated saveEvaluationEvent + addDailyCost block 
+[36m[2026-02-23T00:40:57.915Z] [INFO][0m Queued task [P3]: Move CodexBridge.ts's local tryParseJson() function (line ~3
+[36m[2026-02-23T00:40:57.915Z] [INFO][0m Planned 6 new tasks
+[36m[2026-02-23T00:40:58.022Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T00:41:30.204Z] [INFO][0m Executing task [P1]: Fix patchUtils.ts indexOf -1 bug that silently loses section headings when they 
+[36m[2026-02-23T00:41:30.213Z] [INFO][0m Created branch: db-coder/221e7ccf
+[36m[2026-02-23T00:41:32.372Z] [INFO][0m Task has no subtasks, auto-decomposing...
+[36m[2026-02-23T00:41:32.372Z] [INFO][0m Creating task plan...
+[36m[2026-02-23T00:41:32.466Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
+[36m[2026-02-23T00:42:58.865Z] [INFO][0m Plan created: 1 tasks
+[36m[2026-02-23T00:42:58.961Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
+[36m[2026-02-23T00:42:58.963Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
