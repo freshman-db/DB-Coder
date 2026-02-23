@@ -652,12 +652,12 @@ describe('mergeReviews safety', () => {
   test('undefined file does not create false intersection', () => {
     const claudeIssue = detailedReviewIssue('claude', {
       file: undefined,
-      description: 'foo bar baz long enough for 20 chars',
+      description: 'handler crashes because null guard is missing before property access',
       severity: 'medium',
     });
     const codexIssue = detailedReviewIssue('codex', {
       file: undefined,
-      description: 'foo bar baz long enough for 20 chars but different end',
+      description: 'add null guard before property access to avoid handler crash',
       severity: 'medium',
     });
 
@@ -666,21 +666,87 @@ describe('mergeReviews safety', () => {
       review('codex', { passed: true, issues: [codexIssue] }),
     );
 
-    assert.equal(merged.mustFix.length, 1, 'known weakness: undefined file + shared 20-char prefix intersects');
-    assert.equal(merged.mustFix[0]?.description, claudeIssue.description);
-    assert.deepEqual(merged.shouldFix, [codexIssue]);
+    assert.equal(merged.mustFix.length, 0);
+    assert.deepEqual(merged.shouldFix, [claudeIssue, codexIssue]);
     assert.equal(merged.passed, true);
   });
 
-  test('codex-only dedup does not re-add mustFix items to shouldFix', () => {
+  test('same-file issues with Jaccard similarity above threshold intersect', () => {
+    const claudeIssue = detailedReviewIssue('claude', {
+      file: 'a.ts',
+      description: 'handler crashes because null guard is missing before property access',
+      severity: 'medium',
+    });
+    const codexIssue = detailedReviewIssue('codex', {
+      file: 'a.ts',
+      description: 'add null guard before property access to avoid handler crash',
+      severity: 'high',
+    });
+
+    const merged = mergeReviews(
+      review('claude', { passed: true, issues: [claudeIssue] }),
+      review('codex', { passed: true, issues: [codexIssue] }),
+    );
+
+    assert.equal(merged.mustFix.length, 1);
+    assert.equal(merged.mustFix[0]?.file, 'a.ts');
+    assert.equal(merged.mustFix[0]?.severity, 'high');
+    assert.deepEqual(merged.shouldFix, []);
+    assert.equal(merged.passed, false);
+  });
+
+  test('same-file issues with Jaccard similarity below threshold stay in shouldFix', () => {
+    const claudeIssue = detailedReviewIssue('claude', {
+      file: 'a.ts',
+      description: 'handler crashes because null guard is missing before property access',
+      severity: 'medium',
+    });
+    const codexIssue = detailedReviewIssue('codex', {
+      file: 'a.ts',
+      description: 'revise analytics widget colors and alignment for the dashboard',
+      severity: 'medium',
+    });
+
+    const merged = mergeReviews(
+      review('claude', { passed: true, issues: [claudeIssue] }),
+      review('codex', { passed: true, issues: [codexIssue] }),
+    );
+
+    assert.equal(merged.mustFix.length, 0);
+    assert.deepEqual(merged.shouldFix, [claudeIssue, codexIssue]);
+    assert.equal(merged.passed, true);
+  });
+
+  test('issue with file does not intersect issue without file even when descriptions match', () => {
+    const claudeIssue = detailedReviewIssue('claude', {
+      file: 'a.ts',
+      description: 'missing null guard before property access',
+      severity: 'medium',
+    });
+    const codexIssue = detailedReviewIssue('codex', {
+      file: undefined,
+      description: 'missing null guard before property access',
+      severity: 'medium',
+    });
+
+    const merged = mergeReviews(
+      review('claude', { passed: true, issues: [claudeIssue] }),
+      review('codex', { passed: true, issues: [codexIssue] }),
+    );
+
+    assert.equal(merged.mustFix.length, 0);
+    assert.deepEqual(merged.shouldFix, [claudeIssue, codexIssue]);
+  });
+
+  test('codex-only dedup uses fuzzy matching for intersected mustFix issues', () => {
     const sharedClaudeIssue = detailedReviewIssue('claude', {
       file: 'shared.ts',
-      description: 'shared intersection issue',
+      description: 'handler crashes because null guard is missing before property access',
       severity: 'medium',
     });
     const sharedCodexIssue = detailedReviewIssue('codex', {
       file: 'shared.ts',
-      description: 'shared intersection issue',
+      description: 'add null guard before property access to avoid handler crash',
       severity: 'medium',
     });
     const codexOnlyIssue = detailedReviewIssue('codex', {
@@ -756,13 +822,9 @@ describe('mergeReviews safety', () => {
     assert.equal(merged.mustFix.length, 1);
     assert.equal(merged.mustFix[0]?.file, 'a.ts');
     assert.equal(merged.mustFix[0]?.severity, 'high');
-    assert.equal(merged.shouldFix.length, 3);
+    assert.equal(merged.shouldFix.length, 2);
     assert.ok(merged.shouldFix.some(i => i.file === 'b.ts' && i.description === 'unrelated' && i.source === 'claude'));
-    assert.ok(
-      merged.shouldFix.some(
-        i => i.file === 'a.ts' && i.description === 'null check missing in handler before property read' && i.source === 'codex',
-      ),
-    );
+    assert.ok(!merged.shouldFix.some(i => i.file === 'a.ts' && i.source === 'codex'));
     assert.ok(merged.shouldFix.some(i => i.file === 'c.ts' && i.description === 'other thing' && i.source === 'codex'));
   });
 

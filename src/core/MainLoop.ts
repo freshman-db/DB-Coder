@@ -24,6 +24,7 @@ import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch,
 import { log } from '../utils/logger.js';
 import { truncate } from '../utils/parse.js';
 import { calculateRetryDelay } from '../utils/retry.js';
+import { wordJaccard } from '../utils/similarity.js';
 import { ERROR_PREVIEW_LEN, LOG_PREVIEW_LEN, PLAN_SUMMARY_PREVIEW_LEN, SUMMARY_PREVIEW_LEN, TASK_DESC_MAX_LENGTH } from '../types/constants.js';
 import { readFileSync, existsSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -1346,12 +1347,11 @@ export function mergeReviews(claude: ReviewResult, codex: ReviewResult): MergedR
 
   // Find intersection: issues flagged by both reviewers
   for (const ci of claude.issues) {
-    const match = codex.issues.find(xi =>
-      xi.file === ci.file && (
-        xi.description.toLowerCase().includes(ci.description.toLowerCase().slice(0, 20)) ||
-        ci.description.toLowerCase().includes(xi.description.toLowerCase().slice(0, 20))
-      )
-    );
+    const match = codex.issues.find(xi => {
+      const fileMatch = (xi.file && ci.file) ? xi.file === ci.file : !xi.file && !ci.file;
+      const descSim = wordJaccard(xi.description, ci.description);
+      return fileMatch && descSim > 0.4;
+    });
     if (match) {
       mustFix.push({ ...ci, severity: higherSeverity(ci.severity, match.severity) });
     } else {
@@ -1361,7 +1361,11 @@ export function mergeReviews(claude: ReviewResult, codex: ReviewResult): MergedR
 
   // Add codex-only issues as shouldFix
   for (const xi of codex.issues) {
-    const alreadyMerged = mustFix.some(m => m.file === xi.file && m.description === xi.description);
+    const alreadyMerged = mustFix.some(
+      m =>
+        wordJaccard(m.description, xi.description) > 0.4 &&
+        ((m.file && xi.file) ? m.file === xi.file : true),
+    );
     if (!alreadyMerged) {
       shouldFix.push(xi);
     }
