@@ -1599,7 +1599,240 @@ describe('MainLoop runCycle integration', () => {
   });
 });
 
+describe('MainLoop dualReview', () => {
+  test('returns auto-pass and warning when changed files are empty', async () => {
+    let claudeReviewCalls = 0;
+    let codexReviewCalls = 0;
+    const addCostCalls: Array<{ taskId: string; amount: number }> = [];
+    const warnLogs: LogEntry[] = [];
+
+    const { loop } = createMainLoopForCycle({
+      claude: {
+        review: async () => {
+          claudeReviewCalls++;
+          return { passed: true, issues: [], summary: 'claude', cost_usd: 0 };
+        },
+      },
+      codex: {
+        review: async () => {
+          codexReviewCalls++;
+          return { passed: true, issues: [], summary: 'codex', cost_usd: 0 };
+        },
+      },
+      costTracker: {
+        addCost: async (taskId: string, amount: number) => {
+          addCostCalls.push({ taskId, amount });
+        },
+      },
+    });
+
+    const reviewInternals = getMainLoopReviewInternals(loop);
+    const now = new Date();
+    const task: Task = {
+      id: 'task-dual-review-empty-files',
+      project_path: '/tmp/db-coder-main-loop-test',
+      task_description: 'Skip review when there are no changed files',
+      phase: 'reviewing',
+      priority: 1,
+      plan: null,
+      subtasks: [],
+      review_results: [],
+      iteration: 0,
+      total_cost_usd: 0,
+      git_branch: null,
+      start_commit: null,
+      depends_on: [],
+      status: 'active',
+      created_at: now,
+      updated_at: now,
+    };
+
+    const removeLogListener = log.addListener((entry) => {
+      if (entry.level === 'warn') {
+        warnLogs.push(entry);
+      }
+    });
+
+    let result: Awaited<ReturnType<MainLoopReviewInternals['dualReview']>>;
+    try {
+      result = await reviewInternals.dualReview(task, [], 0);
+    } finally {
+      removeLogListener();
+    }
+
+    assert.equal(result.decision, 'approve');
+    assert.equal(result.cost_usd, 0);
+    assert.equal(result.duration_ms, 0);
+    assert.deepEqual(result.merged, {
+      passed: true,
+      mustFix: [],
+      shouldFix: [],
+      summary: 'No changed files to review',
+    });
+    assert.equal(claudeReviewCalls, 0);
+    assert.equal(codexReviewCalls, 0);
+    assert.deepEqual(addCostCalls, []);
+    assert.ok(
+      warnLogs.some(entry => entry.message === 'dualReview called with no changed files — skipping review'),
+      'Expected warning when dualReview receives no changed files',
+    );
+  });
+});
+
 describe('MainLoop runReviewCycle', () => {
+  test('auto-passes without invoking reviewers when start commit is empty', async () => {
+    const warnLogs: LogEntry[] = [];
+    let claudeReviewCalls = 0;
+    let codexReviewCalls = 0;
+    const { repoPath } = await initGitRepo();
+
+    try {
+      const { loop } = createMainLoopForCycle({
+        config: { projectPath: repoPath },
+        claude: {
+          review: async () => {
+            claudeReviewCalls++;
+            return { passed: true, issues: [], summary: 'claude', cost_usd: 0 };
+          },
+        },
+        codex: {
+          review: async () => {
+            codexReviewCalls++;
+            return { passed: true, issues: [], summary: 'codex', cost_usd: 0 };
+          },
+        },
+      });
+      const reviewInternals = getMainLoopReviewInternals(loop);
+      const now = new Date();
+      const task: Task = {
+        id: 'task-review-start-commit-missing',
+        project_path: repoPath,
+        task_description: 'Warn when review changed files cannot be determined',
+        phase: 'executing',
+        priority: 1,
+        plan: null,
+        subtasks: [],
+        review_results: [],
+        iteration: 0,
+        total_cost_usd: 0,
+        git_branch: null,
+        start_commit: null,
+        depends_on: [],
+        status: 'active',
+        created_at: now,
+        updated_at: now,
+      };
+
+      const removeLogListener = log.addListener((entry) => {
+        if (entry.level === 'warn') {
+          warnLogs.push(entry);
+        }
+      });
+
+      try {
+        const result = await reviewInternals.runReviewCycle(task, '', [], repoPath);
+        assert.deepEqual(result, {
+          aborted: false,
+          reviewResult: {
+            passed: true,
+            mustFix: [],
+            shouldFix: [],
+            summary: 'No changed files to review',
+          },
+          reviewRetries: 0,
+        });
+      } finally {
+        removeLogListener();
+      }
+
+      assert.equal(claudeReviewCalls, 0);
+      assert.equal(codexReviewCalls, 0);
+      assert.ok(
+        warnLogs.some(entry => entry.message === 'startCommit is empty (getHeadCommit failed) — changed files cannot be determined, review will auto-pass'),
+        'Expected startCommit root-cause warning when changed files are empty',
+      );
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  test('auto-passes without invoking reviewers when start commit is valid but changed files are empty', async () => {
+    const infoLogs: LogEntry[] = [];
+    let claudeReviewCalls = 0;
+    let codexReviewCalls = 0;
+    const { repoPath } = await initGitRepo();
+
+    try {
+      const startCommit = await runGit(repoPath, ['rev-parse', 'HEAD']);
+      const { loop } = createMainLoopForCycle({
+        config: { projectPath: repoPath },
+        claude: {
+          review: async () => {
+            claudeReviewCalls++;
+            return { passed: true, issues: [], summary: 'claude', cost_usd: 0 };
+          },
+        },
+        codex: {
+          review: async () => {
+            codexReviewCalls++;
+            return { passed: true, issues: [], summary: 'codex', cost_usd: 0 };
+          },
+        },
+      });
+      const reviewInternals = getMainLoopReviewInternals(loop);
+      const now = new Date();
+      const task: Task = {
+        id: 'task-review-no-files-since-start-commit',
+        project_path: repoPath,
+        task_description: 'Info log when review has no changed files',
+        phase: 'executing',
+        priority: 1,
+        plan: null,
+        subtasks: [],
+        review_results: [],
+        iteration: 0,
+        total_cost_usd: 0,
+        git_branch: null,
+        start_commit: null,
+        depends_on: [],
+        status: 'active',
+        created_at: now,
+        updated_at: now,
+      };
+
+      const removeLogListener = log.addListener((entry) => {
+        if (entry.level === 'info') {
+          infoLogs.push(entry);
+        }
+      });
+
+      try {
+        const result = await reviewInternals.runReviewCycle(task, startCommit, [], repoPath);
+        assert.deepEqual(result, {
+          aborted: false,
+          reviewResult: {
+            passed: true,
+            mustFix: [],
+            shouldFix: [],
+            summary: 'No changed files to review',
+          },
+          reviewRetries: 0,
+        });
+      } finally {
+        removeLogListener();
+      }
+
+      assert.equal(claudeReviewCalls, 0);
+      assert.equal(codexReviewCalls, 0);
+      assert.ok(
+        infoLogs.some(entry => entry.message === 'No files changed since start commit — review will auto-pass'),
+        'Expected no-change info log when changed files are empty',
+      );
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
   test('persists progressive review_results arrays across retry rounds', async () => {
     let codexFixCalls = 0;
     let claudeFixCalls = 0;

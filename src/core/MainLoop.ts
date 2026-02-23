@@ -800,6 +800,13 @@ export class MainLoop {
     let reviewRetries = 0;
     const allReviewResults: unknown[] = [...(task.review_results as unknown[] || [])];
     let changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
+    if (changedFiles.length === 0) {
+      if (startCommit === '') {
+        log.warn('startCommit is empty (getHeadCommit failed) — changed files cannot be determined, review will auto-pass');
+      } else {
+        log.info('No files changed since start commit — review will auto-pass');
+      }
+    }
     let { merged: reviewResult, decision: reviewDecision, cost_usd: reviewCost, duration_ms: reviewDuration } = await this.dualReview(task, changedFiles, reviewRetries);
 
     allReviewResults.push(reviewResult);
@@ -977,6 +984,21 @@ export class MainLoop {
     changedFiles: string[],
     reviewRetries: number,
   ): Promise<{ merged: MergedReviewResult; decision: 'approve' | 'retry' | 'reject'; cost_usd: number; duration_ms: number }> {
+    if (changedFiles.length === 0) {
+      log.warn('dualReview called with no changed files — skipping review');
+      return {
+        merged: {
+          passed: true,
+          mustFix: [],
+          shouldFix: [],
+          summary: 'No changed files to review',
+        },
+        decision: 'approve',
+        cost_usd: 0,
+        duration_ms: 0,
+      };
+    }
+
     const filesStr = changedFiles.join('\n');
     const reviewMcpNames = this.claude.getMcpServerNames('review');
     const agentGuide = buildAgentGuidance('review', this.claude.getLoadedPluginIds());
