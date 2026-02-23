@@ -13,7 +13,7 @@ import type { CostTracker } from '../utils/cost.js';
 import type { Brain } from './Brain.js';
 import type { TaskQueue } from './TaskQueue.js';
 import type { PromptRegistry } from '../prompts/PromptRegistry.js';
-import { MainLoop, extractIssueCategories } from './MainLoop.js';
+import { MainLoop, extractIssueCategories, mergeReviews } from './MainLoop.js';
 import type { EvaluationResult, StatusSnapshot } from './types.js';
 import type { ReviewIssue, ReviewResult } from '../bridges/CodingAgent.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
@@ -68,22 +68,6 @@ type MainLoopExecutionInternals = {
 
 type MainLoopEvaluationInternals = {
   evaluateTaskValue(task: Task, projectPath: string): Promise<EvaluationResult>;
-};
-
-type MainLoopReviewInternals = {
-  handleReviewResult(
-    claudeReview: ReviewResult,
-    codexReview: ReviewResult,
-    reviewRetries: number,
-  ): {
-    merged: {
-      passed: boolean;
-      mustFix: ReviewIssue[];
-      shouldFix: ReviewIssue[];
-      summary: string;
-    };
-    decision: 'approve' | 'retry' | 'reject';
-  };
 };
 
 type CycleConfigOverrides = {
@@ -330,10 +314,6 @@ function getMainLoopEvaluationInternals(loop: MainLoop): MainLoopEvaluationInter
   return loop as unknown as MainLoopEvaluationInternals;
 }
 
-function getMainLoopReviewInternals(loop: MainLoop): MainLoopReviewInternals {
-  return loop as unknown as MainLoopReviewInternals;
-}
-
 type PromptDeltaInternals = {
   updatePromptVersionEffectiveness(passed: boolean): Promise<void>;
 };
@@ -467,53 +447,129 @@ describe('extractIssueCategories', () => {
   });
 });
 
-describe('MainLoop review merge safety', () => {
-  const review = (overrides: Partial<ReviewResult> = {}): ReviewResult => ({
+describe('mergeReviews safety', () => {
+  const review = (
+    source: 'claude' | 'codex',
+    overrides: Partial<ReviewResult> = {},
+  ): ReviewResult => ({
     passed: true,
     issues: [],
-    summary: 'default',
+    summary: `${source} review`,
     cost_usd: 0,
     ...overrides,
   });
 
-  test('keeps existing behavior when both reviewers pass and only should-fix issues exist', () => {
-    const loop = createMainLoop();
-    const reviewInternals = getMainLoopReviewInternals(loop);
-
-    const claudeReview = review({
-      passed: true,
-      issues: [{ description: 'Claude-only suggestion', severity: 'medium', source: 'claude' }],
-      summary: 'Claude has suggestions',
-    });
-    const codexReview = review({ passed: true, issues: [], summary: 'Codex approves' });
-
-    const result = reviewInternals.handleReviewResult(claudeReview, codexReview, 0);
-
-    assert.equal(result.merged.passed, true);
-    assert.equal(result.decision, 'approve');
-    assert.equal(result.merged.mustFix.length, 0);
-    assert.equal(result.merged.shouldFix.length, 1);
-    assert.equal(result.merged.shouldFix[0]?.description, 'Claude-only suggestion');
+  const reviewIssue = (
+    source: 'claude' | 'codex',
+    severity: ReviewIssue['severity'] = 'high',
+  ): ReviewIssue => ({
+    description: 'Missing null guard before property access',
+    file: 'src/core/MainLoop.ts',
+    severity,
+    source,
   });
 
-  test('fails review when a reviewer explicitly fails without structured issues', () => {
-    const loop = createMainLoop();
-    const reviewInternals = getMainLoopReviewInternals(loop);
+  test('both reviewers pass with empty issues', () => {
+    const merged = mergeReviews(
+      review('claude', { passed: true, issues: [] }),
+      review('codex', { passed: true, issues: [] }),
+    );
 
-    const claudeReview = review({ passed: false, issues: [], summary: 'FAIL' });
-    const codexReview = review({ passed: true, issues: [], summary: 'PASS' });
+    assert.equal(merged.passed, true);
+    assert.deepEqual(merged.mustFix, []);
+    assert.deepEqual(merged.shouldFix, []);
+  });
 
-    const result = reviewInternals.handleReviewResult(claudeReview, codexReview, 0);
+  test('claude raw fail blocks merge result', () => {
+    const merged = mergeReviews(
+      review('claude', { passed: false, issues: [] }),
+      review('codex', { passed: true, issues: [] }),
+    );
 
-    assert.equal(result.merged.passed, false);
-    assert.equal(result.decision, 'retry');
-    assert.equal(result.merged.mustFix.length, 0);
-    assert.equal(result.merged.shouldFix.length, 1);
-    assert.deepEqual(result.merged.shouldFix[0], {
+    assert.equal(merged.passed, false);
+    assert.equal(merged.mustFix.length, 0);
+    assert.equal(merged.shouldFix.length, 1);
+    assert.deepEqual(merged.shouldFix[0], {
       description: 'Claude reviewer explicitly failed without structured issues',
       severity: 'medium',
       source: 'claude',
     });
+  });
+
+  test('codex raw fail blocks merge result', () => {
+    const merged = mergeReviews(
+      review('claude', { passed: true, issues: [] }),
+      review('codex', { passed: false, issues: [] }),
+    );
+
+    assert.equal(merged.passed, false);
+    assert.equal(merged.mustFix.length, 0);
+    assert.equal(merged.shouldFix.length, 1);
+    assert.deepEqual(merged.shouldFix[0], {
+      description: 'Codex reviewer explicitly failed without structured issues',
+      severity: 'medium',
+      source: 'codex',
+    });
+  });
+
+  test('both raw fails add two synthetic should-fix issues', () => {
+    const merged = mergeReviews(
+      review('claude', { passed: false, issues: [] }),
+      review('codex', { passed: false, issues: [] }),
+    );
+
+    assert.equal(merged.passed, false);
+    assert.equal(merged.mustFix.length, 0);
+    assert.equal(merged.shouldFix.length, 2);
+    assert.equal(
+      merged.shouldFix.filter(issue => issue.description.includes('explicitly failed without structured issues')).length,
+      2,
+    );
+  });
+
+  test('non-empty issues prevent raw fail synthesis and use normal merge logic', () => {
+    const claudeIssue = reviewIssue('claude', 'high');
+    const codexIssue = reviewIssue('codex', 'high');
+    const merged = mergeReviews(
+      review('claude', { passed: false, issues: [claudeIssue] }),
+      review('codex', { passed: true, issues: [codexIssue] }),
+    );
+
+    assert.equal(merged.passed, false);
+    assert.equal(merged.mustFix.length, 1);
+    assert.equal(merged.shouldFix.length, 0);
+    assert.equal(merged.mustFix[0]?.description, 'Missing null guard before property access');
+    assert.ok(!merged.shouldFix.some(issue => issue.description.includes('explicitly failed without structured issues')));
+  });
+
+  test('intersecting issues still drive must-fix severity behavior', () => {
+    const mediumMerged = mergeReviews(
+      review('claude', { passed: true, issues: [reviewIssue('claude', 'medium')] }),
+      review('codex', { passed: true, issues: [reviewIssue('codex', 'medium')] }),
+    );
+    assert.equal(mediumMerged.mustFix.length, 1);
+    assert.equal(mediumMerged.passed, true);
+
+    const highMerged = mergeReviews(
+      review('claude', { passed: true, issues: [reviewIssue('claude', 'high')] }),
+      review('codex', { passed: true, issues: [reviewIssue('codex', 'high')] }),
+    );
+    assert.equal(highMerged.mustFix.length, 1);
+    assert.equal(highMerged.passed, false);
+  });
+
+  test('synthetic should-fix issues preserve reviewer source', () => {
+    const merged = mergeReviews(
+      review('claude', { passed: false, issues: [] }),
+      review('codex', { passed: false, issues: [] }),
+    );
+
+    const syntheticSources = merged.shouldFix
+      .filter(issue => issue.description.includes('explicitly failed without structured issues'))
+      .map(issue => issue.source)
+      .sort();
+
+    assert.deepEqual(syntheticSources, ['claude', 'codex']);
   });
 });
 

@@ -1256,7 +1256,7 @@ function smartTruncate(output: string, toolSummaries: string[] | undefined, maxL
   return '...' + output.slice(-maxLength);
 }
 
-function mergeReviews(claude: ReviewResult, codex: ReviewResult): MergedReviewResult {
+export function mergeReviews(claude: ReviewResult, codex: ReviewResult): MergedReviewResult {
   const mustFix: ReviewIssue[] = [];
   const shouldFix: ReviewIssue[] = [];
 
