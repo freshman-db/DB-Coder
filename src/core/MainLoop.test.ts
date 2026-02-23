@@ -547,6 +547,17 @@ describe('mergeReviews safety', () => {
     source,
   });
 
+  const detailedReviewIssue = (
+    source: 'claude' | 'codex',
+    overrides: Partial<Omit<ReviewIssue, 'source'>> = {},
+  ): ReviewIssue => ({
+    description: 'Missing null guard before property access',
+    file: 'src/core/MainLoop.ts',
+    severity: 'high',
+    source,
+    ...overrides,
+  });
+
   test('both reviewers pass with empty issues', () => {
     const merged = mergeReviews(
       review('claude', { passed: true, issues: [] }),
@@ -556,6 +567,203 @@ describe('mergeReviews safety', () => {
     assert.equal(merged.passed, true);
     assert.deepEqual(merged.mustFix, []);
     assert.deepEqual(merged.shouldFix, []);
+  });
+
+  test('claude-only issue becomes shouldFix', () => {
+    const claudeIssue = detailedReviewIssue('claude', {
+      file: 'a.ts',
+      description: 'Claude-only issue',
+      severity: 'medium',
+    });
+
+    const merged = mergeReviews(
+      review('claude', { passed: true, issues: [claudeIssue] }),
+      review('codex', { passed: true, issues: [] }),
+    );
+
+    assert.deepEqual(merged.mustFix, []);
+    assert.deepEqual(merged.shouldFix, [claudeIssue]);
+    assert.equal(merged.passed, true);
+  });
+
+  test('codex-only issue becomes shouldFix', () => {
+    const codexIssue = detailedReviewIssue('codex', {
+      file: 'a.ts',
+      description: 'Codex-only issue',
+      severity: 'medium',
+    });
+
+    const merged = mergeReviews(
+      review('claude', { passed: true, issues: [] }),
+      review('codex', { passed: true, issues: [codexIssue] }),
+    );
+
+    assert.deepEqual(merged.mustFix, []);
+    assert.deepEqual(merged.shouldFix, [codexIssue]);
+    assert.equal(merged.passed, true);
+  });
+
+  test('severity escalation medium+high -> high', () => {
+    const claudeIssue = detailedReviewIssue('claude', {
+      file: 'x.ts',
+      description: 'null check missing in handler',
+      severity: 'medium',
+    });
+    const codexIssue = detailedReviewIssue('codex', {
+      file: 'x.ts',
+      description: 'null check missing in handler',
+      severity: 'high',
+    });
+
+    const merged = mergeReviews(
+      review('claude', { passed: true, issues: [claudeIssue] }),
+      review('codex', { passed: true, issues: [codexIssue] }),
+    );
+
+    assert.equal(merged.mustFix.length, 1);
+    assert.equal(merged.mustFix[0]?.severity, 'high');
+    assert.deepEqual(merged.shouldFix, []);
+    assert.equal(merged.passed, false);
+  });
+
+  test('severity escalation low+critical -> critical', () => {
+    const claudeIssue = detailedReviewIssue('claude', {
+      file: 'x.ts',
+      description: 'guard missing in parser',
+      severity: 'low',
+    });
+    const codexIssue = detailedReviewIssue('codex', {
+      file: 'x.ts',
+      description: 'guard missing in parser',
+      severity: 'critical',
+    });
+
+    const merged = mergeReviews(
+      review('claude', { passed: true, issues: [claudeIssue] }),
+      review('codex', { passed: true, issues: [codexIssue] }),
+    );
+
+    assert.equal(merged.mustFix.length, 1);
+    assert.equal(merged.mustFix[0]?.severity, 'critical');
+    assert.deepEqual(merged.shouldFix, []);
+    assert.equal(merged.passed, false);
+  });
+
+  test('undefined file does not create false intersection', () => {
+    const claudeIssue = detailedReviewIssue('claude', {
+      file: undefined,
+      description: 'foo bar baz long enough for 20 chars',
+      severity: 'medium',
+    });
+    const codexIssue = detailedReviewIssue('codex', {
+      file: undefined,
+      description: 'foo bar baz long enough for 20 chars but different end',
+      severity: 'medium',
+    });
+
+    const merged = mergeReviews(
+      review('claude', { passed: true, issues: [claudeIssue] }),
+      review('codex', { passed: true, issues: [codexIssue] }),
+    );
+
+    assert.equal(merged.mustFix.length, 1, 'known weakness: undefined file + shared 20-char prefix intersects');
+    assert.equal(merged.mustFix[0]?.description, claudeIssue.description);
+    assert.deepEqual(merged.shouldFix, [codexIssue]);
+    assert.equal(merged.passed, true);
+  });
+
+  test('codex-only dedup does not re-add mustFix items to shouldFix', () => {
+    const sharedClaudeIssue = detailedReviewIssue('claude', {
+      file: 'shared.ts',
+      description: 'shared intersection issue',
+      severity: 'medium',
+    });
+    const sharedCodexIssue = detailedReviewIssue('codex', {
+      file: 'shared.ts',
+      description: 'shared intersection issue',
+      severity: 'medium',
+    });
+    const codexOnlyIssue = detailedReviewIssue('codex', {
+      file: 'codex-only.ts',
+      description: 'codex-only issue',
+      severity: 'low',
+    });
+
+    const merged = mergeReviews(
+      review('claude', { passed: true, issues: [sharedClaudeIssue] }),
+      review('codex', { passed: true, issues: [sharedCodexIssue, codexOnlyIssue] }),
+    );
+
+    assert.equal(merged.mustFix.length, 1);
+    assert.deepEqual(merged.shouldFix, [codexOnlyIssue]);
+    assert.equal(merged.mustFix.length + merged.shouldFix.length, 2);
+  });
+
+  test('medium-only mustFix still passes', () => {
+    const claudeIssue = detailedReviewIssue('claude', {
+      file: 'medium.ts',
+      description: 'medium severity shared issue',
+      severity: 'medium',
+    });
+    const codexIssue = detailedReviewIssue('codex', {
+      file: 'medium.ts',
+      description: 'medium severity shared issue',
+      severity: 'medium',
+    });
+
+    const merged = mergeReviews(
+      review('claude', { passed: true, issues: [claudeIssue] }),
+      review('codex', { passed: true, issues: [codexIssue] }),
+    );
+
+    assert.equal(merged.mustFix.length, 1);
+    assert.equal(merged.mustFix[0]?.severity, 'medium');
+    assert.deepEqual(merged.shouldFix, []);
+    assert.equal(merged.passed, true);
+  });
+
+  test('complex multi-issue partition', () => {
+    const claudeIssues = [
+      detailedReviewIssue('claude', {
+        file: 'a.ts',
+        description: 'null check missing in handler',
+        severity: 'medium',
+      }),
+      detailedReviewIssue('claude', {
+        file: 'b.ts',
+        description: 'unrelated',
+        severity: 'low',
+      }),
+    ];
+    const codexIssues = [
+      detailedReviewIssue('codex', {
+        file: 'a.ts',
+        description: 'null check missing in handler before property read',
+        severity: 'high',
+      }),
+      detailedReviewIssue('codex', {
+        file: 'c.ts',
+        description: 'other thing',
+        severity: 'medium',
+      }),
+    ];
+
+    const merged = mergeReviews(
+      review('claude', { passed: true, issues: claudeIssues }),
+      review('codex', { passed: true, issues: codexIssues }),
+    );
+
+    assert.equal(merged.mustFix.length, 1);
+    assert.equal(merged.mustFix[0]?.file, 'a.ts');
+    assert.equal(merged.mustFix[0]?.severity, 'high');
+    assert.equal(merged.shouldFix.length, 3);
+    assert.ok(merged.shouldFix.some(i => i.file === 'b.ts' && i.description === 'unrelated' && i.source === 'claude'));
+    assert.ok(
+      merged.shouldFix.some(
+        i => i.file === 'a.ts' && i.description === 'null check missing in handler before property read' && i.source === 'codex',
+      ),
+    );
+    assert.ok(merged.shouldFix.some(i => i.file === 'c.ts' && i.description === 'other thing' && i.source === 'codex'));
   });
 
   test('claude raw fail blocks merge result', () => {
