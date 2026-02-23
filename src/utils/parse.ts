@@ -1,5 +1,9 @@
 import type { ReviewResult } from '../bridges/CodingAgent.js';
 
+export function truncate(value: string, maxLen: number): string {
+  return value.length <= maxLen ? value : value.slice(0, maxLen) + '…';
+}
+
 export function getErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
