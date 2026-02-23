@@ -270,3 +270,36 @@
 [36m[2026-02-23T00:42:58.865Z] [INFO][0m Plan created: 1 tasks
 [36m[2026-02-23T00:42:58.961Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
 [36m[2026-02-23T00:42:58.963Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T00:44:47.428Z] [INFO][0m Committed: db-coder: Fix patchUtils.ts indexOf -1 bug that silently los
+[36m[2026-02-23T00:44:47.453Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T00:47:23.395Z] [INFO][0m Reviews: Claude PASS, Codex PASS (156s)
+[36m[2026-02-23T00:47:25.556Z] [INFO][0m Reflecting on task (outcome=success)...
+[36m[2026-02-23T00:47:25.557Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T00:48:44.109Z] [INFO][0m Saved experience: Always guard String.indexOf() return value before passing to slice()
+[36m[2026-02-23T00:48:44.112Z] [INFO][0m Saved experience: EOF-without-trailing-newline is a mandatory edge case for text parsers
+[36m[2026-02-23T00:48:44.114Z] [INFO][0m Saved experience: Verify dead code has zero references before removing it
+[36m[2026-02-23T00:48:44.117Z] [INFO][0m Saved experience: Bug fixes should be additive guards, not restructuring
+[36m[2026-02-23T00:48:44.119Z] [INFO][0m Saved experience: Silent failures are worse than crashes — prefer loud errors over empty-string returns
+[36m[2026-02-23T00:48:44.122Z] [INFO][0m Saved experience: Add inline comments for implicit behavior at boundary conditions
+[36m[2026-02-23T00:48:44.124Z] [INFO][0m Saved experience: Never commit log files to git — add log directories to .gitignore immediately
+[36m[2026-02-23T00:48:44.126Z] [INFO][0m Saved experience: Combining bug fix with dead code removal in one PR is efficient when both are small and verified
+[36m[2026-02-23T00:48:44.288Z] [INFO][0m Stored adjustment [strategy]: When using String.indexOf() and passing the result to slice() or substring(), al
+[36m[2026-02-23T00:48:44.291Z] [INFO][0m Stored adjustment [standard]: When writing or modifying any text-parsing function that searches for newline ch
+[36m[2026-02-23T00:48:44.293Z] [INFO][0m Stored adjustment [process]: Before removing any constant, function, or export suspected to be dead code, run
+[36m[2026-02-23T00:48:44.295Z] [INFO][0m Stored adjustment [process]: After committing changes, verify that no log files (nohup.out, *.log, logs/) wer
+[36m[2026-02-23T00:48:44.297Z] [INFO][0m Stored adjustment [strategy]: When a function returns empty string at a boundary condition (e.g., EOF) and tha
+[36m[2026-02-23T00:48:44.302Z] [INFO][0m Task completed: Fix patchUtils.ts indexOf -1 bug that silently loses section
+[36m[2026-02-23T00:48:44.311Z] [INFO][0m Merged branch: db-coder/221e7ccf
+[36m[2026-02-23T00:48:44.316Z] [INFO][0m safeBuild: compiling to dist.tmp/
+[36m[2026-02-23T00:48:46.913Z] [INFO][0m safeBuild: swapping dist/ directories
+[36m[2026-02-23T00:48:46.920Z] [INFO][0m safeBuild: success (3s)
+[36m[2026-02-23T00:48:46.920Z] [INFO][0m Self-build succeeded, restart pending after cycle completes
+[36m[2026-02-23T00:48:46.935Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T00:49:24.031Z] [INFO][0m Executing task [P1]: Derive validCategories (Brain.ts:169) and validPromptNames (routes.ts:49-60) fro
+[36m[2026-02-23T00:49:24.040Z] [INFO][0m Created branch: db-coder/56993ef5
+[36m[2026-02-23T00:49:26.133Z] [INFO][0m Task has no subtasks, auto-decomposing...
+[36m[2026-02-23T00:49:26.133Z] [INFO][0m Creating task plan...
+[36m[2026-02-23T00:49:26.222Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
+[36m[2026-02-23T00:53:35.266Z] [INFO][0m Plan created: 1 tasks
+[36m[2026-02-23T00:53:35.363Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
+[36m[2026-02-23T00:53:35.363Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
