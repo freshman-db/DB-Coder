@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test, { describe } from 'node:test';
+import test, { afterEach, describe } from 'node:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,7 +13,7 @@ import type { CostTracker } from '../utils/cost.js';
 import type { Brain } from './Brain.js';
 import type { TaskQueue } from './TaskQueue.js';
 import type { PromptRegistry } from '../prompts/PromptRegistry.js';
-import { MainLoop, extractIssueCategories, mergeReviews } from './MainLoop.js';
+import { MainLoop, countTscErrors, extractIssueCategories, mergeReviews, setCountTscErrorsDepsForTests } from './MainLoop.js';
 import type { EvaluationResult, MergedReviewResult, StatusSnapshot } from './types.js';
 import type { ReviewIssue, ReviewResult } from '../bridges/CodingAgent.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
@@ -110,6 +110,14 @@ type MainLoopStuckInternals = {
     appliedAdjustmentIds?: number[],
     errorContext?: string,
   ): Promise<void>;
+};
+
+type MainLoopPostExecutionInternals = {
+  postExecutionCheck(
+    baselineErrors: number,
+    startCommit: string,
+    projectPath: string,
+  ): Promise<{ passed: boolean; reason?: string }>;
 };
 
 type TaskLogInsert = {
@@ -374,6 +382,10 @@ function getMainLoopStuckInternals(loop: MainLoop): MainLoopStuckInternals {
   return loop as unknown as MainLoopStuckInternals;
 }
 
+function getMainLoopPostExecutionInternals(loop: MainLoop): MainLoopPostExecutionInternals {
+  return loop as unknown as MainLoopPostExecutionInternals;
+}
+
 type PromptDeltaInternals = {
   updatePromptVersionEffectiveness(passed: boolean): Promise<void>;
 };
@@ -452,6 +464,12 @@ async function initGitRepo(): Promise<{ repoPath: string; defaultBranch: string 
 
   const defaultBranch = await runGit(repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
   return { repoPath, defaultBranch };
+}
+
+function tscOutputWithErrors(count: number): string {
+  return Array.from({ length: count }, (_, index) => (
+    `src/file${index + 1}.ts(${index + 1},1): error TS2${index + 300}: synthetic error ${index + 1}`
+  )).join('\n');
 }
 
 describe('extractIssueCategories', () => {
@@ -2398,6 +2416,177 @@ describe('MainLoop handleStuck', () => {
     assert.deepEqual(updateTaskCalls, [
       { taskId: task.id, patch: { status: 'blocked', phase: 'blocked' } },
     ]);
+  });
+});
+
+describe('countTscErrors', { concurrency: false }, () => {
+  afterEach(() => {
+    setCountTscErrorsDepsForTests();
+  });
+
+  test('returns TypeScript error count when tsc reports errors', async () => {
+    setCountTscErrorsDepsForTests({
+      existsSync: () => true,
+      runProcess: async () => ({
+        exitCode: 2,
+        stdout: tscOutputWithErrors(3),
+        stderr: '',
+      }),
+    });
+
+    const errors = await countTscErrors('/tmp/db-coder-count-tsc-errors');
+
+    assert.equal(errors, 3);
+  });
+
+  test('returns -1 when tsc process crashes', async () => {
+    setCountTscErrorsDepsForTests({
+      existsSync: () => true,
+      runProcess: async () => {
+        throw new Error('spawn npx ENOENT');
+      },
+    });
+
+    const errors = await countTscErrors('/tmp/db-coder-count-tsc-crash');
+
+    assert.equal(errors, -1);
+  });
+
+  test('returns -1 when runProcess rejects with timeout', async () => {
+    setCountTscErrorsDepsForTests({
+      existsSync: () => true,
+      runProcess: async () => {
+        throw new Error('TypeScript compilation timed out');
+      },
+    });
+
+    const errors = await countTscErrors('/tmp/db-coder-count-tsc-timeout');
+
+    assert.equal(errors, -1);
+  });
+
+  test('returns 0 when tsconfig.json is missing', async () => {
+    let runProcessCalled = false;
+    setCountTscErrorsDepsForTests({
+      existsSync: () => false,
+      runProcess: async () => {
+        runProcessCalled = true;
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    });
+
+    const errors = await countTscErrors('/tmp/db-coder-count-tsc-no-config');
+
+    assert.equal(errors, 0);
+    assert.equal(runProcessCalled, false);
+  });
+
+  test('returns 0 when tsc exits cleanly with no errors', async () => {
+    setCountTscErrorsDepsForTests({
+      existsSync: () => true,
+      runProcess: async () => ({
+        exitCode: 0,
+        stdout: 'Found 0 errors. Watching for file changes.\n',
+        stderr: '',
+      }),
+    });
+
+    const errors = await countTscErrors('/tmp/db-coder-count-tsc-clean');
+
+    assert.equal(errors, 0);
+  });
+});
+
+describe('MainLoop postExecutionCheck', { concurrency: false }, () => {
+  afterEach(() => {
+    setCountTscErrorsDepsForTests();
+  });
+
+  test('fails when current TypeScript check crashes', async () => {
+    setCountTscErrorsDepsForTests({
+      existsSync: () => true,
+      runProcess: async () => {
+        throw new Error('compiler crashed');
+      },
+    });
+
+    const loop = createMainLoopForDedupHelpers({ projectPath: '/tmp/db-coder-post-check-crash' });
+    const result = await getMainLoopPostExecutionInternals(loop).postExecutionCheck(0, '', '/tmp/db-coder-post-check-crash');
+
+    assert.deepEqual(result, {
+      passed: false,
+      reason: 'TypeScript compilation crashed — cannot verify error count',
+    });
+  });
+
+  test('fails when baseline check failed and current check succeeds', async () => {
+    setCountTscErrorsDepsForTests({
+      existsSync: () => true,
+      runProcess: async () => ({
+        exitCode: 2,
+        stdout: tscOutputWithErrors(5),
+        stderr: '',
+      }),
+    });
+
+    const loop = createMainLoopForDedupHelpers({ projectPath: '/tmp/db-coder-post-check-baseline-failed' });
+    const result = await getMainLoopPostExecutionInternals(loop).postExecutionCheck(-1, '', '/tmp/db-coder-post-check-baseline-failed');
+
+    assert.deepEqual(result, {
+      passed: false,
+      reason: 'Baseline TypeScript check failed — cannot compare error counts',
+    });
+  });
+
+  test('fails when current error count increases over baseline', async () => {
+    setCountTscErrorsDepsForTests({
+      existsSync: () => true,
+      runProcess: async () => ({
+        exitCode: 2,
+        stdout: tscOutputWithErrors(5),
+        stderr: '',
+      }),
+    });
+
+    const loop = createMainLoopForDedupHelpers({ projectPath: '/tmp/db-coder-post-check-increase' });
+    const result = await getMainLoopPostExecutionInternals(loop).postExecutionCheck(3, '', '/tmp/db-coder-post-check-increase');
+
+    assert.deepEqual(result, {
+      passed: false,
+      reason: 'TypeScript errors increased: 3 → 5 (+2)',
+    });
+  });
+
+  test('passes when current errors are lower than baseline', async () => {
+    setCountTscErrorsDepsForTests({
+      existsSync: () => true,
+      runProcess: async () => ({
+        exitCode: 2,
+        stdout: tscOutputWithErrors(3),
+        stderr: '',
+      }),
+    });
+
+    const loop = createMainLoopForDedupHelpers({ projectPath: '/tmp/db-coder-post-check-improved' });
+    const result = await getMainLoopPostExecutionInternals(loop).postExecutionCheck(5, '', '/tmp/db-coder-post-check-improved');
+
+    assert.deepEqual(result, { passed: true });
+  });
+
+  test('passes when baseline and current errors are both zero', async () => {
+    setCountTscErrorsDepsForTests({
+      existsSync: () => true,
+      runProcess: async () => ({
+        exitCode: 0,
+        stdout: '',
+        stderr: '',
+      }),
+    });
+
+    const loop = createMainLoopForDedupHelpers({ projectPath: '/tmp/db-coder-post-check-zero' });
+    const result = await getMainLoopPostExecutionInternals(loop).postExecutionCheck(0, '', '/tmp/db-coder-post-check-zero');
+
+    assert.deepEqual(result, { passed: true });
   });
 });
 

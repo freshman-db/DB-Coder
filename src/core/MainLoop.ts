@@ -41,6 +41,38 @@ const LOG_OUTPUT_MAX_LENGTH = 500;
 const PROMPT_SUCCESS_DELTA = 0.1;
 const PROMPT_FAILURE_DELTA = -0.15;
 
+type RunProcessFn = (
+  command: string,
+  args: string[],
+  options?: {
+    cwd?: string;
+    env?: Record<string, string>;
+    timeout?: number;
+    input?: string;
+  },
+) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
+
+type CountTscErrorsDeps = {
+  existsSync: (path: string) => boolean;
+  runProcess: RunProcessFn;
+};
+
+const defaultCountTscErrorsDeps: CountTscErrorsDeps = {
+  existsSync,
+  runProcess: async (command, args, options) => {
+    const { runProcess } = await import('../utils/process.js');
+    return runProcess(command, args, options);
+  },
+};
+
+let countTscErrorsDeps: CountTscErrorsDeps = defaultCountTscErrorsDeps;
+
+export function setCountTscErrorsDepsForTests(overrides?: Partial<CountTscErrorsDeps>): void {
+  countTscErrorsDeps = overrides
+    ? { ...defaultCountTscErrorsDeps, ...overrides }
+    : defaultCountTscErrorsDeps;
+}
+
 type StatusListener = (status: StatusSnapshot) => void;
 type AdjustmentOutcome = 'success' | 'failed' | 'blocked_stuck' | 'blocked_max_retries';
 
@@ -1177,6 +1209,18 @@ Fix these issues while maintaining code quality. Do not introduce new issues.`;
   ): Promise<{ passed: boolean; reason?: string }> {
     // Check tsc error count
     const currentErrors = await countTscErrors(projectPath);
+    if (currentErrors < 0) {
+      return {
+        passed: false,
+        reason: 'TypeScript compilation crashed — cannot verify error count',
+      };
+    }
+    if (baselineErrors < 0 && currentErrors >= 0) {
+      return {
+        passed: false,
+        reason: 'Baseline TypeScript check failed — cannot compare error counts',
+      };
+    }
     if (currentErrors > baselineErrors) {
       return {
         passed: false,
@@ -1386,16 +1430,16 @@ export function extractIssueCategories(issues: ReviewIssue[]): string[] {
   return [...categories];
 }
 
-async function countTscErrors(cwd: string): Promise<number> {
-  if (!existsSync(join(cwd, 'tsconfig.json'))) return 0;
+export async function countTscErrors(cwd: string): Promise<number> {
+  if (!countTscErrorsDeps.existsSync(join(cwd, 'tsconfig.json'))) return 0;
   try {
-    const { runProcess } = await import('../utils/process.js');
-    const result = await runProcess('npx', ['tsc', '--noEmit'], { cwd, timeout: 60_000 });
+    const result = await countTscErrorsDeps.runProcess('npx', ['tsc', '--noEmit'], { cwd, timeout: 60_000 });
     // Count lines containing ': error TS'
     const lines = (result.stdout + result.stderr).split('\n');
     return lines.filter(l => l.includes(': error TS')).length;
-  } catch {
-    return 0;
+  } catch (e) {
+    log.warn('countTscErrors failed', { error: e instanceof Error ? e.message : String(e) });
+    return -1;
   }
 }
 
