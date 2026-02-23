@@ -3,6 +3,7 @@ import { rename as fsRename, rm as fsRm, cp as fsCp } from 'node:fs/promises';
 import { existsSync as fsExistsSync } from 'node:fs';
 import { runProcess as defaultRunProcess } from './process.js';
 import { log as defaultLog } from './logger.js';
+import { getErrorMessage } from './parse.js';
 
 export interface BuildResult {
   success: boolean;
@@ -83,7 +84,7 @@ export async function safeBuild(projectPath: string, deps: SafeBuildDeps = defau
     await rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     await rm(oldDir, { recursive: true, force: true }).catch(() => {});
 
-    const error = err instanceof Error ? err.message : String(err);
+    const error = getErrorMessage(err);
     return { success: false, error, durationMs: Date.now() - start };
   }
 }

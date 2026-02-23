@@ -1,4 +1,5 @@
 import { log } from '../utils/logger.js';
+import { getErrorMessage } from '../utils/parse.js';
 
 interface ClaudeMemResult {
   id: number;
@@ -48,7 +49,7 @@ export class ProjectMemory {
       const results: ClaudeMemResult[] = text ? [{ id: 0, text }] : [];
       return Object.assign(results, { ok: true as const, data: results });
     } catch (err) {
-      const error = `ProjectMemory search failed: ${err instanceof Error ? err.message : String(err)}`;
+      const error = `ProjectMemory search failed: ${getErrorMessage(err)}`;
       log.warn(error);
       return Object.assign([], { ok: false as const, error });
     }
@@ -74,7 +75,7 @@ export class ProjectMemory {
       const results: ClaudeMemResult[] = text ? [{ id: anchor, text }] : [];
       return Object.assign(results, { ok: true as const, data: results });
     } catch (err) {
-      const error = `ProjectMemory timeline failed: ${err instanceof Error ? err.message : String(err)}`;
+      const error = `ProjectMemory timeline failed: ${getErrorMessage(err)}`;
       log.warn(error);
       return Object.assign([], { ok: false as const, error });
     }

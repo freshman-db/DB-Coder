@@ -2,6 +2,7 @@ import { createSdkMcpServer, tool, type InferShape } from '@anthropic-ai/claude-
 import { z } from 'zod';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { TaskStore } from '../memory/TaskStore.js';
+import { getErrorMessage } from '../utils/parse.js';
 
 const MCP_SERVER_NAME = 'db-coder-system-data';
 
@@ -25,7 +26,7 @@ function success(message: string, data?: unknown): ToolResponse {
 }
 
 function error(toolName: string, err: unknown): ToolResponse {
-  const message = err instanceof Error ? err.message : String(err);
+  const message = getErrorMessage(err);
   return { content: [{ type: 'text', text: `${toolName} failed: ${message}` }], isError: true };
 }
 
