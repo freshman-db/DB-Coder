@@ -1177,6 +1177,18 @@ Fix these issues while maintaining code quality. Do not introduce new issues.`;
   ): Promise<{ passed: boolean; reason?: string }> {
     // Check tsc error count
     const currentErrors = await countTscErrors(projectPath);
+    if (currentErrors < 0) {
+      return {
+        passed: false,
+        reason: 'TypeScript compilation crashed — cannot verify error count',
+      };
+    }
+    if (baselineErrors < 0 && currentErrors >= 0) {
+      return {
+        passed: false,
+        reason: 'Baseline TypeScript check failed — cannot compare error counts',
+      };
+    }
     if (currentErrors > baselineErrors) {
       return {
         passed: false,

@@ -112,6 +112,14 @@ type MainLoopStuckInternals = {
   ): Promise<void>;
 };
 
+type MainLoopPostExecutionInternals = {
+  postExecutionCheck(
+    baselineErrors: number,
+    startCommit: string,
+    projectPath: string,
+  ): Promise<{ passed: boolean; reason?: string }>;
+};
+
 type TaskLogInsert = {
   task_id: string;
   phase: string;
@@ -372,6 +380,10 @@ function getMainLoopReviewInternals(loop: MainLoop): MainLoopReviewInternals {
 
 function getMainLoopStuckInternals(loop: MainLoop): MainLoopStuckInternals {
   return loop as unknown as MainLoopStuckInternals;
+}
+
+function getMainLoopPostExecutionInternals(loop: MainLoop): MainLoopPostExecutionInternals {
+  return loop as unknown as MainLoopPostExecutionInternals;
 }
 
 type PromptDeltaInternals = {
@@ -2398,6 +2410,47 @@ describe('MainLoop handleStuck', () => {
     assert.deepEqual(updateTaskCalls, [
       { taskId: task.id, patch: { status: 'blocked', phase: 'blocked' } },
     ]);
+  });
+});
+
+describe('MainLoop postExecutionCheck', () => {
+  test('fails closed when TypeScript compilation crashes', { concurrency: false }, async () => {
+    const projectPath = mkdtempSync(join(tmpdir(), 'db-coder-tsc-crash-'));
+    const originalPath = process.env.PATH;
+    try {
+      writeFileSync(join(projectPath, 'tsconfig.json'), JSON.stringify({ compilerOptions: { noEmit: true } }));
+      process.env.PATH = '/path-that-does-not-contain-npx';
+
+      const loop = createMainLoopForDedupHelpers({ projectPath });
+      const result = await getMainLoopPostExecutionInternals(loop).postExecutionCheck(0, '', projectPath);
+
+      assert.deepEqual(result, {
+        passed: false,
+        reason: 'TypeScript compilation crashed — cannot verify error count',
+      });
+    } finally {
+      if (originalPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = originalPath;
+      }
+      rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+
+  test('fails when baseline TypeScript check failed but current check succeeds', async () => {
+    const projectPath = mkdtempSync(join(tmpdir(), 'db-coder-tsc-baseline-'));
+    try {
+      const loop = createMainLoopForDedupHelpers({ projectPath });
+      const result = await getMainLoopPostExecutionInternals(loop).postExecutionCheck(-1, '', projectPath);
+
+      assert.deepEqual(result, {
+        passed: false,
+        reason: 'Baseline TypeScript check failed — cannot compare error counts',
+      });
+    } finally {
+      rmSync(projectPath, { recursive: true, force: true });
+    }
   });
 });
 
