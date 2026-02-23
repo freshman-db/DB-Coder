@@ -1,7 +1,23 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { extractJsonFromText, getErrorMessage, isRecord, tryParseJson, tryParseReview } from './parse.js';
+import { extractJsonFromText, getErrorMessage, isRecord, truncate, tryParseJson, tryParseReview } from './parse.js';
+
+test('truncate returns short strings unchanged', () => {
+  assert.equal(truncate('hello', 10), 'hello');
+});
+
+test('truncate returns exact-length strings unchanged', () => {
+  assert.equal(truncate('12345', 5), '12345');
+});
+
+test('truncate shortens over-length strings and appends an ellipsis', () => {
+  assert.equal(truncate('123456', 5), '12345…');
+});
+
+test('truncate returns empty strings unchanged', () => {
+  assert.equal(truncate('', 5), '');
+});
 
 test('isRecord identifies plain objects and rejects non-objects', () => {
   assert.equal(isRecord({ key: 'value' }), true);

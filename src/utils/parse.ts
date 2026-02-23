@@ -1,4 +1,9 @@
 import type { ReviewResult } from '../bridges/CodingAgent.js';
+import { SUMMARY_PREVIEW_LEN } from '../types/constants.js';
+
+export function truncate(value: string, maxLen: number): string {
+  return value.length <= maxLen ? value : value.slice(0, maxLen) + '…';
+}
 
 export function getErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -107,7 +112,7 @@ export function tryParseReview(text: string): Omit<ReviewResult, 'cost_usd'> {
   return {
     passed: !hasIssues,
     issues: [],
-    summary: output.slice(0, 500),
+    summary: output.slice(0, SUMMARY_PREVIEW_LEN),
   };
 }
 

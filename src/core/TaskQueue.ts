@@ -1,6 +1,8 @@
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { Task } from '../memory/types.js';
 import type { TaskPlan, PlanTask } from './types.js';
+import { TASK_DESC_MAX_LENGTH } from '../types/constants.js';
+import { truncate } from '../utils/parse.js';
 import { log } from '../utils/logger.js';
 
 export class TaskQueue {
@@ -19,14 +21,14 @@ export class TaskQueue {
       // Cooldown: skip if a similar task recently failed/blocked
       const recentlyFailed = await this.store.hasRecentlyFailedSimilar(projectPath, planTask.description);
       if (recentlyFailed) {
-        log.info(`Skipping task (cooldown): "${planTask.description.slice(0, 60)}" — similar task recently failed`);
+        log.info(`Skipping task (cooldown): "${truncate(planTask.description, TASK_DESC_MAX_LENGTH)}" — similar task recently failed`);
         continue;
       }
 
       // Dedup: skip if a similar task already exists
       const similar = await this.store.findSimilarTask(projectPath, planTask.description);
       if (similar) {
-        log.info(`Skipping duplicate task: "${planTask.description.slice(0, 60)}" (similar to "${similar.task_description.slice(0, 40)}" [${similar.status}])`);
+        log.info(`Skipping duplicate task: "${truncate(planTask.description, TASK_DESC_MAX_LENGTH)}" (similar to "${similar.task_description.slice(0, 40)}" [${similar.status}])`);
         planIdToDbId.set(planTask.id, similar.id);
         continue;
       }
@@ -39,7 +41,7 @@ export class TaskQueue {
           }
         : undefined;
       if (completedSimilar) {
-        log.warn(`Recurring issue detected: "${planTask.description.slice(0, 60)}" — similar to completed task ${completedSimilar.id}`);
+        log.warn(`Recurring issue detected: "${truncate(planTask.description, TASK_DESC_MAX_LENGTH)}" — similar to completed task ${completedSimilar.id}`);
       }
 
       // Resolve dependency plan IDs to database UUIDs
@@ -67,7 +69,7 @@ export class TaskQueue {
         })),
       });
 
-      log.info(`Queued task [P${planTask.priority}]: ${planTask.description.slice(0, 60)}`);
+      log.info(`Queued task [P${planTask.priority}]: ${truncate(planTask.description, TASK_DESC_MAX_LENGTH)}`);
     }
 
     return taskIds;
