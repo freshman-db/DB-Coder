@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import { memoryCategories, promptNames } from '../constants.js';
 import type { MemoryCategory, PromptName } from '../constants.js';
+import type { MemoryCategory as MemoryCategoryFromMemory } from '../../memory/types.js';
+import type { PromptName as PromptNameFromEvolution } from '../../evolution/types.js';
 
 type AssertTrue<T extends true> = T;
 type IsEqual<A, B> = (
@@ -15,6 +17,12 @@ type _MemoryCategoryMatchesSource = AssertTrue<
 >;
 type _PromptNameMatchesSource = AssertTrue<
   IsEqual<PromptName, (typeof promptNames)[number]>
+>;
+type _MemoryCategoryReExportMatchesSource = AssertTrue<
+  IsEqual<MemoryCategoryFromMemory, MemoryCategory>
+>;
+type _PromptNameReExportMatchesSource = AssertTrue<
+  IsEqual<PromptNameFromEvolution, PromptName>
 >;
 
 test('memory category types are derived from the source array', () => {

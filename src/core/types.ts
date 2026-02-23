@@ -1,5 +1,6 @@
 import type { ProjectAnalysis, AnalysisItem, SubTaskRecord } from '../memory/types.js';
 import type { ReviewIssue } from '../bridges/CodingAgent.js';
+import type { MemoryCategory } from '../types/constants.js';
 
 export type { ProjectAnalysis, AnalysisItem };
 
@@ -41,7 +42,7 @@ export interface ReflectionResult {
 }
 
 export interface ExtractedExperience {
-  category: 'habit' | 'experience' | 'standard' | 'workflow' | 'framework' | 'failure' | 'simplification';
+  category: MemoryCategory;
   title: string;
   content: string;
   tags: string[];

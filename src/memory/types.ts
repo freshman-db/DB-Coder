@@ -1,4 +1,6 @@
-export type MemoryCategory = 'habit' | 'experience' | 'standard' | 'workflow' | 'framework' | 'failure' | 'simplification';
+import type { MemoryCategory } from '../types/constants.js';
+
+export type { MemoryCategory } from '../types/constants.js';
 
 export interface Memory {
   id: number;

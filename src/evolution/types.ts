@@ -1,3 +1,7 @@
+import type { PromptName } from '../types/constants.js';
+
+export type { PromptName } from '../types/constants.js';
+
 // --- Adjustment categories ---
 export type AdjustmentCategory = 'routing' | 'strategy' | 'avoidance' | 'standard' | 'process' | 'config';
 
@@ -60,8 +64,6 @@ export interface ConfigProposal {
 }
 
 // --- Prompt meta-reflection ---
-export type PromptName = 'brain_system' | 'scan' | 'plan' | 'reflect' | 'executor' | 'reviewer' | 'research' | 'plan_markdown' | 'analysis' | 'evaluator';
-
 export type PromptPatchOp = 'prepend' | 'append' | 'replace_section' | 'remove_section';
 
 export interface PromptPatch {
