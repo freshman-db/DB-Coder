@@ -634,8 +634,13 @@ Respond with EXACTLY this JSON (no markdown):
 ${task.task_description}
 
 Read CLAUDE.md for project context and environment rules.
-After making changes, commit with a descriptive message.
-Do NOT modify CLAUDE.md — only the brain does that.`;
+Do NOT modify CLAUDE.md — only the brain does that.
+
+## Process
+1. Use superpowers:test-driven-development — write a failing test first, verify it fails, then implement.
+2. After making changes, run the test suite to verify.
+3. Use superpowers:verification-before-completion before claiming done — show evidence, not assumptions.
+4. Commit with a descriptive message.`;
 
     return this.workerSession.run(prompt, {
       permissionMode: 'bypassPermissions',
@@ -644,13 +649,13 @@ Do NOT modify CLAUDE.md — only the brain does that.`;
       cwd: this.config.projectPath,
       timeout: this.config.values.autonomy.subtaskTimeout * 1000,
       model: this.config.values.claude.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
-      appendSystemPrompt: 'You are a coding worker. Execute the task precisely. Read CLAUDE.md for project context.',
+      appendSystemPrompt: 'You are a coding worker. Execute the task precisely. Read CLAUDE.md for project context. You have access to superpowers skills — use them when instructed.',
     });
   }
 
   private async workerFix(sessionId: string, errors: string, task: Task): Promise<SessionResult> {
     return this.workerSession.run(
-      `The previous changes failed verification:\n${errors}\n\nFix these issues. The original task was: ${task.task_description}`,
+      `The previous changes failed verification:\n${errors}\n\nFix these issues. The original task was: ${task.task_description}\n\nUse superpowers:systematic-debugging to investigate the root cause.\nFollow all 4 phases: investigate → analyze → hypothesize → implement.\nDo NOT guess or "try changing X". Find the actual root cause first.`,
       {
         permissionMode: 'bypassPermissions',
         maxTurns: 15,
@@ -711,6 +716,7 @@ Verification: ${verification.passed ? 'PASSED' : `FAILED — ${verification.reas
 2. If there are lessons learned, update CLAUDE.md "踩过的坑" section.
 3. Use claude-mem to save important experiences for future reference.
 4. If you notice patterns (recurring issues, good practices), add them to CLAUDE.md.
+5. Use superpowers:requesting-code-review to review the code changes if the task was merged.
 
 Keep CLAUDE.md concise — only add genuinely useful rules.`;
 
