@@ -5,22 +5,14 @@ import { Command } from 'commander';
 import { Config } from './config/Config.js';
 import { Client } from './client/Client.js';
 import { GlobalMemory } from './memory/GlobalMemory.js';
-import { ProjectMemory } from './memory/ProjectMemory.js';
 import { TaskStore } from './memory/TaskStore.js';
-import { ClaudeBridge } from './bridges/ClaudeBridge.js';
 import { CodexBridge } from './bridges/CodexBridge.js';
-import { Brain } from './core/Brain.js';
 import { TaskQueue } from './core/TaskQueue.js';
 import { MainLoop } from './core/MainLoop.js';
 import { CostTracker } from './utils/cost.js';
 import { Server } from './server/Server.js';
-import { PlanWorkflow } from './core/PlanWorkflow.js';
 import { PatrolManager } from './core/ModeManager.js';
-import { McpDiscovery } from './mcp/McpDiscovery.js';
-import { TrendAnalyzer } from './evolution/TrendAnalyzer.js';
-import { EvolutionEngine } from './evolution/EvolutionEngine.js';
-import { PromptRegistry } from './prompts/PromptRegistry.js';
-import { PluginMonitor } from './plugins/PluginMonitor.js';
+import { PlanChatManager } from './core/PlanChatManager.js';
 import { log, type LogEntry } from './utils/logger.js';
 import { truncate } from './utils/parse.js';
 import { validateConfigForStartup } from './startup/configValidation.js';
@@ -48,57 +40,36 @@ program
       return;
     }
 
-    const { memory, claude: claudeConfig, codex: codexConfig, budget, mcp: mcpConfig } = config.values;
+    const { memory, codex: codexConfig, budget } = config.values;
 
     // Initialize components
     const globalMemory = new GlobalMemory(memory.pgConnectionString);
-    const projectMemory = new ProjectMemory(memory.claudeMemUrl);
     const taskStore = new TaskStore(memory.pgConnectionString);
 
     await globalMemory.init();
     await taskStore.init();
 
-    // Check for error files from previous failed builds or startup crashes
+    // Check for error files from previous failed builds
     const recoveredErrors = await checkAndRecoverErrors(taskStore, projectPath);
     if (recoveredErrors > 0) {
       log.warn(`Created ${recoveredErrors} P0 recovery task(s) from previous errors`);
     }
 
-    // Discover MCP servers from Claude plugins
-    const mcpDiscovery = new McpDiscovery(mcpConfig);
-    await mcpDiscovery.discover();
-
-    const claudeBridge = new ClaudeBridge(claudeConfig, mcpDiscovery);
     const codexBridge = new CodexBridge(codexConfig);
-    const brain = new Brain(claudeBridge, globalMemory, projectMemory, taskStore, config);
-    claudeBridge.setQuestionHandler(brain);
     const taskQueue = new TaskQueue(taskStore);
     const costTracker = new CostTracker(taskStore, budget);
 
-    // Prompt registry (meta-prompt reflection system)
-    const promptRegistry = new PromptRegistry(taskStore, projectPath);
-    await promptRegistry.refresh();
-    brain.setPromptRegistry(promptRegistry);
-
-    // Evolution system
-    const trendAnalyzer = new TrendAnalyzer(taskStore);
-    const evolutionEngine = new EvolutionEngine(taskStore, globalMemory, config, trendAnalyzer);
-    brain.setEvolutionEngine(evolutionEngine);
-
-    // Plugin monitor
-    const pluginMonitor = new PluginMonitor(config.values.plugins?.relevanceOverrides);
-
-    const mainLoop = new MainLoop(config, brain, taskQueue, claudeBridge, codexBridge, taskStore, globalMemory, costTracker);
-    mainLoop.setEvolutionEngine(evolutionEngine);
-    mainLoop.setPluginMonitor(pluginMonitor);
-    mainLoop.setPromptRegistry(promptRegistry);
-
-    // Create workflow instances
-    const planWorkflow = new PlanWorkflow(brain, claudeBridge, codexBridge, taskStore, taskQueue, config, globalMemory);
-    // Create patrol manager
+    const mainLoop = new MainLoop(config, taskQueue, codexBridge, taskStore, costTracker);
     const patrolManager = new PatrolManager(mainLoop, taskStore, projectPath);
+    const planChat = new PlanChatManager(taskStore, config);
 
-    const server = new Server(config, mainLoop, taskStore, globalMemory, costTracker, evolutionEngine, pluginMonitor, patrolManager, planWorkflow);
+    const server = new Server(
+      config, mainLoop, taskStore, globalMemory, costTracker,
+      undefined, // evolutionEngine (removed in v2)
+      undefined, // pluginMonitor (removed in v2)
+      patrolManager,
+      planChat,
+    );
 
     // Global error handlers
     process.on('unhandledRejection', (err) => { log.error('Unhandled rejection', err); });
@@ -121,7 +92,6 @@ program
       process.exit(RESTART_EXIT_CODE);
     });
 
-    // Start server
     await server.start();
 
     // Resume patrol if it was active before shutdown/restart
@@ -144,16 +114,11 @@ function getClient(): Client {
 }
 
 function isLogEntry(entry: unknown): entry is LogEntry {
-  if (typeof entry !== 'object' || entry === null) {
-    return false;
-  }
-
-  const candidate = entry as { timestamp?: unknown; level?: unknown; message?: unknown };
-  return (
-    typeof candidate.timestamp === 'string'
-    && (candidate.level === 'debug' || candidate.level === 'info' || candidate.level === 'warn' || candidate.level === 'error')
-    && typeof candidate.message === 'string'
-  );
+  if (typeof entry !== 'object' || entry === null) return false;
+  const c = entry as { timestamp?: unknown; level?: unknown; message?: unknown };
+  return typeof c.timestamp === 'string'
+    && (c.level === 'debug' || c.level === 'info' || c.level === 'warn' || c.level === 'error')
+    && typeof c.message === 'string';
 }
 
 program
@@ -200,9 +165,7 @@ program
     if (opts.follow) {
       console.log('Following logs (Ctrl+C to stop)...');
       await getClient().followLogs((entry) => {
-        if (!isLogEntry(entry)) {
-          return;
-        }
+        if (!isLogEntry(entry)) return;
         const { timestamp, level, message } = entry;
         console.log(`[${timestamp}] [${level.toUpperCase()}] ${message}`);
       });
@@ -215,18 +178,12 @@ program
 program
   .command('pause')
   .description('Pause the main loop')
-  .action(async () => {
-    await getClient().pause();
-    console.log('Paused.');
-  });
+  .action(async () => { await getClient().pause(); console.log('Paused.'); });
 
 program
   .command('resume')
   .description('Resume the main loop')
-  .action(async () => {
-    await getClient().resume();
-    console.log('Resumed.');
-  });
+  .action(async () => { await getClient().resume(); console.log('Resumed.'); });
 
 program
   .command('scan')
@@ -236,28 +193,6 @@ program
     const depth = opts.deep ? 'deep' : 'normal';
     await getClient().triggerScan(depth);
     console.log(`Scan triggered (${depth}).`);
-  });
-
-program
-  .command('memory <action>')
-  .description('Memory management (search|add)')
-  .argument('[query...]', 'Search query or memory content')
-  .option('-c, --category <cat>', 'Memory category', 'experience')
-  .option('-t, --title <title>', 'Memory title')
-  .action(async (action, query, opts) => {
-    const client = getClient();
-    if (action === 'search') {
-      const q = query.join(' ');
-      const results = await client.searchMemory(q);
-      console.log(JSON.stringify(results, null, 2));
-    } else if (action === 'add') {
-      const content = query.join(' ');
-      const title = opts.title ?? content.slice(0, 50);
-      await client.addMemory(opts.category, title, content);
-      console.log('Memory added.');
-    } else {
-      console.error('Unknown action. Use: search or add');
-    }
   });
 
 program
