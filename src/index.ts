@@ -22,9 +22,11 @@ import { EvolutionEngine } from './evolution/EvolutionEngine.js';
 import { PromptRegistry } from './prompts/PromptRegistry.js';
 import { PluginMonitor } from './plugins/PluginMonitor.js';
 import { log, type LogEntry } from './utils/logger.js';
+import { truncate } from './utils/parse.js';
 import { validateConfigForStartup } from './startup/configValidation.js';
 import { wireGracefulShutdown } from './startup/gracefulShutdown.js';
 import { checkAndRecoverErrors } from './startup/errorRecovery.js';
+import { TASK_DESC_MAX_LENGTH } from './types/constants.js';
 
 const program = new Command()
   .name('db-coder')
@@ -186,7 +188,7 @@ program
     }
     for (const t of tasks) {
       const statusIcon = { queued: '⏳', active: '🔄', done: '✅', failed: '❌', blocked: '🚫', skipped: '⏭️' }[t.status] ?? '?';
-      console.log(`${statusIcon} [P${t.priority}] ${t.task_description.slice(0, 60)}  (${t.id.slice(0, 8)})`);
+      console.log(`${statusIcon} [P${t.priority}] ${truncate(t.task_description, TASK_DESC_MAX_LENGTH)}  (${t.id.slice(0, 8)})`);
     }
   });
 
@@ -277,7 +279,7 @@ program
       return;
     }
     for (const t of blocked) {
-      console.log(`🚫 [P${t.priority}] ${t.task_description.slice(0, 60)}  (${t.id.slice(0, 8)})`);
+      console.log(`🚫 [P${t.priority}] ${truncate(t.task_description, TASK_DESC_MAX_LENGTH)}  (${t.id.slice(0, 8)})`);
     }
   });
 

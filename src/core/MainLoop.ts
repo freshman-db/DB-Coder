@@ -22,8 +22,9 @@ import { buildAgentGuidance } from '../prompts/agents.js';
 import { createSystemDataMcpServer } from '../mcp/SystemDataMcp.js';
 import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch, isWorkingClean, branchExists, getChangedFilesSince, getModifiedAndAddedFiles, mergeBranch, deleteBranch, listBranches, forceDeleteBranch, getDiffStats } from '../utils/git.js';
 import { log } from '../utils/logger.js';
+import { truncate } from '../utils/parse.js';
 import { calculateRetryDelay } from '../utils/retry.js';
-import { TASK_DESC_MAX_LENGTH } from '../types/constants.js';
+import { ERROR_PREVIEW_LEN, LOG_PREVIEW_LEN, PLAN_SUMMARY_PREVIEW_LEN, SUMMARY_PREVIEW_LEN, TASK_DESC_MAX_LENGTH } from '../types/constants.js';
 import { readFileSync, existsSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -36,8 +37,6 @@ const PLUGIN_CHECK_INTERVAL_MS = 86400_000;
 const BRANCH_ID_LENGTH = 8;
 const SUBTASK_RESULT_MAX_LENGTH = 1500;
 const COMMIT_MSG_MAX_LENGTH = 50;
-const REVIEW_SUMMARY_MAX_LENGTH = 200;
-const LOG_OUTPUT_MAX_LENGTH = 500;
 const PROMPT_SUCCESS_DELTA = 0.1;
 const PROMPT_FAILURE_DELTA = -0.15;
 
@@ -419,7 +418,7 @@ export class MainLoop {
       // Pre-execution evaluation: is this task worth doing?
       const evaluation = await this.evaluateTaskValue(task, projectPath);
       if (!evaluation.passed) {
-        log.info(`Task rejected by evaluation (score=${evaluation.score.total}): ${task.task_description.slice(0, 60)}`);
+        log.info(`Task rejected by evaluation (score=${evaluation.score.total}): ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`);
         await this.taskStore.updateTask(task.id, {
           status: 'pending_review',
           evaluation_score: evaluation.score,
@@ -510,7 +509,7 @@ export class MainLoop {
       // Build context for the evaluator
       const planSummary = task.subtasks && (task.subtasks as SubTaskRecord[]).length > 0
         ? (task.subtasks as SubTaskRecord[]).map(st => `- ${st.description}`).join('\n')
-        : task.plan ? JSON.stringify(task.plan, null, 2).slice(0, 1000) : 'No plan available';
+        : task.plan ? JSON.stringify(task.plan, null, 2).slice(0, PLAN_SUMMARY_PREVIEW_LEN) : 'No plan available';
 
       const lastScan = await this.taskStore.getLastScan(projectPath);
       const scanContext = lastScan?.result?.summary ?? 'No recent scan data';
@@ -562,7 +561,7 @@ export class MainLoop {
     this.setCurrentTaskId(task.id);
     this.setState('executing');
 
-    log.info(`Executing task [P${task.priority}]: ${task.task_description.slice(0, TASK_DESC_MAX_LENGTH)}`);
+    log.info(`Executing task [P${task.priority}]: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`);
 
     const branchName = `${this.config.values.git.branchPrefix}${task.id.slice(0, BRANCH_ID_LENGTH)}`;
     let originalBranch = 'main';
@@ -834,8 +833,8 @@ export class MainLoop {
         task_id: task.id,
         phase: 'fix',
         agent: fixAgentName,
-        input_summary: `Fix attempt ${reviewRetries}`.slice(0, 60),
-        output_summary: fixResult.output.slice(0, LOG_OUTPUT_MAX_LENGTH),
+        input_summary: truncate(`Fix attempt ${reviewRetries}`, LOG_PREVIEW_LEN),
+        output_summary: fixResult.output.slice(0, SUMMARY_PREVIEW_LEN),
         cost_usd: fixResult.cost_usd,
         duration_ms: fixResult.duration_ms,
       });
@@ -900,7 +899,7 @@ export class MainLoop {
       iteration: task.iteration + reviewRetries,
     });
 
-    log.info(`Task ${reviewResult.passed ? 'completed' : 'blocked'}: ${task.task_description.slice(0, 60)}`);
+    log.info(`Task ${reviewResult.passed ? 'completed' : 'blocked'}: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`);
   }
 
   private async executeSubtask(
@@ -936,7 +935,7 @@ export class MainLoop {
       phase: 'execute',
       agent: subtask.executor,
       input_summary: subtask.description.slice(0, SUBTASK_RESULT_MAX_LENGTH),
-      output_summary: result.output.slice(0, LOG_OUTPUT_MAX_LENGTH),
+      output_summary: result.output.slice(0, SUMMARY_PREVIEW_LEN),
       cost_usd: result.cost_usd,
       duration_ms: result.duration_ms,
     });
@@ -1122,7 +1121,7 @@ export class MainLoop {
     // Previous review attempts summary
     const prevResults = (task.review_results as MergedReviewResult[] || []).slice(-2);
     const previousAttempts = prevResults
-      .map((r, i) => `Attempt ${i + 1}: ${r.passed ? 'PASSED' : 'FAILED'} — ${r.summary?.slice(0, REVIEW_SUMMARY_MAX_LENGTH)}`)
+      .map((r, i) => `Attempt ${i + 1}: ${r.passed ? 'PASSED' : 'FAILED'} — ${truncate(r.summary ?? '', ERROR_PREVIEW_LEN)}`)
       .join('\n');
 
     // Coding standards from memory
