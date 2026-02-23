@@ -1,6 +1,6 @@
 import type { DynamicPromptContext } from '../evolution/types.js';
 
-function formatDynamicContext(ctx?: DynamicPromptContext): string {
+export function formatDynamicContext(ctx?: DynamicPromptContext): string {
   if (!ctx) return '';
   const sections: string[] = [];
 
@@ -270,6 +270,24 @@ Also evaluate:
 - Were there opportunities to simplify the approach?
 - Did the task add unnecessary complexity?
 - Could the same result be achieved with less code?
+
+## Adjustment Quality Guidelines
+
+Each adjustment MUST be a specific, actionable instruction with a clear trigger condition.
+
+Good examples:
+- "When adding a new public method to a class, always add a corresponding unit test in the same PR"
+- "When modifying TypeScript interfaces, run tsc --noEmit before committing to catch type errors early"
+- "Avoid adding try-catch blocks that silently swallow errors — always log or re-throw"
+- "When a review flags missing error handling, check all similar functions in the same file"
+
+Bad examples (too vague — do NOT produce these):
+- "Write better tests"
+- "Improve code quality"
+- "Be more careful"
+- "Handle errors properly"
+
+If specific review issues are listed above, extract concrete lessons from them.
 
 Output as JSON:
 {
