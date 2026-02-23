@@ -15,7 +15,7 @@ import type { TaskQueue } from './TaskQueue.js';
 import type { PromptRegistry } from '../prompts/PromptRegistry.js';
 import { MainLoop, extractIssueCategories } from './MainLoop.js';
 import type { EvaluationResult, StatusSnapshot } from './types.js';
-import type { ReviewIssue } from '../bridges/CodingAgent.js';
+import type { ReviewIssue, ReviewResult } from '../bridges/CodingAgent.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import { runProcess } from '../utils/process.js';
 import type { LogEntry } from '../utils/logger.js';
@@ -68,6 +68,22 @@ type MainLoopExecutionInternals = {
 
 type MainLoopEvaluationInternals = {
   evaluateTaskValue(task: Task, projectPath: string): Promise<EvaluationResult>;
+};
+
+type MainLoopReviewInternals = {
+  handleReviewResult(
+    claudeReview: ReviewResult,
+    codexReview: ReviewResult,
+    reviewRetries: number,
+  ): {
+    merged: {
+      passed: boolean;
+      mustFix: ReviewIssue[];
+      shouldFix: ReviewIssue[];
+      summary: string;
+    };
+    decision: 'approve' | 'retry' | 'reject';
+  };
 };
 
 type CycleConfigOverrides = {
@@ -314,6 +330,10 @@ function getMainLoopEvaluationInternals(loop: MainLoop): MainLoopEvaluationInter
   return loop as unknown as MainLoopEvaluationInternals;
 }
 
+function getMainLoopReviewInternals(loop: MainLoop): MainLoopReviewInternals {
+  return loop as unknown as MainLoopReviewInternals;
+}
+
 type PromptDeltaInternals = {
   updatePromptVersionEffectiveness(passed: boolean): Promise<void>;
 };
@@ -444,6 +464,56 @@ describe('extractIssueCategories', () => {
     assert.ok(cats.includes('null-safety'));
     assert.ok(cats.includes('type-error'));
     assert.ok(!cats.some(c => c.startsWith('severity-')), 'matched issue should not get fallback');
+  });
+});
+
+describe('MainLoop review merge safety', () => {
+  const review = (overrides: Partial<ReviewResult> = {}): ReviewResult => ({
+    passed: true,
+    issues: [],
+    summary: 'default',
+    cost_usd: 0,
+    ...overrides,
+  });
+
+  test('keeps existing behavior when both reviewers pass and only should-fix issues exist', () => {
+    const loop = createMainLoop();
+    const reviewInternals = getMainLoopReviewInternals(loop);
+
+    const claudeReview = review({
+      passed: true,
+      issues: [{ description: 'Claude-only suggestion', severity: 'medium', source: 'claude' }],
+      summary: 'Claude has suggestions',
+    });
+    const codexReview = review({ passed: true, issues: [], summary: 'Codex approves' });
+
+    const result = reviewInternals.handleReviewResult(claudeReview, codexReview, 0);
+
+    assert.equal(result.merged.passed, true);
+    assert.equal(result.decision, 'approve');
+    assert.equal(result.merged.mustFix.length, 0);
+    assert.equal(result.merged.shouldFix.length, 1);
+    assert.equal(result.merged.shouldFix[0]?.description, 'Claude-only suggestion');
+  });
+
+  test('fails review when a reviewer explicitly fails without structured issues', () => {
+    const loop = createMainLoop();
+    const reviewInternals = getMainLoopReviewInternals(loop);
+
+    const claudeReview = review({ passed: false, issues: [], summary: 'FAIL' });
+    const codexReview = review({ passed: true, issues: [], summary: 'PASS' });
+
+    const result = reviewInternals.handleReviewResult(claudeReview, codexReview, 0);
+
+    assert.equal(result.merged.passed, false);
+    assert.equal(result.decision, 'retry');
+    assert.equal(result.merged.mustFix.length, 0);
+    assert.equal(result.merged.shouldFix.length, 1);
+    assert.deepEqual(result.merged.shouldFix[0], {
+      description: 'Claude reviewer explicitly failed without structured issues',
+      severity: 'medium',
+      source: 'claude',
+    });
   });
 });
 
