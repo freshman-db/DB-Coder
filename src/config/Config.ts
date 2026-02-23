@@ -28,6 +28,11 @@ const DEFAULTS: DbCoderConfig = {
   server: { port: 18800, host: '127.0.0.1' },
   mcp: { enabled: true },
   plugins: {},
+  scan: {
+    autoIdentifyModules: true,
+    maxModulesPerCycle: 1,
+    moduleRotationInterval: 3,
+  },
   evolution: {
     goals: [
       { description: '提升代码质量：修复类型错误，统一编码规范', priority: 1, status: 'active' },

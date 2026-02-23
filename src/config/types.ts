@@ -95,6 +95,12 @@ export interface PluginConfig {
   relevanceOverrides?: Record<string, PluginRelevance>; // manual plugin relevance
 }
 
+export interface ScanConfig {
+  autoIdentifyModules?: boolean;    // default true — auto-identify functional modules
+  maxModulesPerCycle?: number;      // default 1 — modules to scan per cycle
+  moduleRotationInterval?: number;  // default 3 — cycles before rotating to unchanged modules
+}
+
 export interface DbCoderConfig {
   apiToken: string;
   brain: BrainConfig;
@@ -109,6 +115,7 @@ export interface DbCoderConfig {
   mcp: McpConfig;
   plugins: PluginConfig;
   evolution: EvolutionConfig;
+  scan: ScanConfig;
 }
 
 export type DeepPartial<T> = {
