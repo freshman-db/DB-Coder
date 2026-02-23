@@ -32,7 +32,9 @@ You have access to specialized skills and persistent memory. Use them proactivel
 1. Read relevant files before making changes
 2. Make focused, minimal changes for this subtask
 3. Ensure code compiles/passes linting
-4. Add tests if appropriate
+4. If you modify or create any function/method, add or update corresponding unit tests.
+   - Check if a .test.ts file exists for the modified module. If not, create one with at least basic coverage.
+   - Only skip tests for pure type definitions, config-only changes, or prompt template text changes.
 5. Commit your changes with a clear message
 6. Prefer simple, clear solutions — avoid over-engineering
 7. Use available skills and agents when they add value:

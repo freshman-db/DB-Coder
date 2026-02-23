@@ -55,6 +55,21 @@ describe('reflectPrompt', () => {
     assert.ok(prompt.includes(`Result: ${result}`));
     assert.ok(prompt.includes(`Review: ${reviewSummary}`));
   });
+
+  it('includes recurring pattern escalation guidance for behavioral adjustments', () => {
+    const prompt = reflectPrompt(
+      'Refactor status endpoint',
+      'Updated handler and tests',
+      'Review flagged recurring missing-test issue',
+    );
+
+    assert.ok(prompt.includes('## Recurring Pattern Escalation'));
+    assert.ok(prompt.includes('BEHAVIORAL adjustment'));
+    assert.ok(prompt.includes('Technique adjustment (narrow):'));
+    assert.ok(prompt.includes('Behavioral adjustment (required for recurring issues):'));
+    assert.ok(prompt.includes('always add or update unit tests for the changed code'));
+    assert.ok(prompt.includes('category "standard"'));
+  });
 });
 
 describe('formatDynamicContext', () => {

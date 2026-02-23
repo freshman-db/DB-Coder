@@ -512,6 +512,30 @@ describe('EvolutionEngine.storeProposedPatches', () => {
   });
 });
 
+describe('EvolutionEngine.analyzeRecurringIssues', () => {
+  test('uses mandatory directives for known categories and fallback for unknown categories', async () => {
+    const taskStore: Partial<TaskStore> = {
+      getRecurringIssueCategories: async (projectPath: string, limit = 10) => {
+        assert.equal(projectPath, '/repo');
+        assert.equal(limit, 10);
+        return [
+          { category: 'missing-test', count: 89 },
+          { category: 'custom-category', count: 4 },
+          { category: 'import', count: 2 },
+        ];
+      },
+    };
+    const engine = createEvolutionEngine(taskStore, {});
+
+    const recurringIssues = await engine.analyzeRecurringIssues('/repo');
+
+    assert.deepEqual(recurringIssues, [
+      'MANDATORY: Every code change must include corresponding unit tests. This issue has recurred 89 times without improvement.',
+      'Recurring issue: "custom-category" appeared 4 times. Consider addressing root cause.',
+    ]);
+  });
+});
+
 describe('EvolutionEngine.assessGoalProgress', () => {
   test('matches Chinese default goals to keyword-related completed tasks', async () => {
     const goals = [
