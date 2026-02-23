@@ -9,6 +9,7 @@ import type { CostTracker } from '../utils/cost.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PluginMonitor } from '../plugins/PluginMonitor.js';
 import type { PromptRegistry } from '../prompts/PromptRegistry.js';
+import { ModuleScheduler } from './ModuleScheduler.js';
 import type { Task, SubTaskRecord, ReviewEvent } from '../memory/types.js';
 import type { MergedReviewResult, LoopState, ProjectAnalysis, StatusSnapshot, EvaluationResult } from './types.js';
 import type { AgentResult, ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
@@ -60,6 +61,7 @@ export class MainLoop {
   private evolutionEngine?: EvolutionEngine;
   private pluginMonitor?: PluginMonitor;
   private promptRegistry?: PromptRegistry;
+  private moduleScheduler: ModuleScheduler;
   private lastPluginCheck = 0;
   private tasksCompletedSinceMetaReflect = 0;
 
@@ -76,6 +78,7 @@ export class MainLoop {
     const hash = createHash('md5').update(config.projectPath).digest('hex').slice(0, BRANCH_ID_LENGTH);
     const lockDir = join(homedir(), '.db-coder');
     this.lockFile = join(lockDir, `${hash}.lock`);
+    this.moduleScheduler = new ModuleScheduler(taskStore, config.values?.scan?.moduleRotationInterval ?? 3);
   }
 
   getState(): LoopState { return this.state; }
@@ -283,36 +286,82 @@ export class MainLoop {
       }
     }
 
-    // SCAN
+    // SCAN — module-based flow scanning
     this.setState('scanning');
-    const hasChanges = await this.brain.hasChanges(projectPath);
-    if (!hasChanges) {
-      // Check if there are queued tasks to process
+
+    // Ensure modules are identified
+    const autoIdentify = this.config.values?.scan?.autoIdentifyModules !== false;
+    let modules = await this.taskStore.getModules(projectPath);
+    if (modules.length === 0 && autoIdentify) {
+      try {
+        const { cost: idCost } = await this.brain.identifyModules(projectPath);
+        if (idCost > 0) await this.taskStore.addDailyCost(idCost);
+        modules = await this.taskStore.getModules(projectPath);
+      } catch (err) {
+        log.warn(`Module identification failed, falling back to global scan: ${err}`);
+      }
+    }
+
+    // Module-based scanning
+    let didScan = false;
+    if (modules.length > 0) {
+      const next = await this.moduleScheduler.getNextModule(projectPath);
+      if (next) {
+        const depth = next.hasChanges ? 'normal' as const : 'quick' as const;
+        log.info(`Module scan: ${next.module.name} (${depth}, ${next.hasChanges ? 'files changed' : 'rotation'})`);
+        const { analysis, cost: scanCost } = await this.brain.scanModule(projectPath, next.module, depth);
+        if (scanCost > 0) await this.taskStore.addDailyCost(scanCost);
+        await this.moduleScheduler.resetCycleCounter(projectPath);
+        didScan = true;
+
+        // PLAN from module scan results
+        const actionableItems = analysis.issues.length + analysis.opportunities.length;
+        if (actionableItems > 0) {
+          this.setState('planning');
+          const { plan, cost: planCost } = await this.brain.createPlan(projectPath, analysis);
+          if (planCost > 0) await this.taskStore.addDailyCost(planCost);
+          if (plan.tasks.length > 0) {
+            await this.taskQueue.enqueue(projectPath, plan);
+            log.info(`Planned ${plan.tasks.length} new tasks from module scan`);
+          }
+        } else {
+          log.info(`Module ${next.module.name}: no actionable items (health: ${analysis.projectHealth}/100)`);
+        }
+      } else {
+        await this.moduleScheduler.incrementCycleCounter(projectPath);
+      }
+    } else {
+      // Fallback: global scan if no modules identified
+      const hasChanges = await this.brain.hasChanges(projectPath);
+      if (hasChanges) {
+        const { analysis, cost: scanCost } = await this.brain.scanProject(projectPath, 'normal');
+        if (scanCost > 0) await this.taskStore.addDailyCost(scanCost);
+        didScan = true;
+
+        const actionableItems = analysis.issues.length + analysis.opportunities.length;
+        if (actionableItems > 0) {
+          this.setState('planning');
+          const { plan, cost: planCost } = await this.brain.createPlan(projectPath, analysis);
+          if (planCost > 0) await this.taskStore.addDailyCost(planCost);
+          if (plan.tasks.length > 0) {
+            await this.taskQueue.enqueue(projectPath, plan);
+            log.info(`Planned ${plan.tasks.length} new tasks`);
+          }
+        } else {
+          log.info(`Scan found no actionable items (health: ${analysis.projectHealth}/100). Skipping planning.`);
+        }
+      }
+    }
+
+    // If no scan happened and no tasks, sleep
+    if (!didScan) {
       const queued = await this.taskQueue.getQueued(projectPath);
       if (queued.length === 0) {
-        log.info('No changes and no queued tasks. Sleeping.');
+        log.info('No module to scan and no queued tasks. Sleeping.');
         this.setState('idle');
         return;
       }
-      log.info(`No new changes but ${queued.length} queued tasks.`);
-    } else {
-      const { analysis, cost: scanCost } = await this.brain.scanProject(projectPath, 'normal');
-      if (scanCost > 0) await this.taskStore.addDailyCost(scanCost);
-
-      // PLAN
-      const actionableItems = analysis.issues.length + analysis.opportunities.length;
-      if (actionableItems > 0) {
-        this.setState('planning');
-        const { plan, cost: planCost } = await this.brain.createPlan(projectPath, analysis);
-        if (planCost > 0) await this.taskStore.addDailyCost(planCost);
-
-        if (plan.tasks.length > 0) {
-          await this.taskQueue.enqueue(projectPath, plan);
-          log.info(`Planned ${plan.tasks.length} new tasks`);
-        }
-      } else {
-        log.info(`Scan found no actionable items (health: ${analysis.projectHealth}/100). Skipping planning.`);
-      }
+      log.info(`No scan needed but ${queued.length} queued tasks.`);
     }
 
     // EVOLVE: assess goal progress (use fresh scan or last saved scan)
@@ -382,6 +431,43 @@ export class MainLoop {
     } finally {
       this.setState('idle');
     }
+  }
+
+  /** Manually trigger module identification */
+  async triggerIdentifyModules(): Promise<void> {
+    if (this.running) {
+      throw new Error('Cannot identify modules while patrol loop is running');
+    }
+    this.setState('scanning');
+    try {
+      const { cost } = await this.brain.identifyModules(this.config.projectPath);
+      if (cost > 0) await this.taskStore.addDailyCost(cost);
+    } finally {
+      this.setState('idle');
+    }
+  }
+
+  /** Manually trigger a single module scan */
+  async triggerModuleScan(moduleName: string, depth: 'quick' | 'normal' = 'normal'): Promise<void> {
+    if (this.running) {
+      throw new Error('Cannot trigger module scan while patrol loop is running');
+    }
+    const module = await this.taskStore.getModule(this.config.projectPath, moduleName);
+    if (!module) {
+      throw new Error(`Module not found: ${moduleName}`);
+    }
+    this.setState('scanning');
+    try {
+      const { cost } = await this.brain.scanModule(this.config.projectPath, module, depth);
+      if (cost > 0) await this.taskStore.addDailyCost(cost);
+    } finally {
+      this.setState('idle');
+    }
+  }
+
+  /** Get the module scheduler for external access */
+  getModuleScheduler(): ModuleScheduler {
+    return this.moduleScheduler;
   }
 
   private async evaluateTaskValue(task: Task, projectPath: string): Promise<EvaluationResult> {
