@@ -224,6 +224,51 @@ describe('EvolutionEngine.parseMetaReflectOutput', () => {
       log.debug = originalDebug;
     }
   });
+
+  test('returns null when patch proposals are missing required fields', () => {
+    const engine = createEvolutionEngine({}, {});
+    const internals = engine as unknown as EvolutionEngineInternals;
+
+    const parsed = internals.parseMetaReflectOutput(JSON.stringify({
+      patches: [
+        { promptName: 'plan', patches: [{ op: 'append', content: 'x', reason: 'y' }] },
+        { promptName: 'scan', confidence: 0.9 },
+        { patches: [{ op: 'append', content: 'x', reason: 'y' }], confidence: 0.6 },
+      ],
+      analysis: 'ignored',
+    }));
+
+    assert.equal(parsed, null);
+  });
+
+  test('keeps valid proposals when output contains mixed valid and invalid patches', () => {
+    const engine = createEvolutionEngine({}, {});
+    const internals = engine as unknown as EvolutionEngineInternals;
+    const validPatch: PromptPatch = {
+      op: 'append',
+      content: 'Add explicit null checks.',
+      reason: 'Reduce runtime failures.',
+    };
+
+    const parsed = internals.parseMetaReflectOutput(JSON.stringify({
+      patches: [
+        { promptName: 'scan', patches: [validPatch], rationale: 'good', confidence: 0.82 },
+        { promptName: 'plan', patches: [], confidence: 0.7 },
+        { promptName: 'reflect', patches: [validPatch], confidence: 'high' },
+      ],
+      analysis: 'Mixed results',
+    }));
+
+    assert.deepEqual(parsed, {
+      patches: [{
+        promptName: 'scan',
+        patches: [validPatch],
+        rationale: 'good',
+        confidence: 0.82,
+      }],
+      analysis: 'Mixed results',
+    });
+  });
 });
 
 describe('EvolutionEngine.setNestedValue', () => {
@@ -257,6 +302,17 @@ describe('EvolutionEngine.setNestedValue', () => {
     internals.setNestedValue(configState, 'evolution.settings.maxRetries', 4);
 
     assert.equal(configState.evolution.settings.maxRetries, 4);
+  });
+
+  test('throws when the path does not exist', () => {
+    const engine = createEvolutionEngine({}, {});
+    const internals = engine as unknown as EvolutionEngineInternals;
+    const configState = { evolution: { settings: { maxRetries: 1 } } };
+
+    assert.throws(
+      () => internals.setNestedValue(configState, 'evolution.unknown.maxRetries', 4),
+      /Path not found: evolution\.unknown\.maxRetries/,
+    );
   });
 });
 
