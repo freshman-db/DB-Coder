@@ -509,9 +509,10 @@ export function parseEvaluation(output: string): Omit<EvaluationResult, 'cost_us
   }
   // Fallback: default to not passing (safe-side)
   log.warn(`parseEvaluation: failed to extract JSON (${output.length} chars). Defaulting to fail.`);
+  const preview = output.slice(0, 300).trim();
   return {
     passed: false,
     score: { problemLegitimacy: 0, solutionProportionality: 0, expectedComplexity: 0, historicalSuccess: 0, total: 0 },
-    reasoning: 'Failed to parse evaluation output',
+    reasoning: preview || 'Empty evaluation output',
   };
 }
