@@ -245,6 +245,105 @@ Output as JSON:
 }`;
 }
 
+export function identifyModulesPrompt(projectPath: string, mcpGuidance: string = ''): string {
+  return `Analyze the project at ${projectPath} and identify its main functional modules (feature flows).
+
+A "module" is NOT a directory — it is a complete **functional data flow** through the codebase.
+For example:
+- "patrol-cycle": MainLoop.runCycle → Brain.scanProject → Brain.createPlan → executor → reviewer → Brain.reflectOnTask
+- "evolution-feedback": EvolutionEngine.synthesizePromptContext → formatDynamicContext → prompt injection → reflectOnTask → adjustment update
+- "plan-chat": PlanWorkflow → ChatSession → AsyncChannel → ClaudeBridge → SSE → routes → web UI
+
+${mcpGuidance}
+
+## Instructions
+1. Read the project structure and key source files
+2. Identify 3-8 major functional flows (not too many, not too few)
+3. For each flow, trace the data path from entry to exit
+
+## Output
+Your response MUST end with a JSON array (no markdown code fences):
+[
+  {
+    "name": "kebab-case-name",
+    "description": "One-sentence description of what this flow does",
+    "entryPoints": ["ClassName.methodName", "file.ts:functionName"],
+    "involvedFiles": ["src/path/to/file.ts", ...],
+    "dataFlow": "Step-by-step description: A calls B with X, B transforms to Y, Y is stored in Z..."
+  }
+]
+
+Focus on flows that matter for correctness — where bugs are likely to hide at boundaries between components.
+Do NOT wrap the JSON in markdown code fences. Output the raw JSON array directly.`;
+}
+
+export function moduleTracePrompt(
+  projectPath: string,
+  moduleName: string,
+  description: string,
+  entryPoints: string[],
+  involvedFiles: string[],
+  dataFlow: string,
+  depth: 'quick' | 'normal' = 'normal',
+  mcpGuidance: string = '',
+  dynamicContext?: DynamicPromptContext,
+): string {
+  const depthGuidance = depth === 'quick'
+    ? 'This is a quick scan. Focus on the most critical paths only. Spend less time on edge cases.'
+    : 'This is a normal-depth scan. Thoroughly trace the data flow and check all boundary conditions.';
+
+  return `Deep-audit the functional module **${moduleName}** in the project at ${projectPath}.
+
+## Module Description
+${description}
+
+## Entry Points
+${entryPoints.map(e => `- ${e}`).join('\n')}
+
+## Involved Files
+${involvedFiles.map(f => `- ${f}`).join('\n')}
+
+## Data Flow
+${dataFlow}
+${mcpGuidance}
+${formatDynamicContext(dynamicContext)}
+
+## Scan Depth
+${depthGuidance}
+
+## Audit Requirements
+1. **Trace the data flow**: Start from each entry point and follow the data through every function call in the chain
+2. **Boundary checks**: At each function boundary, check:
+   - Can parameters be null/undefined/empty array when they shouldn't be?
+   - Are types correctly propagated (no implicit any, no unsafe casts)?
+3. **First-run vs steady-state**: Check behavior differences when:
+   - Database tables are empty (first run)
+   - Previous data exists but is stale or corrupted
+4. **Error propagation**: For each try-catch:
+   - Is the error logged with enough context to debug?
+   - Is it re-thrown when it should be, or silently swallowed?
+   - Does the fallback behavior mask real problems?
+5. **Data transformation correctness**: At each step where data is transformed:
+   - Does the output type match what the next step expects?
+   - Are edge cases handled (empty string, zero, negative numbers)?
+6. **Logic completeness**: Check for:
+   - Dead code or unreachable branches
+   - Missing cases in switch/if-else chains
+   - Race conditions in async code
+
+## Output Format
+Your response MUST end with a JSON object (no markdown code fences):
+{
+  "issues": [{ "type": string, "severity": "critical"|"high"|"medium"|"low", "description": string, "file": string, "line": number, "suggestion": string }],
+  "opportunities": [{ "type": string, "severity": "medium"|"low", "description": string, "suggestion": string }],
+  "projectHealth": number (0-100, for this module specifically),
+  "summary": string
+}
+
+Focus on LOGIC-LEVEL issues (wrong behavior, missing checks, data corruption risks), not surface-level code style.
+Do NOT wrap the JSON in markdown code fences. Output the raw JSON object directly.`;
+}
+
 export function reflectPrompt(taskDescription: string, result: string, reviewSummary: string, outcome: string = 'success'): string {
   const outcomeGuidance = outcome === 'success'
     ? `Focus on:

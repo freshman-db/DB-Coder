@@ -7,8 +7,9 @@ import type { ProjectAnalysis, TaskPlan, ReflectionResult, EvaluationScore, Eval
 import type { QuestionHandler } from '../bridges/MessageHandler.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PromptRegistry } from '../prompts/PromptRegistry.js';
-import { BRAIN_SYSTEM_PROMPT, scanPrompt, planPrompt, reflectPrompt, brainMcpGuidance, researchPrompt, planWithMarkdownPrompt } from '../prompts/brain.js';
+import { BRAIN_SYSTEM_PROMPT, scanPrompt, planPrompt, reflectPrompt, brainMcpGuidance, researchPrompt, planWithMarkdownPrompt, identifyModulesPrompt, moduleTracePrompt } from '../prompts/brain.js';
 import type { PlanRequest } from '../prompts/brain.js';
+import type { ScanModule } from '../memory/types.js';
 import type { PlanDraft } from '../memory/types.js';
 import { memoryCategories } from '../types/constants.js';
 import { buildAgentGuidance } from '../prompts/agents.js';
@@ -99,6 +100,7 @@ export class Brain implements QuestionHandler {
       result: analysis,
       health_score: analysis.projectHealth,
       cost_usd: result.cost_usd,
+      module_name: null,
     });
 
     log.info(`Scan complete. Health: ${analysis.projectHealth}/100, Issues: ${analysis.issues.length}, Opportunities: ${analysis.opportunities.length}`);
@@ -315,6 +317,81 @@ export class Brain implements QuestionHandler {
       return true;
     }
   }
+
+  /** Identify functional modules (feature flows) in the project */
+  async identifyModules(projectPath: string): Promise<{ modules: Array<Omit<ScanModule, 'id' | 'project_path' | 'created_at'>>; cost: number }> {
+    log.info('Identifying functional modules...');
+
+    const mcpGuidance = brainMcpGuidance(this.claude.getMcpServerNames('scan'));
+    const prompt = identifyModulesPrompt(projectPath, mcpGuidance);
+    const systemPrompt = this.promptRegistry
+      ? await this.promptRegistry.resolve('brain_system', BRAIN_SYSTEM_PROMPT)
+      : BRAIN_SYSTEM_PROMPT;
+
+    const result = await this.claude.plan(prompt, projectPath, {
+      systemPrompt,
+      maxTurns: 20,
+    });
+
+    const modules = parseModules(result.output);
+    await this.taskStore.saveModules(projectPath, modules);
+
+    log.info(`Identified ${modules.length} functional modules: ${modules.map(m => m.name).join(', ')}`);
+    return { modules, cost: result.cost_usd };
+  }
+
+  /** Scan a single functional module by tracing its data flow */
+  async scanModule(
+    projectPath: string,
+    module: ScanModule,
+    depth: 'quick' | 'normal' = 'normal',
+  ): Promise<{ analysis: ProjectAnalysis; cost: number }> {
+    log.info(`Scanning module (${depth}): ${module.name}`);
+
+    const mcpGuidance = brainMcpGuidance(this.claude.getMcpServerNames('scan'));
+    const dynamicContext = this.evolutionEngine
+      ? await this.evolutionEngine.synthesizePromptContext(projectPath)
+      : undefined;
+
+    const basePrompt = moduleTracePrompt(
+      projectPath,
+      module.name,
+      module.description ?? '',
+      module.entry_points,
+      module.involved_files,
+      module.data_flow ?? '',
+      depth,
+      mcpGuidance,
+      dynamicContext,
+    );
+    const prompt = this.promptRegistry
+      ? await this.promptRegistry.resolve('scan', basePrompt)
+      : basePrompt;
+    const systemPrompt = this.promptRegistry
+      ? await this.promptRegistry.resolve('brain_system', BRAIN_SYSTEM_PROMPT)
+      : BRAIN_SYSTEM_PROMPT;
+
+    const result = await this.claude.plan(prompt, projectPath, {
+      systemPrompt,
+      maxTurns: depth === 'normal' ? 20 : 10,
+    });
+
+    const analysis = parseAnalysis(result.output);
+    const commitHash = await getHeadCommit(projectPath).catch(() => 'unknown');
+
+    await this.taskStore.saveScanResult({
+      project_path: projectPath,
+      commit_hash: commitHash,
+      depth,
+      result: analysis,
+      health_score: analysis.projectHealth,
+      cost_usd: result.cost_usd,
+      module_name: module.name,
+    });
+
+    log.info(`Module scan complete: ${module.name}. Health: ${analysis.projectHealth}/100, Issues: ${analysis.issues.length}`);
+    return { analysis, cost: result.cost_usd };
+  }
 }
 
 /** Strip markdown code fences (```json ... ```) so the JSON parser can find the object. */
@@ -330,6 +407,30 @@ function extractObjectByKey(text: string, requiredKey: string): Record<string, u
     parsed = extractJsonFromText(stripCodeFences(text), matcher);
   }
   return isRecord(parsed) ? parsed : null;
+}
+
+function parseModules(output: string): Array<Omit<ScanModule, 'id' | 'project_path' | 'created_at'>> {
+  // Try to find a JSON array in the output
+  const stripped = stripCodeFences(output);
+  const arrayMatch = stripped.match(/\[[\s\S]*\]/);
+  if (arrayMatch) {
+    try {
+      const parsed = JSON.parse(arrayMatch[0]);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .filter(m => isRecord(m) && typeof m.name === 'string')
+          .map(m => ({
+            name: m.name as string,
+            description: typeof m.description === 'string' ? m.description : null,
+            entry_points: Array.isArray(m.entryPoints) ? m.entryPoints.filter((e: unknown) => typeof e === 'string') : [],
+            involved_files: Array.isArray(m.involvedFiles) ? m.involvedFiles.filter((f: unknown) => typeof f === 'string') : [],
+            data_flow: typeof m.dataFlow === 'string' ? m.dataFlow : null,
+          }));
+      }
+    } catch { /* fall through */ }
+  }
+  log.warn(`parseModules: failed to extract JSON array (${output.length} chars). First 300 chars: ${output.slice(0, 300)}`);
+  return [];
 }
 
 export function parseAnalysis(output: string): ProjectAnalysis {
