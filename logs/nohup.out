@@ -386,3 +386,6 @@
 [36m[2026-02-23T01:33:51.604Z] [INFO][0m Committed: db-coder: Add formatDate() and formatDateNullable() utility 
 [36m[2026-02-23T01:33:51.683Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
 [36m[2026-02-23T01:33:51.684Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T01:38:02.522Z] [INFO][0m Committed: db-coder: Add safeTool() wrapper function that wraps `tool()
+[36m[2026-02-23T01:38:02.576Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
+[36m[2026-02-23T01:38:02.577Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
