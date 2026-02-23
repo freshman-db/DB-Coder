@@ -229,6 +229,98 @@ src/core/
 - New SSE event type `cycle-event` added to `/api/status/stream`
 - Config additions are all optional
 
+## Batch 4: Superpowers Integration
+
+Integrate the `superpowers` plugin (obra/superpowers v4.3.1) into brain/worker sessions
+to enforce disciplined development processes (TDD, systematic debugging, verification).
+
+### Integration Approach
+
+Since ClaudeCodeSession spawns `claude` CLI processes, and the superpowers plugin is
+already installed globally, sessions already have access to all skills. Integration is
+done by injecting skill references into session prompts via `appendSystemPrompt`.
+
+### SkillInjector
+
+Location: `src/core/skills/SkillInjector.ts`
+
+```typescript
+class SkillInjector {
+  // Read skill content from installed plugin
+  getSkillContent(skillName: string): string;
+
+  // Build system prompt addon for worker sessions
+  workerSystemPrompt(): string;
+  // Includes: TDD, verification-before-completion, systematic-debugging
+
+  // Build system prompt addon for worker fix sessions
+  workerFixSystemPrompt(): string;
+  // Includes: systematic-debugging (mandatory 4-phase process)
+
+  // Build system prompt addon for brain reflect sessions
+  reflectSystemPrompt(): string;
+  // Includes: requesting-code-review (dispatch reviewer subagent)
+}
+```
+
+### Skill Mapping to Cycle Phases
+
+| Phase | Skill | How |
+|-------|-------|-----|
+| workerExecute | test-driven-development | appendSystemPrompt: "Use TDD. Write failing test first." |
+| workerExecute | verification-before-completion | appendSystemPrompt: "Verify all claims with evidence." |
+| workerFix | systematic-debugging | appendSystemPrompt: "Follow 4-phase debugging. No quick fixes." |
+| brainReflect | requesting-code-review | appendSystemPrompt: "Dispatch code-reviewer subagent." |
+| deepChainReview | requesting-code-review | Review quality of recent merges |
+
+### Prompt Injection (Not Full Skill Content)
+
+To avoid token bloat, we inject **concise directives** referencing skills, not full SKILL.md:
+
+```typescript
+// Worker system prompt addon (~200 tokens)
+const WORKER_SKILL_DIRECTIVES = `
+## Development Process (superpowers)
+1. TDD: Write failing test FIRST. Verify it fails. Then implement. Verify it passes.
+2. Verification: Before claiming done, run tests and show evidence.
+3. If stuck: Use /systematic-debugging — 4 phases: investigate → analyze → hypothesize → implement.
+Never skip steps. Never claim "should work" without evidence.
+`;
+```
+
+### EventBus Integration
+
+```
+on('before:execute') → inject worker skill directives
+on('before:fix')     → inject debugging skill directives
+on('before:reflect') → inject review skill directives
+```
+
+This means SkillInjector is itself an event listener, cleanly fitting the EventBus architecture.
+
+### File Structure Addition
+
+```
+src/core/skills/
+├── index.ts
+├── SkillInjector.ts        (new: reads skill content, builds prompts)
+└── directives.ts           (new: concise skill directive constants)
+```
+
+---
+
+## Updated Delivery Batches
+
+| Batch | Content | Files | Depends On |
+|-------|---------|-------|------------|
+| 0 | CycleEventBus + MainLoop refactor + tests | 3-4 new + 1 modified | None |
+| 1 | 5 Guards + tests | 5-6 new | Batch 0 |
+| 2 | 4 Observers + Web UI + tests | 5-6 new + 2 modified | Batch 0 |
+| 3 | 3 Strategies + tests | 4-5 new | Batch 0+2 |
+| 4 | SkillInjector + directive prompts + tests | 3 new | Batch 0 |
+
+---
+
 ## Risks & Mitigations
 
 | Risk | Mitigation |
@@ -236,3 +328,6 @@ src/core/
 | Batch 0 breaks existing functionality | Write integration tests for current behavior first |
 | Event system performance overhead | Handlers are lightweight, no queue system |
 | Guards block valid tasks | Default warn mode, configurable block mode |
+| Skill directives increase token cost | Use concise directives (~200 tokens), not full SKILL.md |
+| TDD enforcement slows worker | TDD catches bugs early, reducing workerFix cycles |
+| Skill plugin path changes | SkillInjector falls back gracefully if plugin not found |
