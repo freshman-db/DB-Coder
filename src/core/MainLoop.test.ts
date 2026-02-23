@@ -859,6 +859,92 @@ describe('mergeReviews safety', () => {
   });
 });
 
+describe('MainLoop handleReviewResult decision logic', () => {
+  const review = (
+    source: 'claude' | 'codex',
+    overrides: Partial<ReviewResult> = {},
+  ): ReviewResult => ({
+    passed: true,
+    issues: [],
+    summary: `${source} review`,
+    cost_usd: 0,
+    ...overrides,
+  });
+
+  const createFailedReviews = (): { claudeReview: ReviewResult; codexReview: ReviewResult } => {
+    const description = 'Critical null guard missing before property access';
+    const file = 'src/core/MainLoop.ts';
+
+    return {
+      claudeReview: review('claude', {
+        passed: false,
+        issues: [{ description, file, severity: 'critical', source: 'claude' }],
+      }),
+      codexReview: review('codex', {
+        passed: true,
+        issues: [{ description, file, severity: 'medium', source: 'codex' }],
+      }),
+    };
+  };
+
+  const invokeHandleReviewResult = (
+    claudeReview: ReviewResult,
+    codexReview: ReviewResult,
+    reviewRetries: number,
+    maxRetries = 3,
+  ): ReturnType<typeof MainLoop.prototype['handleReviewResult']> => {
+    const { loop } = createMainLoopForCycle({
+      config: { values: { autonomy: { maxRetries } } },
+    });
+    const asAny = loop as unknown as {
+      handleReviewResult: typeof MainLoop.prototype['handleReviewResult'];
+    };
+    return asAny.handleReviewResult(claudeReview, codexReview, reviewRetries);
+  };
+
+  test('approves when mergeReviews returns passed:true', () => {
+    const result = invokeHandleReviewResult(
+      review('claude', { passed: true, issues: [] }),
+      review('codex', { passed: true, issues: [] }),
+      0,
+      3,
+    );
+
+    assert.equal(result.merged.passed, true);
+    assert.equal(result.decision, 'approve');
+  });
+
+  test('retries when failed and retries < maxRetries', () => {
+    const { claudeReview, codexReview } = createFailedReviews();
+    const result = invokeHandleReviewResult(claudeReview, codexReview, 1, 3);
+
+    assert.equal(result.merged.passed, false);
+    assert.equal(result.decision, 'retry');
+  });
+
+  test('rejects when failed and retries >= maxRetries', () => {
+    const { claudeReview, codexReview } = createFailedReviews();
+    const result = invokeHandleReviewResult(claudeReview, codexReview, 3, 3);
+
+    assert.equal(result.merged.passed, false);
+    assert.equal(result.decision, 'reject');
+  });
+
+  test('rejects at exactly maxRetries boundary', () => {
+    const { claudeReview, codexReview } = createFailedReviews();
+    const result = invokeHandleReviewResult(claudeReview, codexReview, 3, 3);
+
+    assert.equal(result.decision, 'reject');
+  });
+
+  test('retry at maxRetries-1', () => {
+    const { claudeReview, codexReview } = createFailedReviews();
+    const result = invokeHandleReviewResult(claudeReview, codexReview, 2, 3);
+
+    assert.equal(result.decision, 'retry');
+  });
+});
+
 describe('MainLoop runCycle integration', () => {
   test('happy path — full scan→plan→evaluate→execute flow', async () => {
     let scanProjectCalls = 0;
