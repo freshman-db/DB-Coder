@@ -238,6 +238,7 @@ test('review parses valid review JSON and tags issues as codex-sourced', async (
     assert.equal(call.command, 'codex');
     assert.deepEqual(call.args.slice(0, 4), ['exec', '--sandbox', 'read-only', '--json']);
     assert.match(call.args[call.args.length - 1] ?? '', /Review the pending DB migration/);
+    assert.doesNotMatch(call.args[call.args.length - 1] ?? '', /Review the uncommitted/);
 
     assert.equal(result.passed, false);
     assert.equal(result.summary, 'Found one high severity issue');
