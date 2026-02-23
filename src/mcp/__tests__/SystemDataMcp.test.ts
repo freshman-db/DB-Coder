@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createSystemDataMcpServer, type SystemDataMcpDeps } from '../SystemDataMcp.js';
+import {
+  createSystemDataMcpServer,
+  formatDate,
+  formatDateNullable,
+  type SystemDataMcpDeps,
+} from '../SystemDataMcp.js';
 import type { EvaluationScore } from '../../core/types.js';
 import type { Memory, RecurringIssueCategory, ReviewEvent, ScanResult, Task, TaskLog, TaskStatus } from '../../memory/types.js';
 import type { Adjustment, GoalProgress, PromptVersion } from '../../evolution/types.js';
@@ -336,6 +341,22 @@ test('createSystemDataMcpServer registers all expected tools', () => {
     'get_task_outcomes',
     'search_memories',
   ]);
+});
+
+test('formatDate formats Date values and normalizes primitive/nullish inputs', () => {
+  const date = new Date('2026-02-10T12:34:56.000Z');
+  assert.equal(formatDate(date), '2026-02-10T12:34:56.000Z');
+  assert.equal(formatDate('2026-02-10T12:34:56.000Z'), '2026-02-10T12:34:56.000Z');
+  assert.equal(formatDate(null), '');
+  assert.equal(formatDate(undefined), '');
+});
+
+test('formatDateNullable preserves nullish values and formats dates', () => {
+  const date = new Date('2026-02-11T00:00:00.000Z');
+  assert.equal(formatDateNullable(date), '2026-02-11T00:00:00.000Z');
+  assert.equal(formatDateNullable('2026-02-11T00:00:00.000Z'), '2026-02-11T00:00:00.000Z');
+  assert.equal(formatDateNullable(null), null);
+  assert.equal(formatDateNullable(undefined), null);
 });
 
 test('get_health_trend maps trend rows and respects default/custom limits', async () => {

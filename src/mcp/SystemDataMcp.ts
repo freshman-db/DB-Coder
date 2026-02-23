@@ -29,6 +29,14 @@ function error(toolName: string, err: unknown): ToolResponse {
   return { content: [{ type: 'text', text: `${toolName} failed: ${message}` }], isError: true };
 }
 
+export function formatDate(d: Date | string | unknown): string {
+  return d instanceof Date ? d.toISOString() : String(d ?? '');
+}
+
+export function formatDateNullable(d: Date | string | unknown): string | null {
+  return d == null ? null : formatDate(d);
+}
+
 export function createSystemDataMcpServer(deps: SystemDataMcpDeps) {
   const { projectPath, taskStore, globalMemory } = deps;
 
@@ -44,7 +52,7 @@ export function createSystemDataMcpServer(deps: SystemDataMcpDeps) {
           try {
             const scans = await taskStore.getRecentScans(projectPath, limit ?? 10);
             const trend = scans.map(s => ({
-              date: s.created_at instanceof Date ? s.created_at.toISOString() : String(s.created_at),
+              date: formatDate(s.created_at),
               healthScore: s.health_score,
               issueCount: s.result?.issues?.length ?? 0,
               opportunityCount: s.result?.opportunities?.length ?? 0,
@@ -123,7 +131,7 @@ export function createSystemDataMcpServer(deps: SystemDataMcpDeps) {
               passed: e.passed,
               score: e.score,
               reasoning: e.reasoning.slice(0, 200),
-              date: e.created_at instanceof Date ? e.created_at.toISOString() : String(e.created_at),
+              date: formatDate(e.created_at),
             }));
             return success(`${mapped.length} evaluation event(s).`, { events: mapped });
           } catch (e) {
@@ -192,7 +200,7 @@ export function createSystemDataMcpServer(deps: SystemDataMcpDeps) {
               costUsd: task.total_cost_usd,
               gitBranch: task.git_branch,
               dependsOn: task.depends_on,
-              createdAt: task.created_at instanceof Date ? task.created_at.toISOString() : String(task.created_at),
+              createdAt: formatDate(task.created_at),
               logs: logs.map(l => ({
                 phase: l.phase,
                 agent: l.agent,
@@ -200,7 +208,7 @@ export function createSystemDataMcpServer(deps: SystemDataMcpDeps) {
                 output: l.output_summary,
                 costUsd: l.cost_usd,
                 durationMs: l.duration_ms,
-                date: l.created_at instanceof Date ? l.created_at.toISOString() : String(l.created_at),
+                date: formatDate(l.created_at),
               })),
               reviews: reviews.map(r => ({
                 attempt: r.attempt,
@@ -236,7 +244,7 @@ export function createSystemDataMcpServer(deps: SystemDataMcpDeps) {
               phase: t.phase,
               priority: t.priority,
               costUsd: t.total_cost_usd,
-              createdAt: t.created_at instanceof Date ? t.created_at.toISOString() : String(t.created_at),
+              createdAt: formatDate(t.created_at),
             }));
             return success(`${mapped.length} task(s).`, { tasks: mapped });
           } catch (e) {
@@ -259,7 +267,7 @@ export function createSystemDataMcpServer(deps: SystemDataMcpDeps) {
               output: l.output_summary,
               costUsd: l.cost_usd,
               durationMs: l.duration_ms,
-              date: l.created_at instanceof Date ? l.created_at.toISOString() : String(l.created_at),
+              date: formatDate(l.created_at),
             }));
             return success(`${mapped.length} log(s) for task ${task_id}.`, { logs: mapped });
           } catch (e) {
@@ -284,7 +292,7 @@ export function createSystemDataMcpServer(deps: SystemDataMcpDeps) {
               fixAgent: r.fix_agent,
               durationMs: r.duration_ms,
               costUsd: r.cost_usd,
-              date: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+              date: formatDate(r.created_at),
             }));
             return success(`${mapped.length} review(s) for task ${task_id}.`, { reviews: mapped });
           } catch (e) {
@@ -306,7 +314,7 @@ export function createSystemDataMcpServer(deps: SystemDataMcpDeps) {
               category: a.category,
               effectiveness: a.effectiveness,
               taskId: a.task_id,
-              createdAt: a.created_at instanceof Date ? a.created_at.toISOString() : String(a.created_at),
+              createdAt: formatDate(a.created_at),
             }));
             return success(`${mapped.length} active adjustment(s).`, { adjustments: mapped });
           } catch (e) {
@@ -333,8 +341,8 @@ export function createSystemDataMcpServer(deps: SystemDataMcpDeps) {
                 tasksEvaluated: v.tasks_evaluated,
                 baselineMetrics: v.baseline_metrics,
                 currentMetrics: v.current_metrics,
-                activatedAt: v.activated_at instanceof Date ? v.activated_at.toISOString() : v.activated_at ? String(v.activated_at) : null,
-                createdAt: v.created_at instanceof Date ? v.created_at.toISOString() : String(v.created_at),
+                activatedAt: formatDateNullable(v.activated_at),
+                createdAt: formatDate(v.created_at),
               }));
               return success(`${mapped.length} version(s) for "${prompt_name}".`, { versions: mapped });
             }
@@ -345,7 +353,7 @@ export function createSystemDataMcpServer(deps: SystemDataMcpDeps) {
               effectiveness: v.effectiveness,
               tasksEvaluated: v.tasks_evaluated,
               confidence: v.confidence,
-              activatedAt: v.activated_at instanceof Date ? v.activated_at.toISOString() : v.activated_at ? String(v.activated_at) : null,
+              activatedAt: formatDateNullable(v.activated_at),
             }));
             return success(`${mapped.length} active prompt version(s).`, { versions: mapped });
           } catch (e) {
@@ -380,7 +388,7 @@ export function createSystemDataMcpServer(deps: SystemDataMcpDeps) {
                 progressPct: g.progress_pct,
                 evidence: g.evidence,
                 scanId: g.scan_id,
-                date: g.created_at instanceof Date ? g.created_at.toISOString() : String(g.created_at),
+                date: formatDate(g.created_at),
               }));
               return success(`${mapped.length} progress record(s) for goal #${goal_index}.`, { history: mapped });
             }
@@ -389,7 +397,7 @@ export function createSystemDataMcpServer(deps: SystemDataMcpDeps) {
               goalIndex: g.goal_index,
               progressPct: g.progress_pct,
               evidence: g.evidence,
-              date: g.created_at instanceof Date ? g.created_at.toISOString() : String(g.created_at),
+              date: formatDate(g.created_at),
             }));
             return success(`${mapped.length} goal(s) with progress.`, { goals: mapped });
           } catch (e) {
