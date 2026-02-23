@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { ClaudeCodeSession, type SessionResult, type StreamEvent } from './ClaudeCodeSession.js';
+import { ClaudeCodeSession, buildArgs, type SessionOptions, type SessionResult, type StreamEvent } from './ClaudeCodeSession.js';
 
 // --- Helpers to build stream-json events ---
 
@@ -76,12 +76,116 @@ function errorResultEvent(sessionId: string, errors: string[]): string {
 }
 
 describe('ClaudeCodeSession', () => {
-  describe('buildArgs (via run behavior)', () => {
-    // We test arg building indirectly by verifying the session creates correct process args.
-    // Since we can't easily intercept spawn without a DI mechanism, we test parsing instead.
+  describe('buildArgs', () => {
+    const base: SessionOptions = { permissionMode: 'bypassPermissions' };
 
+    it('basic args with bypassPermissions', () => {
+      const args = buildArgs('do stuff', base);
+      assert.deepStrictEqual(args.slice(0, 6), ['-p', 'do stuff', '--output-format', 'stream-json', '--verbose', '--permission-mode']);
+      assert.strictEqual(args[6], 'bypassPermissions');
+    });
+
+    it('acceptEdits mode', () => {
+      const args = buildArgs('task', { permissionMode: 'acceptEdits' });
+      const idx = args.indexOf('--permission-mode');
+      assert.strictEqual(args[idx + 1], 'acceptEdits');
+    });
+
+    it('resumeSessionId adds --resume', () => {
+      const args = buildArgs('task', { ...base, resumeSessionId: 'sess-42' });
+      const idx = args.indexOf('--resume');
+      assert.notStrictEqual(idx, -1);
+      assert.strictEqual(args[idx + 1], 'sess-42');
+    });
+
+    it('maxBudget adds --max-budget-usd', () => {
+      const args = buildArgs('task', { ...base, maxBudget: 1.5 });
+      const idx = args.indexOf('--max-budget-usd');
+      assert.notStrictEqual(idx, -1);
+      assert.strictEqual(args[idx + 1], '1.5');
+    });
+
+    it('maxTurns adds --max-turns', () => {
+      const args = buildArgs('task', { ...base, maxTurns: 10 });
+      const idx = args.indexOf('--max-turns');
+      assert.notStrictEqual(idx, -1);
+      assert.strictEqual(args[idx + 1], '10');
+    });
+
+    it('model adds --model', () => {
+      const args = buildArgs('task', { ...base, model: 'claude-opus-4-6' });
+      const idx = args.indexOf('--model');
+      assert.notStrictEqual(idx, -1);
+      assert.strictEqual(args[idx + 1], 'claude-opus-4-6');
+    });
+
+    it('allowedTools/disallowedTools add comma-joined flags', () => {
+      const args = buildArgs('task', {
+        ...base,
+        allowedTools: ['Read', 'Grep'],
+        disallowedTools: ['Edit', 'Write'],
+      });
+      const aIdx = args.indexOf('--allowedTools');
+      assert.notStrictEqual(aIdx, -1);
+      assert.strictEqual(args[aIdx + 1], 'Read,Grep');
+      const dIdx = args.indexOf('--disallowedTools');
+      assert.notStrictEqual(dIdx, -1);
+      assert.strictEqual(args[dIdx + 1], 'Edit,Write');
+    });
+
+    it('appendSystemPrompt adds --append-system-prompt', () => {
+      const args = buildArgs('task', { ...base, appendSystemPrompt: 'Be concise' });
+      const idx = args.indexOf('--append-system-prompt');
+      assert.notStrictEqual(idx, -1);
+      assert.strictEqual(args[idx + 1], 'Be concise');
+    });
+
+    it('jsonSchema adds --json without duplicate --output-format', () => {
+      const schema = { type: 'object', properties: { x: { type: 'number' } } };
+      const args = buildArgs('task', { ...base, jsonSchema: schema });
+      // --json flag present with serialized schema
+      const jsonIdx = args.indexOf('--json');
+      assert.notStrictEqual(jsonIdx, -1);
+      assert.strictEqual(args[jsonIdx + 1], JSON.stringify(schema));
+      // --output-format appears exactly once (no duplicate)
+      const ofIndices = args.reduce<number[]>((acc, a, i) => a === '--output-format' ? [...acc, i] : acc, []);
+      assert.strictEqual(ofIndices.length, 1, `expected 1 --output-format but got ${ofIndices.length}`);
+    });
+
+    it('combination of all options', () => {
+      const schema = { type: 'string' };
+      const args = buildArgs('full test', {
+        permissionMode: 'bypassPermissions',
+        resumeSessionId: 'sid-99',
+        maxBudget: 2.0,
+        maxTurns: 5,
+        model: 'claude-haiku-4-5',
+        allowedTools: ['Bash'],
+        disallowedTools: ['Write'],
+        appendSystemPrompt: 'Extra prompt',
+        jsonSchema: schema,
+      });
+
+      // All flags present
+      assert.ok(args.includes('--resume'));
+      assert.ok(args.includes('--max-budget-usd'));
+      assert.ok(args.includes('--max-turns'));
+      assert.ok(args.includes('--model'));
+      assert.ok(args.includes('--allowedTools'));
+      assert.ok(args.includes('--disallowedTools'));
+      assert.ok(args.includes('--append-system-prompt'));
+      assert.ok(args.includes('--json'));
+      // Still only one --output-format
+      const ofCount = args.filter(a => a === '--output-format').length;
+      assert.strictEqual(ofCount, 1);
+      // Prompt preserved
+      assert.strictEqual(args[0], '-p');
+      assert.strictEqual(args[1], 'full test');
+    });
+  });
+
+  describe('class API', () => {
     it('should export SessionResult and StreamEvent types', () => {
-      // Type-only test: ensure types exist and are importable
       const session = new ClaudeCodeSession();
       assert.ok(session);
       assert.strictEqual(typeof session.run, 'function');

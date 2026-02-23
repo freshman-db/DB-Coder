@@ -84,6 +84,56 @@ function cleanEnv(): Record<string, string> {
   return env;
 }
 
+// --- Arg building (pure, exported for testing) ---
+
+export function buildArgs(prompt: string, opts: SessionOptions): string[] {
+  const args = [
+    '-p', prompt,
+    '--output-format', 'stream-json',
+    '--verbose',
+  ];
+
+  if (opts.permissionMode === 'bypassPermissions') {
+    args.push('--permission-mode', 'bypassPermissions');
+  } else {
+    args.push('--permission-mode', 'acceptEdits');
+  }
+
+  if (opts.resumeSessionId) {
+    args.push('--resume', opts.resumeSessionId);
+  }
+
+  if (opts.maxBudget !== undefined) {
+    args.push('--max-budget-usd', String(opts.maxBudget));
+  }
+
+  if (opts.maxTurns !== undefined) {
+    args.push('--max-turns', String(opts.maxTurns));
+  }
+
+  if (opts.model) {
+    args.push('--model', opts.model);
+  }
+
+  if (opts.allowedTools?.length) {
+    args.push('--allowedTools', opts.allowedTools.join(','));
+  }
+
+  if (opts.disallowedTools?.length) {
+    args.push('--disallowedTools', opts.disallowedTools.join(','));
+  }
+
+  if (opts.appendSystemPrompt) {
+    args.push('--append-system-prompt', opts.appendSystemPrompt);
+  }
+
+  if (opts.jsonSchema) {
+    args.push('--json', JSON.stringify(opts.jsonSchema));
+  }
+
+  return args;
+}
+
 // --- Session ---
 
 export class ClaudeCodeSession {
@@ -97,7 +147,7 @@ export class ClaudeCodeSession {
    */
   async run(prompt: string, opts: SessionOptions): Promise<SessionResult> {
     const start = Date.now();
-    const args = this.buildArgs(prompt, opts);
+    const args = buildArgs(prompt, opts);
 
     const env = cleanEnv();
     // Ensure claude-mem uses a strong model
@@ -242,55 +292,6 @@ export class ClaudeCodeSession {
   }
 
   // --- Private ---
-
-  private buildArgs(prompt: string, opts: SessionOptions): string[] {
-    const args = [
-      '-p', prompt,
-      '--output-format', 'stream-json',
-      '--verbose',
-    ];
-
-    if (opts.permissionMode === 'bypassPermissions') {
-      args.push('--permission-mode', 'bypassPermissions');
-    } else {
-      args.push('--permission-mode', 'acceptEdits');
-    }
-
-    if (opts.resumeSessionId) {
-      args.push('--resume', opts.resumeSessionId);
-    }
-
-    if (opts.maxBudget !== undefined) {
-      args.push('--max-budget-usd', String(opts.maxBudget));
-    }
-
-    if (opts.maxTurns !== undefined) {
-      args.push('--max-turns', String(opts.maxTurns));
-    }
-
-    if (opts.model) {
-      args.push('--model', opts.model);
-    }
-
-    if (opts.allowedTools?.length) {
-      args.push('--allowedTools', opts.allowedTools.join(','));
-    }
-
-    if (opts.disallowedTools?.length) {
-      args.push('--disallowedTools', opts.disallowedTools.join(','));
-    }
-
-    if (opts.appendSystemPrompt) {
-      args.push('--append-system-prompt', opts.appendSystemPrompt);
-    }
-
-    if (opts.jsonSchema) {
-      args.push('--output-format', 'stream-json');
-      args.push('--json', JSON.stringify(opts.jsonSchema));
-    }
-
-    return args;
-  }
 
   /**
    * Process a stream event: extract assistant text from complete messages.
