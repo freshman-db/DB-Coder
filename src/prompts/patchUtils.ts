@@ -1,4 +1,5 @@
 import type { PromptPatch } from '../evolution/types.js';
+import type { PromptName } from '../types/constants.js';
 
 /**
  * Apply an ordered list of patches to a base prompt template.
@@ -90,9 +91,9 @@ function findSectionBounds(text: string, sectionName: string): { start: number; 
  * Validate that a patched prompt still contains expected JSON output format markers.
  * Returns true if the prompt appears safe to use.
  */
-export function validatePatchedPrompt(patchedPrompt: string, promptName: string): boolean {
+export function validatePatchedPrompt(patchedPrompt: string, promptName: PromptName): boolean {
   // Only prompts with structured JSON output need validation
-  const markersByPrompt: Record<string, string[]> = {
+  const markersByPrompt: Record<PromptName, string[]> = {
     scan: ['"issues"', '"projectHealth"'],
     plan: ['"tasks"', '"reasoning"'],
     reflect: ['"experiences"', '"taskSummary"'],
@@ -105,7 +106,7 @@ export function validatePatchedPrompt(patchedPrompt: string, promptName: string)
     evaluator: ['"problemLegitimacy"', '"reasoning"'],
   };
 
-  const markers = markersByPrompt[promptName] ?? [];
+  const markers = markersByPrompt[promptName];
   for (const marker of markers) {
     if (!patchedPrompt.includes(marker)) {
       return false;

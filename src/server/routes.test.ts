@@ -10,6 +10,7 @@ import type { PlanWorkflow } from '../core/PlanWorkflow.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { OperationalMetrics } from '../memory/types.js';
+import { promptNames } from '../types/constants.js';
 import type { CostTracker } from '../utils/cost.js';
 import { log } from '../utils/logger.js';
 import { createSseStream, emitSseEvent, HttpError, parseRouteId } from './routes.js';
@@ -458,7 +459,7 @@ test('GET /api/evolution/prompt-versions/:name returns 400 for unsupported promp
 
   assert.equal(state.statusCode, 400);
   assert.deepEqual(parseJson<{ error: string }>(state), {
-    error: 'Invalid prompt name. Valid names: brain_system, scan, plan, reflect, executor, reviewer, research, plan_markdown, analysis, evaluator',
+    error: `Invalid prompt name. Valid names: ${promptNames.join(', ')}`,
   });
   assert.equal(historyCalls, 0);
 });

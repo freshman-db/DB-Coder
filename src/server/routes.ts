@@ -5,11 +5,12 @@ import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { CostTracker } from '../utils/cost.js';
 import type { Config } from '../config/Config.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
-import type { PromptName } from '../evolution/types.js';
 import type { PluginMonitor } from '../plugins/PluginMonitor.js';
 import type { PatrolManager } from '../core/ModeManager.js';
 import type { PlanWorkflow } from '../core/PlanWorkflow.js';
 import type { PlanRequest } from '../prompts/brain.js';
+import type { MemoryCategory, PromptName } from '../types/constants.js';
+import { memoryCategories, promptNames } from '../types/constants.js';
 import { log, type LogEntry } from '../utils/logger.js';
 import { isRecord } from '../utils/parse.js';
 
@@ -34,9 +35,6 @@ interface Route {
   handler: RouteHandler;
 }
 
-const memoryCategories = ['habit', 'experience', 'standard', 'workflow', 'framework', 'failure', 'simplification'] as const;
-type MemoryCategory = (typeof memoryCategories)[number];
-
 const routes: Route[] = [];
 const MAX_TASK_DESCRIPTION_LENGTH = 4_000;
 const MAX_MEMORY_CONTENT_LENGTH = 32_000;
@@ -46,18 +44,7 @@ const MAX_MEMORY_TAG_COUNT = 20;
 const MAX_REQUEST_BODY_BYTES = 64 * 1024;
 const VALID_DEPTHS = ['quick', 'normal', 'deep'] as const;
 type ScanDepth = (typeof VALID_DEPTHS)[number];
-const validPromptNames: ReadonlySet<string> = new Set<string>([
-  'brain_system',
-  'scan',
-  'plan',
-  'reflect',
-  'executor',
-  'reviewer',
-  'research',
-  'plan_markdown',
-  'analysis',
-  'evaluator',
-]);
+const validPromptNames: ReadonlySet<string> = new Set<string>(promptNames);
 
 export class HttpError extends Error {
   constructor(public readonly statusCode: number, message: string) {

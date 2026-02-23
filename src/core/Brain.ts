@@ -9,7 +9,8 @@ import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import type { PromptRegistry } from '../prompts/PromptRegistry.js';
 import { BRAIN_SYSTEM_PROMPT, scanPrompt, planPrompt, reflectPrompt, brainMcpGuidance, researchPrompt, planWithMarkdownPrompt } from '../prompts/brain.js';
 import type { PlanRequest } from '../prompts/brain.js';
-import type { MemoryCategory, PlanDraft } from '../memory/types.js';
+import type { PlanDraft } from '../memory/types.js';
+import { memoryCategories } from '../types/constants.js';
 import { buildAgentGuidance } from '../prompts/agents.js';
 import { getHeadCommit, getRecentLog, getChangedFilesSince } from '../utils/git.js';
 import { log } from '../utils/logger.js';
@@ -166,13 +167,13 @@ export class Brain implements QuestionHandler {
     const reflection = parseReflection(r.output);
 
     // Save extracted experiences to global memory
-    const validCategories: ReadonlySet<string> = new Set(['habit', 'experience', 'standard', 'workflow', 'framework', 'failure', 'simplification']);
+    const validCategories: ReadonlySet<string> = new Set<string>(memoryCategories);
     const savedTitles: string[] = [];
     for (const exp of reflection.experiences) {
       const category = validCategories.has(exp.category) ? exp.category : 'experience';
       try {
         await this.globalMemory.add({
-          category: category as MemoryCategory,
+          category,
           title: exp.title,
           content: exp.content,
           tags: exp.tags ?? [],
