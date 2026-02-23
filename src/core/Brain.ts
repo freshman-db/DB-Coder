@@ -11,6 +11,7 @@ import { BRAIN_SYSTEM_PROMPT, scanPrompt, planPrompt, reflectPrompt, brainMcpGui
 import type { PlanRequest } from '../prompts/brain.js';
 import type { ScanModule } from '../memory/types.js';
 import type { PlanDraft } from '../memory/types.js';
+import type { Task } from '../memory/types.js';
 import { memoryCategories } from '../types/constants.js';
 import { buildAgentGuidance } from '../prompts/agents.js';
 import { getHeadCommit, getRecentLog, getChangedFilesSince } from '../utils/git.js';
@@ -123,10 +124,10 @@ export class Brain implements QuestionHandler {
       this.taskStore.listTasks(projectPath, 'failed'),
     ]);
     const allTasks = [
-      ...queued.map(t => `- [P${t.priority}] [queued] ${t.task_description}`),
-      ...done.map(t => `- [P${t.priority}] [done] ${t.task_description}`),
-      ...blocked.map(t => `- [P${t.priority}] [blocked] ${t.task_description}`),
-      ...failed.map(t => `- [P${t.priority}] [failed] ${t.task_description}`),
+      ...this.formatTaskList(queued, 'queued'),
+      ...this.formatTaskList(done, 'done'),
+      ...this.formatTaskList(blocked, 'blocked'),
+      ...this.formatTaskList(failed, 'failed'),
     ].join('\n');
 
     // Build goals section
@@ -252,10 +253,10 @@ export class Brain implements QuestionHandler {
       this.taskStore.listTasks(projectPath, 'failed'),
     ]);
     const allTasks = [
-      ...queued.map(t => `- [P${t.priority}] [queued] ${t.task_description}`),
-      ...done.map(t => `- [P${t.priority}] [done] ${t.task_description}`),
-      ...blocked.map(t => `- [P${t.priority}] [blocked] ${t.task_description}`),
-      ...failed.map(t => `- [P${t.priority}] [failed] ${t.task_description}`),
+      ...this.formatTaskList(queued, 'queued'),
+      ...this.formatTaskList(done, 'done'),
+      ...this.formatTaskList(blocked, 'blocked'),
+      ...this.formatTaskList(failed, 'failed'),
     ].join('\n');
 
     const basePrompt = planWithMarkdownPrompt(researchReport, request, allTasks);
@@ -289,6 +290,10 @@ export class Brain implements QuestionHandler {
     }
     // Open-ended question: provide a safe default
     return 'Proceed with the default approach.';
+  }
+
+  private formatTaskList(tasks: Task[], statusLabel: string): string[] {
+    return tasks.map(t => `- [P${t.priority}] [${statusLabel}] ${t.task_description}`);
   }
 
   private buildGoalsSection(): string {
