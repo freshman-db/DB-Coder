@@ -456,6 +456,7 @@ describe('MainLoop runCycle integration', () => {
     let reflectOnTaskCalls = 0;
 
     const addDailyCostCalls: number[] = [];
+    const evaluationEvents: Array<{ task_id: string; passed: boolean; cost_usd: number }> = [];
     const enqueueCalls: Array<{ projectPath: string; plan: unknown }> = [];
 
     const now = new Date();
@@ -537,14 +538,17 @@ describe('MainLoop runCycle integration', () => {
               historicalSuccess: 1,
               reasoning: 'High value task',
             }),
-            cost_usd: 0,
-            duration_ms: 0,
+            cost_usd: 0.002,
+            duration_ms: 25,
           };
         },
       },
       taskStore: {
         addDailyCost: async (cost: number) => {
           addDailyCostCalls.push(cost);
+        },
+        saveEvaluationEvent: async event => {
+          evaluationEvents.push(event as { task_id: string; passed: boolean; cost_usd: number });
         },
       },
     });
@@ -595,10 +599,14 @@ describe('MainLoop runCycle integration', () => {
       .filter((state, index, all) => index === 0 || all[index - 1] !== state);
 
     assert.deepEqual(transitions, ['scanning', 'planning', 'evaluating', 'executing', 'idle']);
-    assert.deepEqual(addDailyCostCalls, [0.01, 0.005]);
+    assert.deepEqual(addDailyCostCalls, [0.01, 0.005, 0.002]);
     assert.equal(enqueueCalls.length, 1);
     assert.equal(enqueueCalls[0]?.projectPath, '/tmp/db-coder-main-loop-test');
     assert.equal(enqueueCalls[0]?.plan, plan);
+    assert.equal(evaluationEvents.length, 1);
+    assert.equal(evaluationEvents[0]?.task_id, 'task-happy-1');
+    assert.equal(evaluationEvents[0]?.passed, true);
+    assert.equal(evaluationEvents[0]?.cost_usd, 0.002);
     assert.equal(scanProjectCalls, 1);
     assert.equal(createPlanCalls, 1);
     assert.equal(claudePlanCalls, 1);
@@ -1110,8 +1118,9 @@ describe('MainLoop runCycle integration', () => {
     let getQueuedCalls = 0;
     let getNextCalls = 0;
     let executeTaskCalls = 0;
+    const addDailyCostCalls: number[] = [];
     const updateTaskCalls: Array<{ taskId: string; patch: unknown }> = [];
-    const evaluationEvents: Array<{ task_id: string; passed: boolean; score: { total: number } }> = [];
+    const evaluationEvents: Array<{ task_id: string; passed: boolean; score: { total: number }; cost_usd: number }> = [];
 
     const now = new Date();
     const mockTask: Task = {
@@ -1159,16 +1168,19 @@ describe('MainLoop runCycle integration', () => {
             historicalSuccess: 0,
             reasoning: 'Task has negative ROI right now',
           }),
-          cost_usd: 0,
-          duration_ms: 0,
+          cost_usd: 0.003,
+          duration_ms: 30,
         }),
       },
       taskStore: {
+        addDailyCost: async (cost: number) => {
+          addDailyCostCalls.push(cost);
+        },
         updateTask: async (taskId: string, patch: unknown) => {
           updateTaskCalls.push({ taskId, patch });
         },
         saveEvaluationEvent: async (event: unknown) => {
-          evaluationEvents.push(event as { task_id: string; passed: boolean; score: { total: number } });
+          evaluationEvents.push(event as { task_id: string; passed: boolean; score: { total: number }; cost_usd: number });
         },
       },
     });
@@ -1191,6 +1203,7 @@ describe('MainLoop runCycle integration', () => {
     assert.equal(getQueuedCalls, 1);
     assert.equal(getNextCalls, 2);
     assert.equal(executeTaskCalls, 0);
+    assert.deepEqual(addDailyCostCalls, [0.003]);
     assert.deepEqual(updateTaskCalls, [{
       taskId: 'task-rejected-1',
       patch: {
@@ -1209,12 +1222,14 @@ describe('MainLoop runCycle integration', () => {
     assert.equal(evaluationEvents[0]?.task_id, 'task-rejected-1');
     assert.equal(evaluationEvents[0]?.passed, false);
     assert.equal(evaluationEvents[0]?.score.total, -2);
+    assert.equal(evaluationEvents[0]?.cost_usd, 0.003);
   });
 
   test('evaluation boundary total=0 rejects task — task marked pending_review, executeTask not called', async () => {
     let getQueuedCalls = 0;
     let getNextCalls = 0;
     let executeTaskCalls = 0;
+    const addDailyCostCalls: number[] = [];
     const updateTaskCalls: Array<{ taskId: string; patch: unknown }> = [];
     const evaluationEvents: Array<{ task_id: string; passed: boolean; score: { total: number } }> = [];
 
@@ -1269,6 +1284,9 @@ describe('MainLoop runCycle integration', () => {
         }),
       },
       taskStore: {
+        addDailyCost: async (cost: number) => {
+          addDailyCostCalls.push(cost);
+        },
         updateTask: async (taskId: string, patch: unknown) => {
           updateTaskCalls.push({ taskId, patch });
         },
@@ -1296,6 +1314,7 @@ describe('MainLoop runCycle integration', () => {
     assert.equal(getQueuedCalls, 1);
     assert.equal(getNextCalls, 2);
     assert.equal(executeTaskCalls, 0);
+    assert.deepEqual(addDailyCostCalls, []);
     assert.deepEqual(updateTaskCalls, [{
       taskId: 'task-boundary-0',
       patch: {

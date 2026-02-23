@@ -344,34 +344,30 @@ export class MainLoop {
           evaluation_score: evaluation.score,
           evaluation_reasoning: evaluation.reasoning,
         });
-        await this.taskStore.saveEvaluationEvent({
-          task_id: task.id,
-          passed: evaluation.passed,
-          score: evaluation.score,
-          reasoning: evaluation.reasoning,
-          cost_usd: evaluation.cost_usd,
-          duration_ms: evaluation.duration_ms,
-        });
-        if (evaluation.cost_usd > 0) await this.taskStore.addDailyCost(evaluation.cost_usd);
+        await this.recordEvaluation(task, evaluation);
         task = await this.taskQueue.getNext(projectPath);
         continue;
       }
       // Evaluation passed — record it and proceed
-      await this.taskStore.saveEvaluationEvent({
-        task_id: task.id,
-        passed: evaluation.passed,
-        score: evaluation.score,
-        reasoning: evaluation.reasoning,
-        cost_usd: evaluation.cost_usd,
-        duration_ms: evaluation.duration_ms,
-      });
-      if (evaluation.cost_usd > 0) await this.taskStore.addDailyCost(evaluation.cost_usd);
+      await this.recordEvaluation(task, evaluation);
 
       await this.executeTask(task);
       task = await this.taskQueue.getNext(projectPath);
     }
 
     this.setState('idle');
+  }
+
+  private async recordEvaluation(task: Task, evaluation: EvaluationResult): Promise<void> {
+    await this.taskStore.saveEvaluationEvent({
+      task_id: task.id,
+      passed: evaluation.passed,
+      score: evaluation.score,
+      reasoning: evaluation.reasoning,
+      cost_usd: evaluation.cost_usd,
+      duration_ms: evaluation.duration_ms,
+    });
+    if (evaluation.cost_usd > 0) await this.taskStore.addDailyCost(evaluation.cost_usd);
   }
 
   /** Run a single manually-triggered scan (not allowed while patrol loop is running) */
