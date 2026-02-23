@@ -7,6 +7,7 @@ import type { ProjectAnalysis, RecurringIssueCategory, ReviewEvent, Task } from 
 import type { PromptPatch, PromptVersion } from './types.js';
 import type { TrendAnalyzer } from './TrendAnalyzer.js';
 import { EvolutionEngine } from './EvolutionEngine.js';
+import { log } from '../utils/logger.js';
 
 type ParsedMetaReflectOutput = {
   patches: Array<{
@@ -20,6 +21,8 @@ type ParsedMetaReflectOutput = {
 
 type EvolutionEngineInternals = {
   buildMetaReflectPrompt(): string;
+  parseMetaReflectOutput(output: string): ParsedMetaReflectOutput | null;
+  setNestedValue(obj: Record<string, any>, path: string, value: unknown): void;
   storeProposedPatches(
     parsed: ParsedMetaReflectOutput,
     projectPath: string,
@@ -194,6 +197,66 @@ describe('EvolutionEngine.buildMetaReflectPrompt', () => {
     assert.match(prompt, /Available Prompt Names/);
     assert.match(prompt, /brain_system, scan, plan, reflect, executor, reviewer, evaluator/);
     assert.match(prompt, /"patches"/);
+  });
+});
+
+describe('EvolutionEngine.parseMetaReflectOutput', () => {
+  test('returns null and logs debug when malformed JSON cannot be parsed', () => {
+    const engine = createEvolutionEngine({}, {});
+    const internals = engine as unknown as EvolutionEngineInternals;
+    const malformedOutput = '{"patches":[{"promptName":"scan","patches":[{"op":"append","content":"x","reason":"y"}],"confidence":0.8,}],"analysis":"oops"}';
+    const debugCalls: Array<{ message: string; data?: unknown }> = [];
+    const originalDebug = log.debug;
+    log.debug = (message: string, data?: unknown): void => {
+      debugCalls.push({ message, data });
+    };
+
+    try {
+      const parsed = internals.parseMetaReflectOutput(malformedOutput);
+
+      assert.equal(parsed, null);
+      assert.equal(debugCalls.length, 1);
+      assert.equal(debugCalls[0]?.message, 'parseMetaReflectOutput failed to parse JSON');
+      const payload = debugCalls[0]?.data as { error?: unknown; outputLength?: unknown };
+      assert.equal(typeof payload.error, 'string');
+      assert.equal(payload.outputLength, malformedOutput.length);
+    } finally {
+      log.debug = originalDebug;
+    }
+  });
+});
+
+describe('EvolutionEngine.setNestedValue', () => {
+  test('throws when an intermediate path value is a string', () => {
+    const engine = createEvolutionEngine({}, {});
+    const internals = engine as unknown as EvolutionEngineInternals;
+    const configState = { evolution: { settings: 'locked' } };
+
+    assert.throws(
+      () => internals.setNestedValue(configState, 'evolution.settings.maxRetries', 3),
+      /Intermediate path value at "evolution.settings" is not an object/,
+    );
+  });
+
+  test('throws when an intermediate path value is null', () => {
+    const engine = createEvolutionEngine({}, {});
+    const internals = engine as unknown as EvolutionEngineInternals;
+    const configState = { evolution: { settings: null } };
+
+    assert.throws(
+      () => internals.setNestedValue(configState, 'evolution.settings.maxRetries', 3),
+      /Intermediate path value at "evolution.settings" is not an object/,
+    );
+  });
+
+  test('updates nested values when intermediate path values are objects', () => {
+    const engine = createEvolutionEngine({}, {});
+    const internals = engine as unknown as EvolutionEngineInternals;
+    const configState = { evolution: { settings: { maxRetries: 1 } } };
+
+    internals.setNestedValue(configState, 'evolution.settings.maxRetries', 4);
+
+    assert.equal(configState.evolution.settings.maxRetries, 4);
   });
 });
 

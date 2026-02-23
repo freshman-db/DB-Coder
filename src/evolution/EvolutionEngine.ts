@@ -53,14 +53,40 @@ const GOAL_FALLBACK_KEYWORDS = Array.from(
   new Set(GOAL_KEYWORD_RULES.flatMap(rule => rule.taskKeywords.map(keyword => keyword.toLowerCase()))),
 );
 
+interface MetaReflectPatchProposal {
+  promptName: string;
+  patches: PromptPatch[];
+  confidence: number;
+}
+
+interface ParsedMetaReflectPatchProposal extends MetaReflectPatchProposal {
+  rationale: string;
+}
+
 interface ParsedMetaReflectOutput {
-  patches: Array<{
-    promptName: string;
-    patches: PromptPatch[];
-    rationale: string;
-    confidence: number;
-  }>;
+  patches: ParsedMetaReflectPatchProposal[];
   analysis: string;
+}
+
+function isMetaReflectPatchProposal(value: unknown): value is MetaReflectPatchProposal {
+  if (!value || typeof value !== 'object') return false;
+  const proposal = value as Record<string, unknown>;
+  return typeof proposal.promptName === 'string'
+    && Array.isArray(proposal.patches)
+    && proposal.patches.length > 0
+    && typeof proposal.confidence === 'number';
+}
+
+function normalizeMetaReflectPatchProposal(
+  proposal: MetaReflectPatchProposal,
+): ParsedMetaReflectPatchProposal {
+  const withRationale = proposal as MetaReflectPatchProposal & { rationale?: unknown };
+  return {
+    promptName: proposal.promptName,
+    patches: proposal.patches,
+    confidence: proposal.confidence,
+    rationale: typeof withRationale.rationale === 'string' ? withRationale.rationale : '',
+  };
 }
 
 export class EvolutionEngine {
@@ -244,7 +270,7 @@ export class EvolutionEngine {
 
       // Apply via config (setNestedValue on config.values)
       try {
-        setNestedValue(this.config.values, p.field_path, p.proposed_value);
+        this.setNestedValue(this.config.values, p.field_path, p.proposed_value);
         await this.taskStore.updateProposalStatus(p.id, 'applied');
         log.info(`Auto-applied config: ${p.field_path} = ${JSON.stringify(p.proposed_value)}`);
         applied++;
@@ -524,21 +550,37 @@ Output as JSON:
       const jsonMatch = output.match(/\{[\s\S]*"patches"[\s\S]*\}/);
       if (!jsonMatch) return null;
 
-      const parsed = JSON.parse(jsonMatch[0]);
+      const parsed = JSON.parse(jsonMatch[0]) as { patches?: unknown; analysis?: unknown };
       if (!Array.isArray(parsed.patches) || parsed.patches.length === 0) return null;
 
       // Validate each patch proposal
-      const validPatches = parsed.patches.filter((p: any) =>
-        typeof p.promptName === 'string' &&
-        Array.isArray(p.patches) &&
-        p.patches.length > 0 &&
-        typeof p.confidence === 'number'
-      );
+      const validPatches = parsed.patches
+        .filter(isMetaReflectPatchProposal)
+        .map(normalizeMetaReflectPatchProposal);
 
-      return validPatches.length > 0 ? { patches: validPatches, analysis: parsed.analysis ?? '' } : null;
-    } catch {
+      return validPatches.length > 0
+        ? { patches: validPatches, analysis: typeof parsed.analysis === 'string' ? parsed.analysis : '' }
+        : null;
+    } catch (e) {
+      log.debug('parseMetaReflectOutput failed to parse JSON', {
+        error: e instanceof Error ? e.message : String(e),
+        outputLength: output.length,
+      });
       return null;
     }
+  }
+
+  private setNestedValue(obj: Record<string, any>, path: string, value: unknown): void {
+    const parts = path.split('.');
+    let current = obj;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!(parts[i] in current)) throw new Error(`Path not found: ${path}`);
+      if (typeof current[parts[i]] !== 'object' || current[parts[i]] === null) {
+        throw new Error('Intermediate path value at "' + parts.slice(0, i + 1).join('.') + '" is not an object');
+      }
+      current = current[parts[i]];
+    }
+    current[parts[parts.length - 1]] = value;
   }
 
   private categorize(text: string): AdjustmentCategory {
@@ -605,14 +647,4 @@ Output as JSON:
 
     return lines.join('\n');
   }
-}
-
-function setNestedValue(obj: Record<string, any>, path: string, value: unknown): void {
-  const parts = path.split('.');
-  let current = obj;
-  for (let i = 0; i < parts.length - 1; i++) {
-    if (!(parts[i] in current)) throw new Error(`Path not found: ${path}`);
-    current = current[parts[i]];
-  }
-  current[parts[parts.length - 1]] = value;
 }
