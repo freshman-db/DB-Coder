@@ -508,6 +508,17 @@ export class TaskStore {
     `;
   }
 
+  async updateAdjustmentEffectivenessById(ids: number[], delta: number): Promise<void> {
+    if (ids.length === 0) return;
+    const sql = this.getSql();
+    await sql`
+      UPDATE adjustments
+      SET effectiveness = LEAST(1.0, GREATEST(-1.0, effectiveness + ${delta})),
+          updated_at = NOW()
+      WHERE id = ANY(${ids}::int[]) AND status = 'active'
+    `;
+  }
+
   async supersedeAdjustment(id: number): Promise<void> {
     const sql = this.getSql();
     await sql`
