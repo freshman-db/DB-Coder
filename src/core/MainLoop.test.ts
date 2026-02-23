@@ -1550,6 +1550,118 @@ describe('MainLoop runCycle integration', () => {
 });
 
 describe('MainLoop runReviewCycle', () => {
+  test('persists progressive review_results arrays across retry rounds', async () => {
+    let codexFixCalls = 0;
+    let claudeFixCalls = 0;
+    const updateTaskCalls: Array<{ taskId: string; patch: unknown }> = [];
+
+    const { loop } = createMainLoopForCycle({
+      codex: {
+        execute: async () => {
+          codexFixCalls++;
+          return { success: true, output: 'codex fix', cost_usd: 0, duration_ms: 0 };
+        },
+      },
+      claude: {
+        execute: async () => {
+          claudeFixCalls++;
+          return { success: true, output: 'claude fix', cost_usd: 0, duration_ms: 0 };
+        },
+      },
+      taskStore: {
+        updateTask: async (taskId: string, patch: unknown) => {
+          updateTaskCalls.push({ taskId, patch: structuredClone(patch) });
+        },
+      },
+    });
+
+    const executionInternals = getMainLoopExecutionInternals(loop);
+    const reviewInternals = getMainLoopReviewInternals(loop);
+    const originalDualReview = reviewInternals.dualReview;
+    const originalBuildFixPrompt = reviewInternals.buildFixPrompt;
+    const originalSaveReviewEvent = reviewInternals.saveReviewEvent;
+    const originalCheckBudgetOrAbort = reviewInternals.checkBudgetOrAbort;
+
+    const reviewRound0: MergedReviewResult = {
+      passed: false,
+      mustFix: [issue('Round 0 must-fix')],
+      shouldFix: [],
+      summary: 'review-round-0',
+    };
+    const reviewRound1: MergedReviewResult = {
+      passed: true,
+      mustFix: [],
+      shouldFix: [],
+      summary: 'review-round-1',
+    };
+
+    let dualReviewCalls = 0;
+    reviewInternals.checkBudgetOrAbort = async () => false;
+    reviewInternals.buildFixPrompt = async () => 'Fix review issues.';
+    reviewInternals.saveReviewEvent = async () => {};
+    reviewInternals.dualReview = async (_task, _changedFiles, reviewRetries) => {
+      dualReviewCalls++;
+      if (reviewRetries === 0) {
+        return { merged: reviewRound0, decision: 'retry', cost_usd: 0, duration_ms: 0 };
+      }
+      assert.equal(reviewRetries, 1);
+      return { merged: reviewRound1, decision: 'approve', cost_usd: 0, duration_ms: 0 };
+    };
+
+    const now = new Date();
+    const task: Task = {
+      id: 'task-review-progressive-arrays',
+      project_path: '/tmp/db-coder-main-loop-test',
+      task_description: 'Accumulate review results across retries',
+      phase: 'executing',
+      priority: 1,
+      plan: null,
+      subtasks: [],
+      review_results: [],
+      iteration: 0,
+      total_cost_usd: 0,
+      git_branch: null,
+      start_commit: null,
+      depends_on: [],
+      status: 'active',
+      created_at: now,
+      updated_at: now,
+    };
+
+    let reviewCycleResult: Awaited<ReturnType<MainLoopExecutionInternals['runReviewCycle']>>;
+    try {
+      const runReviewCycle = executionInternals.runReviewCycle.bind(loop);
+      reviewCycleResult = await runReviewCycle(task, 'HEAD', [], '/tmp/db-coder-main-loop-test');
+    } finally {
+      reviewInternals.dualReview = originalDualReview;
+      reviewInternals.buildFixPrompt = originalBuildFixPrompt;
+      reviewInternals.saveReviewEvent = originalSaveReviewEvent;
+      reviewInternals.checkBudgetOrAbort = originalCheckBudgetOrAbort;
+    }
+
+    assert.equal(reviewCycleResult.aborted, false);
+    if (reviewCycleResult.aborted) return;
+    assert.equal(reviewCycleResult.reviewRetries, 1);
+    assert.equal(reviewCycleResult.reviewResult?.summary, 'review-round-1');
+    assert.equal(dualReviewCalls, 2);
+    assert.equal(codexFixCalls, 1);
+    assert.equal(claudeFixCalls, 0);
+
+    const reviewResultsUpdates = updateTaskCalls
+      .map(call => call.patch)
+      .filter((patch): patch is { review_results: MergedReviewResult[] } => {
+        if (typeof patch !== 'object' || patch === null) return false;
+        return Array.isArray((patch as { review_results?: unknown[] }).review_results);
+      })
+      .map(patch => patch.review_results.map(result => result.summary));
+
+    assert.deepEqual(reviewResultsUpdates, [
+      ['review-round-0'],
+      ['review-round-0', 'review-round-1'],
+    ]);
+    assert.deepEqual(task.review_results, []);
+  });
+
   test('accumulates review_results across retries instead of overwriting prior attempts', async () => {
     let codexFixCalls = 0;
     let claudeFixCalls = 0;
