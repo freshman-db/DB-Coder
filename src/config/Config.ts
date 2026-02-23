@@ -6,7 +6,7 @@ import type { DbCoderConfig, DeepPartial } from './types.js';
 
 const DEFAULTS: DbCoderConfig = {
   apiToken: '',
-  brain: { model: 'opus', scanInterval: 3600, maxScanBudget: 1.0 },
+  brain: { model: 'opus', scanInterval: 300, maxScanBudget: 1.0 },
   claude: { model: 'opus', maxTaskBudget: 2.0, maxTurns: 30 },
   codex: {
     model: 'gpt-5.3-codex',
@@ -19,7 +19,7 @@ const DEFAULTS: DbCoderConfig = {
     execute_frontend: 'claude', execute_backend: 'codex',
     reflect: 'brain',
   },
-  budget: { maxPerTask: 5.0, maxPerDay: 200.0, warningThreshold: 0.8 },
+  budget: { maxPerTask: 5.0, maxPerDay: 300.0, warningThreshold: 0.8 },
   memory: {
     claudeMemUrl: 'http://localhost:37777',
     pgConnectionString: 'postgresql://db:db@localhost:5432/db_coder',

@@ -27,6 +27,7 @@
 - [x] Codex 双重审查 (交叉验证 mustFix/shouldFix)
 - [x] 自修改重启 (safeBuild + exit code 75)
 - [x] 计划对话 (PlanChatManager + ClaudeCodeSession)
+- [x] 始终进化模式 (10 维度 + 模块轮转扫描 + 三层防御)
 - [ ] 大脑反思后自动更新 CLAUDE.md (框架就绪, 待运行验证)
 - [ ] 深度链路审查 (每 5 个任务触发, 待运行验证)
 
@@ -90,6 +91,7 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 4. **硬验证优先** — tsc + test 是唯一真实质量信号
 5. **极简编排** — 编排器只做控制流, 不做 AI 推理
 6. **端到端闭环** — 每条链路必须可测试验证
+7. **始终进化** — 大脑每 cycle 必须产出任务，"nothing to do" 不可接受
 
 ## 踩过的坑
 
@@ -106,3 +108,4 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 - `void asyncFn()` 反模式: 同步回调中用 `asyncFn().catch(handleError)` 替代
 - 类型不要重复定义: import 已有类型而不是在本地重新派生, 类型漂移是静默 bug
 - 清理函数改动时: 检查所有 class 级 Map/Set 是否都有对应的 .delete() 清理
+- Brain "nothing to do" 死循环: prompt 不能给 null 出口, 必须提供进化维度和模块聚焦

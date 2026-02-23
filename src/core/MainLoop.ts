@@ -12,7 +12,7 @@ import { log } from '../utils/logger.js';
 import { truncate } from '../utils/parse.js';
 import { wordJaccard } from '../utils/similarity.js';
 import { SUMMARY_PREVIEW_LEN, TASK_DESC_MAX_LENGTH } from '../types/constants.js';
-import { readFileSync, existsSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, unlinkSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -65,6 +65,8 @@ export class MainLoop {
   private tasksCompleted = 0;
   private brainSession = new ClaudeCodeSession();
   private workerSession = new ClaudeCodeSession();
+  private discoveredModules: string[] = [];
+  private moduleIndex = 0;
 
   constructor(
     private config: Config,
@@ -176,8 +178,9 @@ export class MainLoop {
           continue;
         }
 
+        let wasProductive = false;
         try {
-          await this.runCycle();
+          wasProductive = await this.runCycle();
         } catch (err) {
           log.error('Cycle error', err);
           this.setState('error');
@@ -189,7 +192,8 @@ export class MainLoop {
           break;
         }
 
-        await sleep(this.config.values.brain.scanInterval * 1000);
+        // Productive cycle → short pause then continue; idle → scanInterval
+        await sleep(wasProductive ? 10_000 : this.config.values.brain.scanInterval * 1000);
       }
     } finally {
       this.releaseLock();
@@ -224,18 +228,42 @@ export class MainLoop {
 
   // --- Core cycle: Brain → Worker → Verify → Review → Reflect ---
 
-  async runCycle(): Promise<void> {
+  async runCycle(): Promise<boolean> {
     const projectPath = this.config.projectPath;
 
     // 1. Brain decides what to do
     this.setState('scanning');
-    const decision = await this.brainDecide(projectPath);
+    let decision = await this.brainDecide(projectPath);
     if (decision.costUsd > 0) await this.taskStore.addDailyCost(decision.costUsd);
 
+    // Layer 2: directive fallback if brain returned null
     if (!decision.taskDescription) {
-      log.info('Brain: nothing to do. Sleeping.');
+      log.warn('Brain returned no task — retrying with directive prompt');
+      const directive = await this.brainDecideDirective(projectPath);
+      if (directive.costUsd > 0) await this.taskStore.addDailyCost(directive.costUsd);
+      if (directive.taskDescription) {
+        decision = directive;
+      }
+    }
+
+    // Layer 3: if still null, short sleep will retry (handled by start())
+    if (!decision.taskDescription) {
+      log.warn('Brain: no task after directive retry. Short sleep then retry.');
       this.setState('idle');
-      return;
+      return false;
+    }
+
+    // Dedup check: avoid creating duplicate or recently-failed tasks
+    const similar = await this.taskStore.findSimilarTask(projectPath, decision.taskDescription);
+    if (similar && (similar.status === 'queued' || similar.status === 'active' || similar.status === 'done')) {
+      log.info(`Dedup: skipping task similar to [${similar.status}] "${truncate(similar.task_description, 80)}"`);
+      this.setState('idle');
+      return false;
+    }
+    if (await this.taskStore.hasRecentlyFailedSimilar(projectPath, decision.taskDescription)) {
+      log.info(`Cooldown: skipping task similar to recently failed one: "${truncate(decision.taskDescription, 80)}"`);
+      this.setState('idle');
+      return false;
     }
 
     // 2. Create task record
@@ -248,7 +276,7 @@ export class MainLoop {
     if (await this.checkBudgetOrAbort(task.id)) {
       this.setCurrentTaskId(null);
       this.setState('idle');
-      return;
+      return false;
     }
 
     const branchName = `${this.config.values.git.branchPrefix}${task.id.slice(0, BRANCH_ID_LENGTH)}`;
@@ -373,6 +401,7 @@ export class MainLoop {
     }
 
     this.setState('idle');
+    return true;
   }
 
   // --- Brain session ---
@@ -382,46 +411,165 @@ export class MainLoop {
     priority?: number;
     costUsd: number;
   }> {
-    const queuedTasks = await this.taskQueue.getQueued(projectPath);
-    const queueContext = queuedTasks.length > 0
-      ? `\nQueued tasks (${queuedTasks.length}):\n${queuedTasks.slice(0, 5).map(t => `- [P${t.priority}] ${t.task_description}`).join('\n')}`
-      : '';
+    // Budget gate: if daily budget exhausted, don't spend on brain call
+    const dailyCost = await this.taskStore.getDailyCost();
+    const maxPerDay = this.config.values.budget.maxPerDay;
+    if (dailyCost.total_cost_usd >= maxPerDay) {
+      log.info(`Daily budget exhausted ($${dailyCost.total_cost_usd.toFixed(2)}/$${maxPerDay}). Skipping brain call.`);
+      return { taskDescription: null, costUsd: 0 };
+    }
 
-    const recentResult = await this.taskStore.listTasksPaged(projectPath, 1, 5);
-    const recentTasks = recentResult.tasks ?? [];
-    const recentContext = recentTasks.length > 0
-      ? `\nRecent tasks:\n${recentTasks.map((t: Task) => `- [${t.status}] ${t.task_description}`).join('\n')}`
-      : '';
+    const context = await this.gatherBrainContext(projectPath);
 
-    const prompt = `You are the brain of an autonomous coding agent. Decide what to work on next.
+    const prompt = `You are the brain of an autonomous coding agent in EVOLUTION MODE.
+Your job is to continuously improve the project — you are NOT a passive monitor.
+You MUST find an improvement task every cycle. "Nothing to do" is NOT acceptable.
 
 Read CLAUDE.md for project context, current status, and priorities.
 Use claude-mem to search for relevant past experiences.
 
-${queueContext}${recentContext}
+${context}
 
-If there are queued tasks, pick the highest priority one.
-If there are no queued tasks, scan the codebase and decide if anything needs attention.
-If the project is healthy and nothing needs doing, say so.
+## EVOLUTION DIMENSIONS (scan for opportunities in this order):
+1. **功能完善** — Read CLAUDE.md/README for unchecked items ([ ]), complete missing features
+2. **功能增强** — Improve existing features: better UX, error messages, config options, edge cases
+3. **模块深度扫描** — Focus on the current rotation module, review its internal logic and boundaries
+4. **类型安全** — Eliminate any/unknown, strengthen return types, add missing generics
+5. **错误处理** — Find catch-ignore patterns, add error propagation, ensure errors are visible
+6. **测试覆盖** — Add tests for untested functions, especially pure functions and edge cases
+7. **代码质量** — Split long functions (>80 lines), reduce nesting, eliminate dead/duplicate code
+8. **性能** — N+1 queries, unnecessary awaits in loops, missing parallelization
+9. **韧性** — Timeout handling, retry logic, graceful degradation for external services
+10. **安全** — Input validation, injection prevention, sensitive data in logs
 
-Respond with EXACTLY this JSON format (no markdown, no extra text):
-{"task": "description of what to do" | null, "priority": 0-3, "reasoning": "why this task"}`;
+## RULES:
+- You MUST output exactly ONE task. Never say "nothing to do" or "project is healthy".
+- Avoid duplicating recent tasks (see list above).
+- If budget is low, pick small focused tasks (type safety, single function fix).
+- Be specific: name the file, function, or module to change. Vague tasks waste worker time.
+
+Respond with EXACTLY this JSON (no markdown, no extra text):
+{"task": "specific description of what to do", "priority": 0-3, "reasoning": "why"}`;
 
     const result = await this.brainThink(prompt);
     try {
       const parsed = JSON.parse(result.text);
+      const taskDesc = parsed.task && typeof parsed.task === 'string' ? parsed.task : null;
       return {
-        taskDescription: parsed.task ?? null,
+        taskDescription: taskDesc,
         priority: typeof parsed.priority === 'number' ? parsed.priority : 2,
         costUsd: result.costUsd,
       };
     } catch {
-      // If brain returns unstructured text, try to extract a task
-      if (result.text.toLowerCase().includes('nothing') || result.text.toLowerCase().includes('healthy')) {
-        return { taskDescription: null, costUsd: result.costUsd };
+      // Unstructured text — use it as task description if it's substantive
+      const text = result.text.trim();
+      if (text.length > 20) {
+        return { taskDescription: text.slice(0, 500), costUsd: result.costUsd };
       }
-      return { taskDescription: result.text.slice(0, 500), costUsd: result.costUsd };
+      return { taskDescription: null, costUsd: result.costUsd };
     }
+  }
+
+  /** Gather rich context for brain decision-making */
+  private async gatherBrainContext(projectPath: string): Promise<string> {
+    const parts: string[] = [];
+
+    // Queued tasks
+    const queuedTasks = await this.taskQueue.getQueued(projectPath);
+    if (queuedTasks.length > 0) {
+      parts.push(`Queued tasks (${queuedTasks.length}):\n${queuedTasks.slice(0, 5).map(t => `- [P${t.priority}] ${t.task_description}`).join('\n')}`);
+    }
+
+    // Recent 15 tasks (expanded from 5 to avoid repeats)
+    const recentResult = await this.taskStore.listTasksPaged(projectPath, 1, 15);
+    const recentTasks = recentResult.tasks ?? [];
+    if (recentTasks.length > 0) {
+      parts.push(`Recent tasks (DO NOT duplicate these):\n${recentTasks.map((t: Task) => `- [${t.status}] ${t.task_description}`).join('\n')}`);
+    }
+
+    // Budget remaining
+    const dailyCost = await this.taskStore.getDailyCost();
+    const remaining = this.config.values.budget.maxPerDay - dailyCost.total_cost_usd;
+    parts.push(`Budget: $${remaining.toFixed(2)} remaining today (${dailyCost.task_count} tasks completed). ${remaining < 30 ? 'LOW BUDGET — pick small tasks.' : ''}`);
+
+    // Health metrics
+    try {
+      const metrics = await this.taskStore.getOperationalMetrics(projectPath);
+      parts.push(`Health: passRate=${metrics.taskPassRate}%, dailyCost=$${metrics.dailyCostUsd.toFixed(2)}, queue=${metrics.queueDepth}`);
+    } catch { /* metrics not critical */ }
+
+    // Module rotation
+    const currentModule = await this.getNextModule(projectPath);
+    if (currentModule) {
+      parts.push(`Current focus module: ${currentModule}/\nDeeply scan this module for improvement opportunities. Prioritize other areas only if there's something more urgent.`);
+    }
+
+    return parts.join('\n\n');
+  }
+
+  /** Layer 2: Extremely specific directive when brain returns no task */
+  private async brainDecideDirective(projectPath: string): Promise<{
+    taskDescription: string | null;
+    priority?: number;
+    costUsd: number;
+  }> {
+    const prompt = `You MUST pick ONE concrete improvement from this list. Search the codebase and find a SPECIFIC instance:
+
+1. A function longer than 80 lines → split it
+2. A catch block that ignores errors → add proper handling
+3. A public function without JSDoc → add documentation
+4. An \`any\` type → add proper typing
+5. An untested pure function → write a test
+6. A TODO/FIXME comment → resolve it
+7. A file with duplicate logic → extract shared helper
+8. A missing error message → add user-friendly error text
+
+Be SPECIFIC: name the exact file and function. Do not be vague.
+
+Respond with EXACTLY this JSON (no markdown):
+{"task": "specific description", "priority": 2, "reasoning": "why"}`;
+
+    const result = await this.brainThink(prompt);
+    try {
+      const parsed = JSON.parse(result.text);
+      const taskDesc = parsed.task && typeof parsed.task === 'string' ? parsed.task : null;
+      return {
+        taskDescription: taskDesc,
+        priority: typeof parsed.priority === 'number' ? parsed.priority : 2,
+        costUsd: result.costUsd,
+      };
+    } catch {
+      const text = result.text.trim();
+      if (text.length > 20) {
+        return { taskDescription: text.slice(0, 500), costUsd: result.costUsd };
+      }
+      return { taskDescription: null, costUsd: result.costUsd };
+    }
+  }
+
+  /** Discover project modules by scanning src/ or root directory */
+  private discoverModules(projectPath: string): string[] {
+    const srcDir = join(projectPath, 'src');
+    const baseDir = existsSync(srcDir) ? srcDir : projectPath;
+    try {
+      const entries = readdirSync(baseDir, { withFileTypes: true });
+      return entries
+        .filter(e => e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules' && e.name !== 'dist')
+        .map(e => existsSync(srcDir) ? `src/${e.name}` : e.name);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Get the next module in rotation */
+  private async getNextModule(projectPath: string): Promise<string> {
+    if (this.discoveredModules.length === 0) {
+      this.discoveredModules = this.discoverModules(projectPath);
+    }
+    if (this.discoveredModules.length === 0) return '';
+    const mod = this.discoveredModules[this.moduleIndex % this.discoveredModules.length];
+    this.moduleIndex++;
+    return mod;
   }
 
   private async brainThink(prompt: string): Promise<SessionResult> {
