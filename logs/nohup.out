@@ -312,3 +312,39 @@
 [36m[2026-02-23T01:04:52.379Z] [INFO][0m Committed: db-coder: Update src/core/Brain.ts to import MEMORY_CATEGORI
 [36m[2026-02-23T01:04:52.444Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
 [36m[2026-02-23T01:04:52.445Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T01:05:55.413Z] [INFO][0m Committed: db-coder: Run tsc build and full test suite. Fix any import 
+[36m[2026-02-23T01:05:55.435Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T01:11:41.477Z] [INFO][0m Reviews: Claude PASS, Codex PASS (346s)
+[36m[2026-02-23T01:11:43.574Z] [INFO][0m Reflecting on task (outcome=success)...
+[36m[2026-02-23T01:11:43.574Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T01:13:11.737Z] [INFO][0m Saved experience: Derive union types from `as const` arrays to eliminate type/validation drift
+[36m[2026-02-23T01:13:11.739Z] [INFO][0m Saved experience: Use compile-time type-equality assertions to guard re-export correctness
+[36m[2026-02-23T01:13:11.742Z] [INFO][0m Saved experience: SQL CHECK constraints must also derive from the same source-of-truth array
+[36m[2026-02-23T01:13:11.744Z] [INFO][0m Saved experience: Incremental refactoring: constants first, then wiring, then consumers
+[36m[2026-02-23T01:13:11.747Z] [INFO][0m Saved experience: Record<UnionType, T> forces compile-time completeness for exhaustive mappings
+[36m[2026-02-23T01:13:11.749Z] [INFO][0m Saved experience: Removing duplicate type definitions simplifies import graphs
+[36m[2026-02-23T01:13:11.948Z] [INFO][0m Memory confidence boosted: "Import canonical types instead of re-deriving them" (+0.1)
+[36m[2026-02-23T01:13:11.950Z] [INFO][0m Memory confidence boosted: "Hardcoded validation sets drift from source-of-truth types" (+0.1)
+[36m[2026-02-23T01:13:11.952Z] [INFO][0m Memory confidence boosted: "Codex read-only review correctly identified implementation gaps" (+0.1)
+[36m[2026-02-23T01:13:11.960Z] [INFO][0m Stored adjustment [strategy]: When centralizing string constants as a single source of truth, search for SQL D
+[36m[2026-02-23T01:13:11.962Z] [INFO][0m Stored adjustment [strategy]: When a Record<UnionType, T> fully covers a union, remove any `?? defaultValue` f
+[36m[2026-02-23T01:13:11.963Z] [INFO][0m Stored adjustment [process]: After completing a source-of-truth consolidation refactor, run `grep -r` for any
+[36m[2026-02-23T01:13:11.965Z] [INFO][0m Stored adjustment [strategy]: When refactoring shared types across multiple files, use re-exports (`export typ
+[36m[2026-02-23T01:13:11.967Z] [INFO][0m Stored adjustment [avoidance]: When a Set is used purely for `.has()` validation from a known constant array, t
+[36m[2026-02-23T01:13:11.971Z] [INFO][0m Task completed: Derive validCategories (Brain.ts:169) and validPromptNames (
+[36m[2026-02-23T01:13:11.977Z] [INFO][0m Merged branch: db-coder/56993ef5
+[36m[2026-02-23T01:13:11.982Z] [INFO][0m safeBuild: compiling to dist.tmp/
+[36m[2026-02-23T01:13:14.485Z] [INFO][0m safeBuild: swapping dist/ directories
+[36m[2026-02-23T01:13:14.489Z] [INFO][0m safeBuild: success (3s)
+[36m[2026-02-23T01:13:14.489Z] [INFO][0m Self-build succeeded, restart pending after cycle completes
+[36m[2026-02-23T01:13:14.504Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T01:13:55.151Z] [INFO][0m Executing task [P1]: Fix three type safety and observability issues in EvolutionEngine.ts:
+
+1. **Defi
+[36m[2026-02-23T01:13:55.160Z] [INFO][0m Created branch: db-coder/f341c2fa
+[36m[2026-02-23T01:13:57.346Z] [INFO][0m Task has no subtasks, auto-decomposing...
+[36m[2026-02-23T01:13:57.346Z] [INFO][0m Creating task plan...
+[36m[2026-02-23T01:13:57.437Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
+[36m[2026-02-23T01:16:33.249Z] [INFO][0m Plan created: 1 tasks
+[36m[2026-02-23T01:16:33.343Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
+[36m[2026-02-23T01:16:33.345Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
