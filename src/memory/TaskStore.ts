@@ -1,5 +1,5 @@
 import type postgres from 'postgres';
-import type { Task, TaskLog, TaskStatus, ScanResult, ReviewEvent, RecurringIssueCategory, PlanDraft, PlanReviewStatus, PlanDraftAnnotation, ChatMessage, ChatStatus, OperationalMetrics } from './types.js';
+import type { Task, TaskLog, TaskStatus, ScanResult, ScanModule, ReviewEvent, RecurringIssueCategory, PlanDraft, PlanReviewStatus, PlanDraftAnnotation, ChatMessage, ChatStatus, OperationalMetrics } from './types.js';
 import type { EvaluationScore } from '../core/types.js';
 import type { Adjustment, AdjustmentCategory, AdjustmentStatus, GoalProgress, ConfigProposal, ProposalStatus, PromptVersion, PromptName, PromptPatch, PromptMetrics, PromptVersionStatus } from '../evolution/types.js';
 import type {
@@ -184,6 +184,20 @@ CREATE TABLE IF NOT EXISTS service_state (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (project_path, key)
 );
+
+CREATE TABLE IF NOT EXISTS scan_modules (
+  id SERIAL PRIMARY KEY,
+  project_path TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  entry_points TEXT[] NOT NULL DEFAULT '{}',
+  involved_files TEXT[] NOT NULL DEFAULT '{}',
+  data_flow TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(project_path, name)
+);
+
+ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS module_name TEXT DEFAULT NULL;
 `;
 
 type TaskUpdateInput = Partial<Pick<Task, 'phase' | 'status' | 'plan' | 'subtasks' | 'review_results' | 'iteration' | 'total_cost_usd' | 'git_branch' | 'start_commit'>>
@@ -427,13 +441,16 @@ export class TaskStore {
 
   // --- Scan Results ---
 
-  async saveScanResult(scan: Omit<ScanResult, 'id' | 'created_at'>): Promise<void> {
+  async saveScanResult(scan: Omit<ScanResult, 'id' | 'created_at'>): Promise<number> {
     const sql = this.getSql();
-    await sql`
-      INSERT INTO scan_results (project_path, commit_hash, depth, result, health_score, cost_usd)
+    const [row] = await sql<[{ id: number }]>`
+      INSERT INTO scan_results (project_path, commit_hash, depth, result, health_score, cost_usd, module_name)
       VALUES (${scan.project_path}, ${scan.commit_hash}, ${scan.depth},
-              ${sql.json(scan.result as ScanResultJson & postgres.JSONValue)}, ${scan.health_score}, ${scan.cost_usd})
+              ${sql.json(scan.result as ScanResultJson & postgres.JSONValue)}, ${scan.health_score}, ${scan.cost_usd},
+              ${scan.module_name ?? null})
+      RETURNING id
     `;
+    return row.id;
   }
 
   async getLastScan(projectPath: string): Promise<ScanResult | null> {
@@ -1007,6 +1024,65 @@ export class TaskStore {
     `;
   }
 
+
+  // --- Scan Modules ---
+
+  async saveModules(projectPath: string, modules: Array<Omit<ScanModule, 'id' | 'project_path' | 'created_at'>>): Promise<void> {
+    const sql = this.getSql();
+    // Upsert: replace existing modules for this project
+    await sql`DELETE FROM scan_modules WHERE project_path = ${projectPath}`;
+    for (const m of modules) {
+      await sql`
+        INSERT INTO scan_modules (project_path, name, description, entry_points, involved_files, data_flow)
+        VALUES (${projectPath}, ${m.name}, ${m.description ?? null},
+                ${m.entry_points}, ${m.involved_files}, ${m.data_flow ?? null})
+      `;
+    }
+  }
+
+  async getModules(projectPath: string): Promise<ScanModule[]> {
+    const sql = this.getSql();
+    return sql<ScanModule[]>`
+      SELECT * FROM scan_modules WHERE project_path = ${projectPath} ORDER BY name
+    `;
+  }
+
+  async getModule(projectPath: string, name: string): Promise<ScanModule | null> {
+    const sql = this.getSql();
+    const [row] = await sql<ScanModule[]>`
+      SELECT * FROM scan_modules WHERE project_path = ${projectPath} AND name = ${name}
+    `;
+    return row ?? null;
+  }
+
+  async getLastModuleScan(projectPath: string, moduleName: string): Promise<ScanResult | null> {
+    const sql = this.getSql();
+    const [row] = await sql<ScanResult[]>`
+      SELECT * FROM scan_results
+      WHERE project_path = ${projectPath} AND module_name = ${moduleName}
+      ORDER BY created_at DESC LIMIT 1
+    `;
+    return row ?? null;
+  }
+
+  async getModuleScanHistory(projectPath: string, moduleName: string, limit = 10): Promise<ScanResult[]> {
+    const sql = this.getSql();
+    return sql<ScanResult[]>`
+      SELECT * FROM scan_results
+      WHERE project_path = ${projectPath} AND module_name = ${moduleName}
+      ORDER BY created_at DESC LIMIT ${limit}
+    `;
+  }
+
+  async getLatestModuleScans(projectPath: string): Promise<ScanResult[]> {
+    const sql = this.getSql();
+    return sql<ScanResult[]>`
+      SELECT DISTINCT ON (module_name) *
+      FROM scan_results
+      WHERE project_path = ${projectPath} AND module_name IS NOT NULL
+      ORDER BY module_name, created_at DESC
+    `;
+  }
 
   async getServiceState(projectPath: string, key: string): Promise<string | null> {
     const sql = this.getSql();

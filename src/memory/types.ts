@@ -85,6 +85,17 @@ export interface OperationalMetrics {
   recentHealthScores: number[];
 }
 
+export interface ScanModule {
+  id: number;
+  project_path: string;
+  name: string;
+  description: string | null;
+  entry_points: string[];
+  involved_files: string[];
+  data_flow: string | null;
+  created_at: Date;
+}
+
 export interface ScanResult {
   id: number;
   project_path: string;
@@ -93,6 +104,7 @@ export interface ScanResult {
   result: ProjectAnalysis;
   health_score: number | null;
   cost_usd: number | null;
+  module_name: string | null;
   created_at: Date;
 }
 
