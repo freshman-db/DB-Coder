@@ -31,6 +31,17 @@ export class TaskQueue {
         continue;
       }
 
+      const completedSimilar = await this.store.findSimilarCompletedTask(projectPath, planTask.description);
+      const recurrence = completedSimilar
+        ? {
+            previousTaskId: completedSimilar.id,
+            completedAt: completedSimilar.updated_at,
+          }
+        : undefined;
+      if (completedSimilar) {
+        log.warn(`Recurring issue detected: "${planTask.description.slice(0, 60)}" — similar to completed task ${completedSimilar.id}`);
+      }
+
       // Resolve dependency plan IDs to database UUIDs
       const dependsOn = planTask.dependsOn
         .map(depId => planIdToDbId.get(depId))
@@ -47,7 +58,7 @@ export class TaskQueue {
 
       // Store subtasks in the task record
       await this.store.updateTask(task.id, {
-        plan: planTask,
+        plan: { ...planTask, recurrence },
         subtasks: planTask.subtasks.map(st => ({
           id: st.id,
           description: st.description,

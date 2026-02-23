@@ -12,6 +12,7 @@ type CooldownMatcher = (projectPath: string, description: string) => boolean | P
 interface StoreMockOptions {
   initialTasks?: Task[];
   findSimilarTask?: SimilarTaskMatcher;
+  findSimilarCompletedTask?: SimilarTaskMatcher;
   hasRecentlyFailedSimilar?: CooldownMatcher;
   emptyNextValue?: Task | null | undefined;
 }
@@ -40,6 +41,7 @@ interface StoreMockFixture {
   listTasksCalls: ListTasksCall[];
   getNextTaskCalls: string[];
   findSimilarTaskCalls: Array<{ projectPath: string; description: string }>;
+  findSimilarCompletedTaskCalls: Array<{ projectPath: string; description: string }>;
   hasRecentlyFailedSimilarCalls: Array<{ projectPath: string; description: string }>;
 }
 
@@ -88,6 +90,7 @@ function createStoreMock(options: StoreMockOptions = {}): StoreMockFixture {
   const listTasksCalls: ListTasksCall[] = [];
   const getNextTaskCalls: string[] = [];
   const findSimilarTaskCalls: Array<{ projectPath: string; description: string }> = [];
+  const findSimilarCompletedTaskCalls: Array<{ projectPath: string; description: string }> = [];
   const hasRecentlyFailedSimilarCalls: Array<{ projectPath: string; description: string }> = [];
   const hasCustomEmptyNextValue = Object.prototype.hasOwnProperty.call(options, 'emptyNextValue');
 
@@ -103,6 +106,11 @@ function createStoreMock(options: StoreMockOptions = {}): StoreMockFixture {
       findSimilarTaskCalls.push({ projectPath, description });
       if (!options.findSimilarTask) return null;
       return options.findSimilarTask(projectPath, description);
+    },
+    findSimilarCompletedTask: async (projectPath: string, description: string) => {
+      findSimilarCompletedTaskCalls.push({ projectPath, description });
+      if (!options.findSimilarCompletedTask) return null;
+      return options.findSimilarCompletedTask(projectPath, description);
     },
     createTask: async (
       projectPath: string,
@@ -170,6 +178,7 @@ function createStoreMock(options: StoreMockOptions = {}): StoreMockFixture {
     listTasksCalls,
     getNextTaskCalls,
     findSimilarTaskCalls,
+    findSimilarCompletedTaskCalls,
     hasRecentlyFailedSimilarCalls,
   };
 }
@@ -185,6 +194,20 @@ async function withCapturedInfoLogs<T>(fn: (messages: string[]) => Promise<T>): 
     return await fn(messages);
   } finally {
     log.info = originalInfo;
+  }
+}
+
+async function withCapturedWarnLogs<T>(fn: (messages: string[]) => Promise<T>): Promise<T> {
+  const messages: string[] = [];
+  const originalWarn = log.warn;
+  log.warn = (message: string) => {
+    messages.push(message);
+  };
+
+  try {
+    return await fn(messages);
+  } finally {
+    log.warn = originalWarn;
   }
 }
 
@@ -266,7 +289,7 @@ test('enqueue adds task and logs', async () => {
   assert.deepEqual(fixture.updateTaskCalls[0], {
     taskId: 'task-1',
     updates: {
-      plan: plan.tasks[3],
+      plan: { ...plan.tasks[3], recurrence: undefined },
       subtasks: [
         { id: 'S-1', description: 'Create utility module', executor: 'codex', status: 'pending' },
       ],
@@ -275,7 +298,7 @@ test('enqueue adds task and logs', async () => {
   assert.equal(capturedLogs.filter(message => message.startsWith('Queued task')).length, 6);
 });
 
-test('enqueue dedup — findSimilarTask returns match and task is skipped', async () => {
+test('enqueue dedup — queued/active task still hard-blocks', async () => {
   const similarTask = createTaskRecord({
     id: 'existing-1',
     task_description: 'Build shared utility',
@@ -302,9 +325,87 @@ test('enqueue dedup — findSimilarTask returns match and task is skipped', asyn
   assert.deepEqual(taskIds, []);
   assert.equal(fixture.hasRecentlyFailedSimilarCalls.length, 1);
   assert.equal(fixture.findSimilarTaskCalls.length, 1);
+  assert.equal(fixture.findSimilarCompletedTaskCalls.length, 0);
   assert.equal(fixture.createTaskCalls.length, 0);
   assert.equal(fixture.updateTaskCalls.length, 0);
   assert.equal(capturedLogs.some(message => message.includes('Skipping duplicate task:')), true);
+});
+
+test('enqueue recurrence — similar done task exists, new task created with metadata', async () => {
+  const completedTask = createTaskRecord({
+    id: 'done-1',
+    task_description: 'Fix flaky migration',
+    status: 'done',
+    updated_at: new Date('2026-02-02T12:00:00.000Z'),
+  });
+  const fixture = createStoreMock({
+    findSimilarCompletedTask: async (_projectPath, description) =>
+      description === 'Fix flaky migration' ? completedTask : null,
+  });
+  const queue = new TaskQueue(fixture.store);
+  const plan: TaskPlan = {
+    reasoning: 'Allow recurrence while recording context',
+    tasks: [
+      createPlanTask({ id: 'T-repeat', description: 'Fix flaky migration' }),
+    ],
+  };
+
+  let capturedWarnLogs: string[] = [];
+  const taskIds = await withCapturedWarnLogs(async messages => {
+    capturedWarnLogs = messages;
+    return queue.enqueue('/repo', plan);
+  });
+
+  assert.deepEqual(taskIds, ['task-1']);
+  assert.equal(fixture.hasRecentlyFailedSimilarCalls.length, 1);
+  assert.equal(fixture.findSimilarTaskCalls.length, 1);
+  assert.equal(fixture.findSimilarCompletedTaskCalls.length, 1);
+  assert.equal(fixture.createTaskCalls.length, 1);
+  assert.deepEqual(fixture.updateTaskCalls[0], {
+    taskId: 'task-1',
+    updates: {
+      plan: {
+        ...plan.tasks[0],
+        recurrence: {
+          previousTaskId: 'done-1',
+          completedAt: completedTask.updated_at,
+        },
+      },
+      subtasks: [],
+    },
+  });
+  assert.equal(capturedWarnLogs.length, 1);
+  assert.equal(capturedWarnLogs[0]?.includes('Recurring issue detected: "Fix flaky migration" — similar to completed task done-1'), true);
+});
+
+test('enqueue dedup — done task no longer hard-blocks', async () => {
+  const completedTask = createTaskRecord({
+    id: 'done-2',
+    task_description: 'Investigate latency regression',
+    status: 'done',
+    updated_at: new Date('2026-02-03T09:30:00.000Z'),
+  });
+  const fixture = createStoreMock({
+    findSimilarTask: async () => null,
+    findSimilarCompletedTask: async (_projectPath, description) =>
+      description === 'Investigate latency regression' ? completedTask : null,
+  });
+  const queue = new TaskQueue(fixture.store);
+  const plan: TaskPlan = {
+    reasoning: 'Completed tasks should no longer block recurrence',
+    tasks: [
+      createPlanTask({ id: 'T-reopen', description: 'Investigate latency regression' }),
+    ],
+  };
+
+  const taskIds = await queue.enqueue('/repo', plan);
+
+  assert.deepEqual(taskIds, ['task-1']);
+  assert.equal(fixture.hasRecentlyFailedSimilarCalls.length, 1);
+  assert.equal(fixture.findSimilarTaskCalls.length, 1);
+  assert.equal(fixture.findSimilarCompletedTaskCalls.length, 1);
+  assert.equal(fixture.createTaskCalls.length, 1);
+  assert.equal(fixture.updateTaskCalls.length, 1);
 });
 
 test('enqueue cooldown — hasRecentlyFailedSimilar returns true and task is skipped', async () => {
@@ -328,6 +429,7 @@ test('enqueue cooldown — hasRecentlyFailedSimilar returns true and task is ski
   assert.deepEqual(taskIds, []);
   assert.equal(fixture.hasRecentlyFailedSimilarCalls.length, 1);
   assert.equal(fixture.findSimilarTaskCalls.length, 0);
+  assert.equal(fixture.findSimilarCompletedTaskCalls.length, 0);
   assert.equal(fixture.createTaskCalls.length, 0);
   assert.equal(fixture.updateTaskCalls.length, 0);
   assert.equal(capturedLogs.some(message => message.includes('Skipping task (cooldown):')), true);

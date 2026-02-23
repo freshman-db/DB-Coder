@@ -397,9 +397,23 @@ export class TaskStore {
       SELECT *, similarity(task_description, ${description}) AS sim
       FROM tasks
       WHERE project_path = ${projectPath}
-        AND status IN ('queued', 'active', 'done', 'blocked', 'failed')
+        AND status IN ('queued', 'active')
         AND similarity(task_description, ${description}) > 0.4
       ORDER BY sim DESC
+      LIMIT 1
+    `;
+    return row ?? null;
+  }
+
+  async findSimilarCompletedTask(projectPath: string, description: string): Promise<Task | null> {
+    const sql = this.getSql();
+    const [row] = await sql<Task[]>`
+      SELECT *, similarity(task_description, ${description}) AS sim
+      FROM tasks
+      WHERE project_path = ${projectPath}
+        AND status = 'done'
+        AND similarity(task_description, ${description}) > 0.4
+      ORDER BY updated_at DESC
       LIMIT 1
     `;
     return row ?? null;
