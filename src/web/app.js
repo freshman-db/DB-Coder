@@ -848,11 +848,6 @@ async function togglePause() {
   }
 }
 
-async function triggerScan() {
-  const res = await api('/control/scan', { method: 'POST' });
-  if (res !== null) toast('扫描已触发');
-}
-
 async function deleteTask(id) {
   if (!confirm(`确定删除任务 #${id}？此操作不可撤销。`)) return;
   const res = await api(`/tasks/${id}`, { method: 'DELETE' });
@@ -866,7 +861,7 @@ async function approveTask(id) {
   const res = await api(`/tasks/${id}/approve`, { method: 'POST' });
   if (res !== null) {
     toast('任务已通过，已回到执行队列');
-    router();
+    navigate();
   }
 }
 
@@ -874,7 +869,7 @@ async function skipTask(id) {
   const res = await api(`/tasks/${id}/skip`, { method: 'POST' });
   if (res !== null) {
     toast('任务已跳过');
-    router();
+    navigate();
   }
 }
 

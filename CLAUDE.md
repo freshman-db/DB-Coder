@@ -26,10 +26,9 @@
 - [x] 硬验证 (tsc 错误计数对比基线)
 - [x] Codex 双重审查 (交叉验证 mustFix/shouldFix)
 - [x] 自修改重启 (safeBuild + exit code 75)
-- [ ] 计划对话 (v1 PlanWorkflow 已删除, v2 待重写)
-- [ ] 大脑反思后自动更新 CLAUDE.md (框架就绪, 待验证)
-- [ ] 深度链路审查 (每 5 个任务触发, 待验证)
-- [ ] Web UI 适配 v2 (移除进化面板, 简化状态展示)
+- [x] 计划对话 (PlanChatManager + ClaudeCodeSession)
+- [ ] 大脑反思后自动更新 CLAUDE.md (框架就绪, 待运行验证)
+- [ ] 深度链路审查 (每 5 个任务触发, 待运行验证)
 
 ## 环境
 
@@ -102,3 +101,8 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 - Agent SDK permissionMode: 非交互场景必须用 `bypassPermissions`
 - 1431 行 prompt 模板限制 Claude 能力: 删除所有模板, 让 Claude 自主推理
 - patrol lock 自死锁: acquireLock/releaseLock 必须在 start() 的 finally 中
+- 前端 innerHTML: marked.parse() 后必须过 DOMPurify.sanitize() 再赋值
+- 空 git diff 应自动失败: 任务期望代码变更但 diff 为空时不能标成功
+- `void asyncFn()` 反模式: 同步回调中用 `asyncFn().catch(handleError)` 替代
+- 类型不要重复定义: import 已有类型而不是在本地重新派生, 类型漂移是静默 bug
+- 清理函数改动时: 检查所有 class 级 Map/Set 是否都有对应的 .delete() 清理
