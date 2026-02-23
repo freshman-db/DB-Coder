@@ -298,7 +298,7 @@ test('enqueue adds task and logs', async () => {
   assert.equal(capturedLogs.filter(message => message.startsWith('Queued task')).length, 6);
 });
 
-test('enqueue dedup — findSimilarTask returns match and task is skipped', async () => {
+test('enqueue dedup — queued/active task still hard-blocks', async () => {
   const similarTask = createTaskRecord({
     id: 'existing-1',
     task_description: 'Build shared utility',
@@ -331,7 +331,7 @@ test('enqueue dedup — findSimilarTask returns match and task is skipped', asyn
   assert.equal(capturedLogs.some(message => message.includes('Skipping duplicate task:')), true);
 });
 
-test('enqueue recurrence — similar done task is tracked without blocking', async () => {
+test('enqueue recurrence — similar done task exists, new task created with metadata', async () => {
   const completedTask = createTaskRecord({
     id: 'done-1',
     task_description: 'Fix flaky migration',
@@ -376,6 +376,36 @@ test('enqueue recurrence — similar done task is tracked without blocking', asy
   });
   assert.equal(capturedWarnLogs.length, 1);
   assert.equal(capturedWarnLogs[0]?.includes('Recurring issue detected: "Fix flaky migration" — similar to completed task done-1'), true);
+});
+
+test('enqueue dedup — done task no longer hard-blocks', async () => {
+  const completedTask = createTaskRecord({
+    id: 'done-2',
+    task_description: 'Investigate latency regression',
+    status: 'done',
+    updated_at: new Date('2026-02-03T09:30:00.000Z'),
+  });
+  const fixture = createStoreMock({
+    findSimilarTask: async () => null,
+    findSimilarCompletedTask: async (_projectPath, description) =>
+      description === 'Investigate latency regression' ? completedTask : null,
+  });
+  const queue = new TaskQueue(fixture.store);
+  const plan: TaskPlan = {
+    reasoning: 'Completed tasks should no longer block recurrence',
+    tasks: [
+      createPlanTask({ id: 'T-reopen', description: 'Investigate latency regression' }),
+    ],
+  };
+
+  const taskIds = await queue.enqueue('/repo', plan);
+
+  assert.deepEqual(taskIds, ['task-1']);
+  assert.equal(fixture.hasRecentlyFailedSimilarCalls.length, 1);
+  assert.equal(fixture.findSimilarTaskCalls.length, 1);
+  assert.equal(fixture.findSimilarCompletedTaskCalls.length, 1);
+  assert.equal(fixture.createTaskCalls.length, 1);
+  assert.equal(fixture.updateTaskCalls.length, 1);
 });
 
 test('enqueue cooldown — hasRecentlyFailedSimilar returns true and task is skipped', async () => {
