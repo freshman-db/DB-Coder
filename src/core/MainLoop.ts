@@ -1256,7 +1256,7 @@ function smartTruncate(output: string, toolSummaries: string[] | undefined, maxL
   return '...' + output.slice(-maxLength);
 }
 
-function mergeReviews(claude: ReviewResult, codex: ReviewResult): MergedReviewResult {
+export function mergeReviews(claude: ReviewResult, codex: ReviewResult): MergedReviewResult {
   const mustFix: ReviewIssue[] = [];
   const shouldFix: ReviewIssue[] = [];
 
@@ -1283,10 +1283,29 @@ function mergeReviews(claude: ReviewResult, codex: ReviewResult): MergedReviewRe
     }
   }
 
+  const claudeRawFail = !claude.passed && claude.issues.length === 0;
+  const codexRawFail = !codex.passed && codex.issues.length === 0;
+
+  if (claudeRawFail) {
+    shouldFix.push({
+      description: 'Claude reviewer explicitly failed without structured issues',
+      severity: 'medium',
+      source: 'claude',
+    });
+  }
+  if (codexRawFail) {
+    shouldFix.push({
+      description: 'Codex reviewer explicitly failed without structured issues',
+      severity: 'medium',
+      source: 'codex',
+    });
+  }
+
   // Pass if no must-fix issues (intersection of both reviewers).
   // Individual reviewer shouldFix items don't block — they're logged for future reference.
   const hasCriticalMustFix = mustFix.some(i => i.severity === 'critical' || i.severity === 'high');
-  const passed = mustFix.length === 0 || !hasCriticalMustFix;
+  const hasRawFail = claudeRawFail || codexRawFail;
+  const passed = !hasRawFail && (mustFix.length === 0 || !hasCriticalMustFix);
 
   return {
     passed,
