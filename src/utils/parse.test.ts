@@ -213,14 +213,22 @@ test('tryParseReview fallback returns failed review for issue text', () => {
   assert.equal(parsed.summary, 'Found critical security vulnerability');
 });
 
-test('tryParseReview handles empty or non-string input safely with fail-closed fallback', () => {
+test('tryParseReview handles empty input safely with fail-closed fallback', () => {
   assert.deepEqual(tryParseReview(''), {
     passed: false,
     issues: [],
     summary: '',
   });
+});
 
-  assert.deepEqual(tryParseReview(undefined as unknown as string), {
+test('tryParseReview handles non-string input safely with fail-closed fallback', () => {
+  let parsed: ReturnType<typeof tryParseReview> | undefined;
+
+  assert.doesNotThrow(() => {
+    parsed = tryParseReview(undefined as any);
+  });
+
+  assert.deepEqual(parsed, {
     passed: false,
     issues: [],
     summary: '',
