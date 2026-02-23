@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import test from 'node:test';
 
 import type { Config } from '../config/Config.js';
@@ -7,16 +7,11 @@ import type { MainLoop } from '../core/MainLoop.js';
 import type { GlobalMemory } from '../memory/GlobalMemory.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { CostTracker } from '../utils/cost.js';
+import { createMockRequest, createMockResponse, getRequestListener } from './__test-helpers.js';
+import type { MockResponseState } from './__test-helpers.js';
 import { CSP_DIRECTIVES, Server } from './Server.js';
 
 const MAX_REQUEST_BODY_BYTES = 64 * 1024;
-type RequestListener = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
-
-interface MockResponseState {
-  statusCode: number;
-  headers: Record<string, string>;
-  body: string;
-}
 
 function createServer(apiToken: string, port = 18800): Server {
   const config = {
@@ -39,66 +34,6 @@ function createServer(apiToken: string, port = 18800): Server {
 function authorize(server: Server, req: { method?: string; url?: string; headers?: Record<string, string | string[]> }): boolean {
   const instance = server as unknown as { isAuthorizedApiRequest: (request: unknown) => boolean };
   return instance.isAuthorizedApiRequest(req);
-}
-
-function getHttpServer(server: Server): HttpServer {
-  const instance = server as unknown as { server: HttpServer };
-  return instance.server;
-}
-
-function getRequestListener(server: Server): RequestListener {
-  const [listener] = getHttpServer(server).listeners('request');
-  assert.equal(typeof listener, 'function');
-  return async (req, res) => {
-    await listener(req, res);
-  };
-}
-
-function createMockRequest(params: {
-  method: string;
-  url: string;
-  headers: Record<string, string | string[]>;
-  resume?: () => void;
-}): IncomingMessage {
-  const req = {
-    method: params.method,
-    url: params.url,
-    headers: params.headers,
-    resume: params.resume ?? (() => {}),
-  } as Partial<IncomingMessage>;
-  return req as IncomingMessage;
-}
-
-function createMockResponse(): { response: ServerResponse & { getHeader: (name: string) => string | undefined }; state: MockResponseState } {
-  const state: MockResponseState = {
-    statusCode: 200,
-    headers: {},
-    body: '',
-  };
-
-  const normalizeHeaderName = (name: string): string => name.toLowerCase();
-
-  const response = {
-    setHeader: (name: string, value: string): void => {
-      state.headers[normalizeHeaderName(name)] = value;
-    },
-    getHeader: (name: string): string | undefined => state.headers[normalizeHeaderName(name)],
-    writeHead: (statusCode: number, headers?: Record<string, string>): ServerResponse => {
-      state.statusCode = statusCode;
-      if (headers) {
-        for (const [name, value] of Object.entries(headers)) {
-          state.headers[normalizeHeaderName(name)] = value;
-        }
-      }
-      return response as unknown as ServerResponse;
-    },
-    end: (chunk?: string | Buffer): void => {
-      if (chunk === undefined) return;
-      state.body += Buffer.isBuffer(chunk) ? chunk.toString() : chunk;
-    },
-  } as unknown as ServerResponse & { getHeader: (name: string) => string | undefined };
-
-  return { response, state };
 }
 
 function assertSecurityHeaders(state: MockResponseState): void {

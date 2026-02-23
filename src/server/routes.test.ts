@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
-import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http';
-import { PassThrough } from 'node:stream';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import test from 'node:test';
 
 import type { Config } from '../config/Config.js';
@@ -13,16 +12,10 @@ import type { OperationalMetrics } from '../memory/types.js';
 import { promptNames } from '../types/constants.js';
 import type { CostTracker } from '../utils/cost.js';
 import { log } from '../utils/logger.js';
+import { createMockRequest, createMockResponse, getRequestListener } from './__test-helpers.js';
+import type { MockResponseState } from './__test-helpers.js';
 import { createSseStream, emitSseEvent, HttpError, parseRouteId } from './routes.js';
 import { Server } from './Server.js';
-
-type RequestListener = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
-
-interface MockResponseState {
-  statusCode: number;
-  headers: Record<string, string>;
-  body: string;
-}
 
 interface RequestOptions {
   method: 'GET' | 'POST';
@@ -101,88 +94,6 @@ function createServerFixture(options: ServerFixtureOptions = {}): ServerFixture 
     server: new Server(config, loop, taskStore, globalMemory, costTracker, undefined, undefined, modeManager, planWorkflow),
     token,
   };
-}
-
-function getRequestListener(server: Server): RequestListener {
-  const instance = server as unknown as { server: HttpServer };
-  const [listener] = instance.server.listeners('request');
-  assert.equal(typeof listener, 'function');
-  return async (req, res) => {
-    await listener(req, res);
-  };
-}
-
-function createMockRequest(options: RequestOptions): IncomingMessage {
-  const req = new PassThrough() as PassThrough & {
-    method: string;
-    url: string;
-    headers: Record<string, string>;
-  };
-
-  req.method = options.method;
-  req.url = options.url;
-
-  const headers: Record<string, string> = { host: 'localhost' };
-  if (options.token !== undefined) {
-    headers.authorization = `Bearer ${options.token}`;
-  } else if (options.authorization !== undefined) {
-    headers.authorization = options.authorization;
-  }
-
-  let bodyText: string | undefined;
-  if (options.body !== undefined) {
-    bodyText = typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
-    headers['content-type'] = 'application/json';
-    headers['content-length'] = String(Buffer.byteLength(bodyText));
-  }
-
-  req.headers = headers;
-  if (bodyText === undefined) {
-    req.end();
-  } else {
-    req.end(bodyText);
-  }
-
-  return req as unknown as IncomingMessage;
-}
-
-function createMockResponse(): {
-  response: ServerResponse;
-  state: MockResponseState;
-} {
-  const state: MockResponseState = {
-    statusCode: 200,
-    headers: {},
-    body: '',
-  };
-
-  const response = {
-    setHeader: (name: string, value: string): void => {
-      state.headers[name.toLowerCase()] = value;
-    },
-    write: (chunk?: string | Buffer): boolean => {
-      if (chunk === undefined) {
-        return true;
-      }
-      state.body += Buffer.isBuffer(chunk) ? chunk.toString() : chunk;
-      return true;
-    },
-    writeHead: (statusCode: number, headers?: Record<string, string>): ServerResponse => {
-      state.statusCode = statusCode;
-      if (headers) {
-        for (const [name, value] of Object.entries(headers)) {
-          state.headers[name.toLowerCase()] = value;
-        }
-      }
-      return response as unknown as ServerResponse;
-    },
-    end: (chunk?: string | Buffer): void => {
-      if (chunk === undefined) return;
-      state.body += Buffer.isBuffer(chunk) ? chunk.toString() : chunk;
-    },
-  } as unknown as ServerResponse;
-
-  return { response, state };
 }
 
 async function dispatch(server: Server, options: RequestOptions): Promise<MockResponseState> {
