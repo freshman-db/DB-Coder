@@ -787,7 +787,27 @@ export class MainLoop {
       const fixAgentName = useClaudeForFix ? 'claude' : 'codex';
       log.info(`Fix attempt ${reviewRetries} using ${fixAgentName}`);
 
-      await fixAgent.execute(fixPrompt, projectPath, {});
+      const fixResult = await fixAgent.execute(fixPrompt, projectPath, {});
+      if (fixResult.cost_usd > 0) {
+        await this.costTracker.addCost(task.id, fixResult.cost_usd);
+      }
+      await this.taskStore.addLog({
+        task_id: task.id,
+        phase: 'fix',
+        agent: fixAgentName,
+        input_summary: `Fix attempt ${reviewRetries}`.slice(0, 60),
+        output_summary: fixResult.output.slice(0, LOG_OUTPUT_MAX_LENGTH),
+        cost_usd: fixResult.cost_usd,
+        duration_ms: fixResult.duration_ms,
+      });
+      if (!fixResult.success) {
+        log.warn('Fix agent failed', {
+          attempt: reviewRetries,
+          agent: fixAgentName,
+          stopReason: fixResult.stopReason,
+        });
+        continue;
+      }
       const changedFilesForCommit = await getModifiedAndAddedFiles(projectPath).catch(() => []);
       await commitAll(`db-coder: fix review issues (attempt ${reviewRetries}, ${fixAgentName})`, projectPath, changedFilesForCommit).catch(() => {});
       if (await this.checkBudgetOrAbort(task.id)) {
