@@ -23,7 +23,6 @@ function createValidConfig(): DbCoderConfig {
       plan: 'brain',
       execute_frontend: 'claude',
       execute_backend: 'codex',
-      review: ['claude', 'codex'],
       reflect: 'brain',
     },
     budget: { maxPerTask: 5.0, maxPerDay: 200.0, warningThreshold: 0.8 },
@@ -35,7 +34,6 @@ function createValidConfig(): DbCoderConfig {
     server: { host: '127.0.0.1', port: 18800 },
     mcp: { enabled: true },
     plugins: {},
-    scan: {},
     evolution: {
       goals: [{ description: 'Keep code quality high', priority: 1, status: 'active' }],
     },
@@ -128,30 +126,6 @@ test('validateConfig rejects memory URLs with unsupported protocols', () => {
     assertValidationIssue(
       () => validateConfig(config, projectPath),
       /memory\.claudeMemUrl must use http: or https: protocol/,
-    );
-  });
-});
-
-test('validateConfig rejects empty routing.review arrays', () => {
-  withTempProject((projectPath) => {
-    const config = createValidConfig();
-    config.routing.review = [];
-
-    assertValidationIssue(
-      () => validateConfig(config, projectPath),
-      /routing\.review must contain at least 1 item\(s\)/,
-    );
-  });
-});
-
-test('validateConfig rejects unsupported routing.review entries', () => {
-  withTempProject((projectPath) => {
-    const config = createValidConfig();
-    config.routing.review = ['claude', 'brain' as 'claude' | 'codex'];
-
-    assertValidationIssue(
-      () => validateConfig(config, projectPath),
-      /routing\.review\[1\] must be one of: claude, codex/,
     );
   });
 });

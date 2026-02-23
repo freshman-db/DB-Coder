@@ -17,7 +17,7 @@ const DEFAULTS: DbCoderConfig = {
   routing: {
     scan: 'brain', plan: 'brain',
     execute_frontend: 'claude', execute_backend: 'codex',
-    review: ['claude', 'codex'], reflect: 'brain',
+    reflect: 'brain',
   },
   budget: { maxPerTask: 5.0, maxPerDay: 200.0, warningThreshold: 0.8 },
   memory: {
@@ -28,11 +28,6 @@ const DEFAULTS: DbCoderConfig = {
   server: { port: 18800, host: '127.0.0.1' },
   mcp: { enabled: true },
   plugins: {},
-  scan: {
-    autoIdentifyModules: true,
-    maxModulesPerCycle: 1,
-    moduleRotationInterval: 3,
-  },
   evolution: {
     goals: [
       { description: '提升代码质量：修复类型错误，统一编码规范', priority: 1, status: 'active' },

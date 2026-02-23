@@ -8,7 +8,6 @@ type ConfigRecord = Record<string, unknown>;
 
 const SANDBOX_VALUES = new Set(['workspace-write', 'workspace-read', 'full-auto']);
 const AUTONOMY_LEVELS = new Set(['full', 'supervised']);
-const ROUTING_REVIEW_VALUES = new Set(['claude', 'codex']);
 const MCP_PHASES = new Set(['scan', 'plan', 'execute', 'review']);
 const PLUGIN_RELEVANCE_VALUES = new Set(['essential', 'recommended', 'optional', 'irrelevant']);
 const GOAL_STATUSES = new Set(['active', 'paused', 'done']);
@@ -83,13 +82,6 @@ export function validateConfig(config: DbCoderConfig, projectPath: string): void
     validateExactValue(routing.execute_frontend, 'routing.execute_frontend', 'claude', issues);
     validateExactValue(routing.execute_backend, 'routing.execute_backend', 'codex', issues);
     validateExactValue(routing.reflect, 'routing.reflect', 'brain', issues);
-
-    const review = validateStringArray(routing.review, 'routing.review', issues, { minLength: 1 });
-    if (review) {
-      for (let i = 0; i < review.length; i += 1) {
-        validateEnum(review[i], `routing.review[${i}]`, ROUTING_REVIEW_VALUES, issues);
-      }
-    }
   }
 
   const budget = requireRecord(config.budget, 'budget', issues);
@@ -217,18 +209,6 @@ export function validateConfig(config: DbCoderConfig, projectPath: string): void
       }
     }
 
-    if (evolution.architectureNotes !== undefined) {
-      validateNonEmptyString(evolution.architectureNotes, 'evolution.architectureNotes', issues);
-    }
-    if (evolution.autoConfigUpdate !== undefined) {
-      validateBoolean(evolution.autoConfigUpdate, 'evolution.autoConfigUpdate', issues);
-    }
-    if (evolution.maxAdjustmentsPerPrompt !== undefined) {
-      validateNumber(evolution.maxAdjustmentsPerPrompt, 'evolution.maxAdjustmentsPerPrompt', issues, { integer: true, min: 1 });
-    }
-    if (evolution.trendWindowSize !== undefined) {
-      validateNumber(evolution.trendWindowSize, 'evolution.trendWindowSize', issues, { integer: true, min: 1 });
-    }
   }
 
   if (issues.length > 0) {
