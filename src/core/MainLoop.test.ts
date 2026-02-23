@@ -649,15 +649,15 @@ describe('mergeReviews safety', () => {
     assert.equal(merged.passed, false);
   });
 
-  test('issues without file only intersect when descriptions are similar', () => {
+  test('undefined file does not create false intersection', () => {
     const claudeIssue = detailedReviewIssue('claude', {
       file: undefined,
-      description: 'rework parser retry strategy for network failures',
+      description: 'handler crashes because null guard is missing before property access',
       severity: 'medium',
     });
     const codexIssue = detailedReviewIssue('codex', {
       file: undefined,
-      description: 'update dashboard spacing and typography in settings panel',
+      description: 'add null guard before property access to avoid handler crash',
       severity: 'medium',
     });
 
@@ -671,7 +671,53 @@ describe('mergeReviews safety', () => {
     assert.equal(merged.passed, true);
   });
 
-  test('issue with file does not intersect issue without file', () => {
+  test('same-file issues with Jaccard similarity above threshold intersect', () => {
+    const claudeIssue = detailedReviewIssue('claude', {
+      file: 'a.ts',
+      description: 'handler crashes because null guard is missing before property access',
+      severity: 'medium',
+    });
+    const codexIssue = detailedReviewIssue('codex', {
+      file: 'a.ts',
+      description: 'add null guard before property access to avoid handler crash',
+      severity: 'high',
+    });
+
+    const merged = mergeReviews(
+      review('claude', { passed: true, issues: [claudeIssue] }),
+      review('codex', { passed: true, issues: [codexIssue] }),
+    );
+
+    assert.equal(merged.mustFix.length, 1);
+    assert.equal(merged.mustFix[0]?.file, 'a.ts');
+    assert.equal(merged.mustFix[0]?.severity, 'high');
+    assert.deepEqual(merged.shouldFix, []);
+    assert.equal(merged.passed, false);
+  });
+
+  test('same-file issues with Jaccard similarity below threshold stay in shouldFix', () => {
+    const claudeIssue = detailedReviewIssue('claude', {
+      file: 'a.ts',
+      description: 'handler crashes because null guard is missing before property access',
+      severity: 'medium',
+    });
+    const codexIssue = detailedReviewIssue('codex', {
+      file: 'a.ts',
+      description: 'revise analytics widget colors and alignment for the dashboard',
+      severity: 'medium',
+    });
+
+    const merged = mergeReviews(
+      review('claude', { passed: true, issues: [claudeIssue] }),
+      review('codex', { passed: true, issues: [codexIssue] }),
+    );
+
+    assert.equal(merged.mustFix.length, 0);
+    assert.deepEqual(merged.shouldFix, [claudeIssue, codexIssue]);
+    assert.equal(merged.passed, true);
+  });
+
+  test('issue with file does not intersect issue without file even when descriptions match', () => {
     const claudeIssue = detailedReviewIssue('claude', {
       file: 'a.ts',
       description: 'missing null guard before property access',
@@ -679,7 +725,7 @@ describe('mergeReviews safety', () => {
     });
     const codexIssue = detailedReviewIssue('codex', {
       file: undefined,
-      description: 'missing null guard before property access in handler',
+      description: 'missing null guard before property access',
       severity: 'medium',
     });
 
@@ -692,15 +738,15 @@ describe('mergeReviews safety', () => {
     assert.deepEqual(merged.shouldFix, [claudeIssue, codexIssue]);
   });
 
-  test('codex-only dedup does not re-add mustFix items to shouldFix', () => {
+  test('codex-only dedup uses fuzzy matching for intersected mustFix issues', () => {
     const sharedClaudeIssue = detailedReviewIssue('claude', {
       file: 'shared.ts',
-      description: 'shared intersection issue with missing null guard',
+      description: 'handler crashes because null guard is missing before property access',
       severity: 'medium',
     });
     const sharedCodexIssue = detailedReviewIssue('codex', {
       file: 'shared.ts',
-      description: 'shared intersection issue with null guard missing',
+      description: 'add null guard before property access to avoid handler crash',
       severity: 'medium',
     });
     const codexOnlyIssue = detailedReviewIssue('codex', {
