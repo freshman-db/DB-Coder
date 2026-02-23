@@ -309,3 +309,6 @@
 [36m[2026-02-23T00:59:25.931Z] [INFO][0m Committed: db-coder: Update src/memory/types.ts and src/evolution/types
 [36m[2026-02-23T00:59:25.990Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
 [36m[2026-02-23T00:59:25.991Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
+[36m[2026-02-23T01:04:52.379Z] [INFO][0m Committed: db-coder: Update src/core/Brain.ts to import MEMORY_CATEGORI
+[36m[2026-02-23T01:04:52.444Z] [INFO][0m synthesizePromptContext: 0 patterns, 15 anti-patterns, 5 adjustments
+[36m[2026-02-23T01:04:52.445Z] [INFO][0m PromptRegistry refreshed: 2 active version(s)
