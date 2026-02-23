@@ -66,6 +66,9 @@ export class ClaudeBridge implements CodingAgent {
     const start = Date.now();
     let result = '';
     let cost = 0;
+    const toolSummaries: string[] = [];
+    let numTurns: number | undefined;
+    let stopReason: string | undefined;
 
     try {
       const mcpServers = this.mcpDiscovery?.getServersForPhase('execute') ?? {};
@@ -89,9 +92,13 @@ export class ClaudeBridge implements CodingAgent {
         },
       })) {
         if (message.type === 'result') {
-          const resultMessage: AgentResultMessage = message;
+          const resultMessage = message as AgentResultMessage & { num_turns?: number; stop_reason?: string };
           cost = resultMessage.total_cost_usd ?? 0;
           result = resultMessage.result ?? result;
+          numTurns = resultMessage.num_turns;
+          stopReason = resultMessage.stop_reason;
+        } else if (message.type === 'tool_use_summary' && 'summary' in message) {
+          toolSummaries.push((message as any).summary);
         }
       }
 
@@ -100,6 +107,9 @@ export class ClaudeBridge implements CodingAgent {
         output: result,
         cost_usd: cost,
         duration_ms: Date.now() - start,
+        toolSummaries: toolSummaries.length > 0 ? toolSummaries : undefined,
+        numTurns,
+        stopReason,
       };
     } catch (err) {
       log.error('ClaudeBridge execute failed', err);
@@ -108,6 +118,7 @@ export class ClaudeBridge implements CodingAgent {
         output: String(err),
         cost_usd: cost,
         duration_ms: Date.now() - start,
+        toolSummaries: toolSummaries.length > 0 ? toolSummaries : undefined,
       };
     }
   }
@@ -120,6 +131,8 @@ export class ClaudeBridge implements CodingAgent {
     const start = Date.now();
     let result = '';
     let cost = 0;
+    let numTurns: number | undefined;
+    let stopReason: string | undefined;
 
     try {
       const discoveredMcpServers = this.mcpDiscovery?.getServersForPhase('plan') ?? {};
@@ -144,9 +157,11 @@ export class ClaudeBridge implements CodingAgent {
         },
       })) {
         if (message.type === 'result') {
-          const resultMessage: AgentResultMessage = message;
+          const resultMessage = message as AgentResultMessage & { num_turns?: number; stop_reason?: string };
           cost = resultMessage.total_cost_usd ?? 0;
           result = resultMessage.result ?? result;
+          numTurns = resultMessage.num_turns;
+          stopReason = resultMessage.stop_reason;
         }
       }
 
@@ -155,6 +170,8 @@ export class ClaudeBridge implements CodingAgent {
         output: result,
         cost_usd: cost,
         duration_ms: Date.now() - start,
+        numTurns,
+        stopReason,
       };
     } catch (err) {
       log.error('ClaudeBridge plan failed', err);
