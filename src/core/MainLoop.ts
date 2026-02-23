@@ -766,12 +766,12 @@ export class MainLoop {
     await this.taskStore.updateTask(task.id, { phase: 'reviewing' });
 
     let reviewRetries = 0;
+    const allReviewResults: unknown[] = [...(task.review_results as unknown[] || [])];
     let changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
     let { merged: reviewResult, decision: reviewDecision, cost_usd: reviewCost, duration_ms: reviewDuration } = await this.dualReview(task, changedFiles, reviewRetries);
 
-    await this.taskStore.updateTask(task.id, {
-      review_results: [...(task.review_results as unknown[] || []), reviewResult],
-    });
+    allReviewResults.push(reviewResult);
+    await this.taskStore.updateTask(task.id, { review_results: allReviewResults });
     await this.saveReviewEvent(task.id, 0, reviewResult, null, reviewCost, reviewDuration);
 
     while (reviewDecision === 'retry') {
@@ -797,9 +797,8 @@ export class MainLoop {
       changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
       ({ merged: reviewResult, decision: reviewDecision, cost_usd: reviewCost, duration_ms: reviewDuration } = await this.dualReview(task, changedFiles, reviewRetries));
       await this.saveReviewEvent(task.id, reviewRetries, reviewResult, fixAgentName, reviewCost, reviewDuration);
-      await this.taskStore.updateTask(task.id, {
-        review_results: [...(task.review_results as unknown[] || []), reviewResult],
-      });
+      allReviewResults.push(reviewResult);
+      await this.taskStore.updateTask(task.id, { review_results: allReviewResults });
     }
 
     return { aborted: false, reviewResult, reviewRetries };

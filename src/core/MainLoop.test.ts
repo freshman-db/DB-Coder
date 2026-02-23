@@ -14,7 +14,7 @@ import type { Brain } from './Brain.js';
 import type { TaskQueue } from './TaskQueue.js';
 import type { PromptRegistry } from '../prompts/PromptRegistry.js';
 import { MainLoop, extractIssueCategories, mergeReviews } from './MainLoop.js';
-import type { EvaluationResult, StatusSnapshot } from './types.js';
+import type { EvaluationResult, MergedReviewResult, StatusSnapshot } from './types.js';
 import type { ReviewIssue, ReviewResult } from '../bridges/CodingAgent.js';
 import type { EvolutionEngine } from '../evolution/EvolutionEngine.js';
 import { runProcess } from '../utils/process.js';
@@ -68,6 +68,30 @@ type MainLoopExecutionInternals = {
 
 type MainLoopEvaluationInternals = {
   evaluateTaskValue(task: Task, projectPath: string): Promise<EvaluationResult>;
+};
+
+type MainLoopReviewInternals = {
+  runReviewCycle(
+    task: Task,
+    startCommit: string,
+    stuckAdjustments: string[],
+    projectPath: string,
+  ): Promise<{ aborted: true } | { aborted: false; reviewResult: MergedReviewResult; reviewRetries: number }>;
+  dualReview(
+    task: Task,
+    changedFiles: string[],
+    reviewRetries: number,
+  ): Promise<{ merged: MergedReviewResult; decision: 'approve' | 'retry' | 'reject'; cost_usd: number; duration_ms: number }>;
+  buildFixPrompt(task: Task, reviewResult: MergedReviewResult, attempt: number, stuckAdjustments: string[]): Promise<string>;
+  saveReviewEvent(
+    taskId: string,
+    attempt: number,
+    result: MergedReviewResult,
+    fixAgent: string | null,
+    cost_usd: number,
+    duration_ms: number,
+  ): Promise<void>;
+  checkBudgetOrAbort(taskId: string): Promise<boolean>;
 };
 
 type CycleConfigOverrides = {
@@ -312,6 +336,10 @@ function getMainLoopExecutionInternals(loop: MainLoop): MainLoopExecutionInterna
 
 function getMainLoopEvaluationInternals(loop: MainLoop): MainLoopEvaluationInternals {
   return loop as unknown as MainLoopEvaluationInternals;
+}
+
+function getMainLoopReviewInternals(loop: MainLoop): MainLoopReviewInternals {
+  return loop as unknown as MainLoopReviewInternals;
 }
 
 type PromptDeltaInternals = {
@@ -1518,6 +1546,343 @@ describe('MainLoop runCycle integration', () => {
       internalMcpServers && Object.hasOwn(internalMcpServers, 'db-coder-system-data'),
       'Expected db-coder-system-data internal MCP server',
     );
+  });
+});
+
+describe('MainLoop runReviewCycle', () => {
+  test('persists progressive review_results arrays across retry rounds', async () => {
+    let codexFixCalls = 0;
+    let claudeFixCalls = 0;
+    const updateTaskCalls: Array<{ taskId: string; patch: unknown }> = [];
+
+    const { loop } = createMainLoopForCycle({
+      codex: {
+        execute: async () => {
+          codexFixCalls++;
+          return { success: true, output: 'codex fix', cost_usd: 0, duration_ms: 0 };
+        },
+      },
+      claude: {
+        execute: async () => {
+          claudeFixCalls++;
+          return { success: true, output: 'claude fix', cost_usd: 0, duration_ms: 0 };
+        },
+      },
+      taskStore: {
+        updateTask: async (taskId: string, patch: unknown) => {
+          updateTaskCalls.push({ taskId, patch: structuredClone(patch) });
+        },
+      },
+    });
+
+    const executionInternals = getMainLoopExecutionInternals(loop);
+    const reviewInternals = getMainLoopReviewInternals(loop);
+    const originalDualReview = reviewInternals.dualReview;
+    const originalBuildFixPrompt = reviewInternals.buildFixPrompt;
+    const originalSaveReviewEvent = reviewInternals.saveReviewEvent;
+    const originalCheckBudgetOrAbort = reviewInternals.checkBudgetOrAbort;
+
+    const reviewRound0: MergedReviewResult = {
+      passed: false,
+      mustFix: [issue('Round 0 must-fix')],
+      shouldFix: [],
+      summary: 'review-round-0',
+    };
+    const reviewRound1: MergedReviewResult = {
+      passed: true,
+      mustFix: [],
+      shouldFix: [],
+      summary: 'review-round-1',
+    };
+
+    let dualReviewCalls = 0;
+    reviewInternals.checkBudgetOrAbort = async () => false;
+    reviewInternals.buildFixPrompt = async () => 'Fix review issues.';
+    reviewInternals.saveReviewEvent = async () => {};
+    reviewInternals.dualReview = async (_task, _changedFiles, reviewRetries) => {
+      dualReviewCalls++;
+      if (reviewRetries === 0) {
+        return { merged: reviewRound0, decision: 'retry', cost_usd: 0, duration_ms: 0 };
+      }
+      assert.equal(reviewRetries, 1);
+      return { merged: reviewRound1, decision: 'approve', cost_usd: 0, duration_ms: 0 };
+    };
+
+    const now = new Date();
+    const task: Task = {
+      id: 'task-review-progressive-arrays',
+      project_path: '/tmp/db-coder-main-loop-test',
+      task_description: 'Accumulate review results across retries',
+      phase: 'executing',
+      priority: 1,
+      plan: null,
+      subtasks: [],
+      review_results: [],
+      iteration: 0,
+      total_cost_usd: 0,
+      git_branch: null,
+      start_commit: null,
+      depends_on: [],
+      status: 'active',
+      created_at: now,
+      updated_at: now,
+    };
+
+    let reviewCycleResult: Awaited<ReturnType<MainLoopExecutionInternals['runReviewCycle']>>;
+    try {
+      const runReviewCycle = executionInternals.runReviewCycle.bind(loop);
+      reviewCycleResult = await runReviewCycle(task, 'HEAD', [], '/tmp/db-coder-main-loop-test');
+    } finally {
+      reviewInternals.dualReview = originalDualReview;
+      reviewInternals.buildFixPrompt = originalBuildFixPrompt;
+      reviewInternals.saveReviewEvent = originalSaveReviewEvent;
+      reviewInternals.checkBudgetOrAbort = originalCheckBudgetOrAbort;
+    }
+
+    assert.equal(reviewCycleResult.aborted, false);
+    if (reviewCycleResult.aborted) return;
+    assert.equal(reviewCycleResult.reviewRetries, 1);
+    assert.equal(reviewCycleResult.reviewResult?.summary, 'review-round-1');
+    assert.equal(dualReviewCalls, 2);
+    assert.equal(codexFixCalls, 1);
+    assert.equal(claudeFixCalls, 0);
+
+    const reviewResultsUpdates = updateTaskCalls
+      .map(call => call.patch)
+      .filter((patch): patch is { review_results: MergedReviewResult[] } => {
+        if (typeof patch !== 'object' || patch === null) return false;
+        return Array.isArray((patch as { review_results?: unknown[] }).review_results);
+      })
+      .map(patch => patch.review_results.map(result => result.summary));
+
+    assert.deepEqual(reviewResultsUpdates, [
+      ['review-round-0'],
+      ['review-round-0', 'review-round-1'],
+    ]);
+    assert.deepEqual(task.review_results, []);
+  });
+
+  test('accumulates review_results across retries instead of overwriting prior attempts', async () => {
+    let codexFixCalls = 0;
+    let claudeFixCalls = 0;
+    const updateTaskCalls: Array<{ taskId: string; patch: unknown }> = [];
+
+    const { loop } = createMainLoopForCycle({
+      codex: {
+        execute: async () => {
+          codexFixCalls++;
+          return { success: true, output: 'codex fix', cost_usd: 0, duration_ms: 0 };
+        },
+      },
+      claude: {
+        execute: async () => {
+          claudeFixCalls++;
+          return { success: true, output: 'claude fix', cost_usd: 0, duration_ms: 0 };
+        },
+      },
+      taskStore: {
+        updateTask: async (taskId: string, patch: unknown) => {
+          updateTaskCalls.push({ taskId, patch: structuredClone(patch) });
+        },
+      },
+    });
+
+    const reviewInternals = getMainLoopReviewInternals(loop);
+    const originalDualReview = reviewInternals.dualReview;
+    const originalBuildFixPrompt = reviewInternals.buildFixPrompt;
+    const originalSaveReviewEvent = reviewInternals.saveReviewEvent;
+    const originalCheckBudgetOrAbort = reviewInternals.checkBudgetOrAbort;
+
+    const existingReview: MergedReviewResult = {
+      passed: false,
+      mustFix: [issue('Existing review result')],
+      shouldFix: [],
+      summary: 'existing-review',
+    };
+    const retryRound0: MergedReviewResult = {
+      passed: false,
+      mustFix: [issue('Round 0 must-fix')],
+      shouldFix: [],
+      summary: 'retry-round-0',
+    };
+    const retryRound1: MergedReviewResult = {
+      passed: false,
+      mustFix: [issue('Round 1 must-fix')],
+      shouldFix: [],
+      summary: 'retry-round-1',
+    };
+    const retryRound2: MergedReviewResult = {
+      passed: true,
+      mustFix: [],
+      shouldFix: [],
+      summary: 'retry-round-2',
+    };
+
+    const reviewSequence = [retryRound0, retryRound1, retryRound2];
+    const decisions = ['retry', 'retry', 'approve'] as const;
+    const seenRetryCounts: number[] = [];
+
+    reviewInternals.checkBudgetOrAbort = async () => false;
+    reviewInternals.buildFixPrompt = async () => 'Fix review issues.';
+    reviewInternals.saveReviewEvent = async () => {};
+    reviewInternals.dualReview = async (_task, _changedFiles, reviewRetries) => {
+      seenRetryCounts.push(reviewRetries);
+      const sequenceIndex = seenRetryCounts.length - 1;
+      const merged = reviewSequence[sequenceIndex];
+      const decision = decisions[sequenceIndex];
+      assert.ok(merged, `Missing review sequence entry at index ${sequenceIndex}`);
+      assert.ok(decision, `Missing review decision at index ${sequenceIndex}`);
+      return { merged, decision, cost_usd: 0, duration_ms: 0 };
+    };
+
+    const now = new Date();
+    const task: Task = {
+      id: 'task-review-accumulate',
+      project_path: '/tmp/db-coder-main-loop-test',
+      task_description: 'Accumulate review results for each retry',
+      phase: 'executing',
+      priority: 1,
+      plan: null,
+      subtasks: [],
+      review_results: [existingReview],
+      iteration: 0,
+      total_cost_usd: 0,
+      git_branch: null,
+      start_commit: null,
+      depends_on: [],
+      status: 'active',
+      created_at: now,
+      updated_at: now,
+    };
+
+    let reviewCycleResult: { aborted: true } | { aborted: false; reviewResult: MergedReviewResult; reviewRetries: number };
+    try {
+      reviewCycleResult = await reviewInternals.runReviewCycle(task, 'HEAD', [], '/tmp/db-coder-main-loop-test');
+    } finally {
+      reviewInternals.dualReview = originalDualReview;
+      reviewInternals.buildFixPrompt = originalBuildFixPrompt;
+      reviewInternals.saveReviewEvent = originalSaveReviewEvent;
+      reviewInternals.checkBudgetOrAbort = originalCheckBudgetOrAbort;
+    }
+
+    assert.equal(reviewCycleResult.aborted, false);
+    if (reviewCycleResult.aborted) return;
+    assert.equal(reviewCycleResult.reviewRetries, 2);
+    assert.equal(reviewCycleResult.reviewResult.summary, 'retry-round-2');
+    assert.deepEqual(seenRetryCounts, [0, 1, 2]);
+    assert.equal(codexFixCalls, 1);
+    assert.equal(claudeFixCalls, 1);
+
+    const reviewResultsUpdates = updateTaskCalls
+      .map(call => call.patch)
+      .filter((patch): patch is { review_results: MergedReviewResult[] } => {
+        if (typeof patch !== 'object' || patch === null) return false;
+        return Array.isArray((patch as { review_results?: unknown[] }).review_results);
+      })
+      .map(patch => patch.review_results.map(result => result.summary));
+
+    assert.deepEqual(reviewResultsUpdates, [
+      ['existing-review', 'retry-round-0'],
+      ['existing-review', 'retry-round-0', 'retry-round-1'],
+      ['existing-review', 'retry-round-0', 'retry-round-1', 'retry-round-2'],
+    ]);
+    assert.deepEqual(task.review_results, [existingReview]);
+  });
+
+  test('writes exactly one review result when the first review approves', async () => {
+    let codexFixCalls = 0;
+    let claudeFixCalls = 0;
+    const updateTaskCalls: Array<{ taskId: string; patch: unknown }> = [];
+
+    const { loop } = createMainLoopForCycle({
+      codex: {
+        execute: async () => {
+          codexFixCalls++;
+          return { success: true, output: 'codex fix', cost_usd: 0, duration_ms: 0 };
+        },
+      },
+      claude: {
+        execute: async () => {
+          claudeFixCalls++;
+          return { success: true, output: 'claude fix', cost_usd: 0, duration_ms: 0 };
+        },
+      },
+      taskStore: {
+        updateTask: async (taskId: string, patch: unknown) => {
+          updateTaskCalls.push({ taskId, patch: structuredClone(patch) });
+        },
+      },
+    });
+
+    const reviewInternals = getMainLoopReviewInternals(loop);
+    const originalDualReview = reviewInternals.dualReview;
+    const originalBuildFixPrompt = reviewInternals.buildFixPrompt;
+    const originalSaveReviewEvent = reviewInternals.saveReviewEvent;
+    const originalCheckBudgetOrAbort = reviewInternals.checkBudgetOrAbort;
+
+    const firstPassResult: MergedReviewResult = {
+      passed: true,
+      mustFix: [],
+      shouldFix: [],
+      summary: 'approved-first-pass',
+    };
+
+    reviewInternals.checkBudgetOrAbort = async () => false;
+    reviewInternals.buildFixPrompt = async () => 'Unused';
+    reviewInternals.saveReviewEvent = async () => {};
+    reviewInternals.dualReview = async () => ({
+      merged: firstPassResult,
+      decision: 'approve',
+      cost_usd: 0,
+      duration_ms: 0,
+    });
+
+    const now = new Date();
+    const task: Task = {
+      id: 'task-review-first-pass',
+      project_path: '/tmp/db-coder-main-loop-test',
+      task_description: 'Approve on first review',
+      phase: 'executing',
+      priority: 1,
+      plan: null,
+      subtasks: [],
+      review_results: [],
+      iteration: 0,
+      total_cost_usd: 0,
+      git_branch: null,
+      start_commit: null,
+      depends_on: [],
+      status: 'active',
+      created_at: now,
+      updated_at: now,
+    };
+
+    let reviewCycleResult: { aborted: true } | { aborted: false; reviewResult: MergedReviewResult; reviewRetries: number };
+    try {
+      reviewCycleResult = await reviewInternals.runReviewCycle(task, 'HEAD', [], '/tmp/db-coder-main-loop-test');
+    } finally {
+      reviewInternals.dualReview = originalDualReview;
+      reviewInternals.buildFixPrompt = originalBuildFixPrompt;
+      reviewInternals.saveReviewEvent = originalSaveReviewEvent;
+      reviewInternals.checkBudgetOrAbort = originalCheckBudgetOrAbort;
+    }
+
+    assert.equal(reviewCycleResult.aborted, false);
+    if (reviewCycleResult.aborted) return;
+    assert.equal(reviewCycleResult.reviewRetries, 0);
+    assert.equal(reviewCycleResult.reviewResult.summary, 'approved-first-pass');
+    assert.equal(codexFixCalls, 0);
+    assert.equal(claudeFixCalls, 0);
+
+    const reviewResultsUpdates = updateTaskCalls
+      .map(call => call.patch)
+      .filter((patch): patch is { review_results: MergedReviewResult[] } => {
+        if (typeof patch !== 'object' || patch === null) return false;
+        return Array.isArray((patch as { review_results?: unknown[] }).review_results);
+      })
+      .map(patch => patch.review_results.map(result => result.summary));
+
+    assert.deepEqual(reviewResultsUpdates, [['approved-first-pass']]);
   });
 });
 
