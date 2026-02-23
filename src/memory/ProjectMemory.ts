@@ -1,5 +1,6 @@
 import { log } from '../utils/logger.js';
 import { getErrorMessage } from '../utils/parse.js';
+import { calculateRetryDelay } from '../utils/retry.js';
 
 interface ClaudeMemResult {
   id: number;
@@ -17,6 +18,10 @@ type ProjectMemoryResult<T extends unknown[]> =
   | (T & { ok: true; data: T })
   | (T & { ok: false; error: string });
 
+const RETRY_BASE_DELAY_MS = 500;
+const RETRY_MAX_DELAY_MS = 5000;
+const REQUEST_TIMEOUT_MS = 5000;
+
 export class ProjectMemory {
   private baseUrl: string;
 
@@ -32,12 +37,67 @@ export class ProjectMemory {
     return '';
   }
 
+  private async fetchWithRetry(url: string, options: RequestInit, maxRetries = 2): Promise<Response> {
+    const retryLimit = Math.max(0, Math.floor(maxRetries));
+    const { signal, ...requestOptions } = options;
+
+    for (let attempt = 0; ; attempt += 1) {
+      const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+      const requestInit: RequestInit = signal
+        ? { ...requestOptions, signal: AbortSignal.any([signal, timeoutSignal]) }
+        : { ...requestOptions, signal: timeoutSignal };
+
+      try {
+        const response = await fetch(url, requestInit);
+        if (response.status >= 500 && attempt < retryLimit) {
+          await this.waitForRetry(url, attempt, retryLimit, `HTTP ${response.status}`);
+          continue;
+        }
+        return response;
+      } catch (error) {
+        if (!this.isRetryableFetchError(error) || attempt >= retryLimit) {
+          throw error;
+        }
+        const errorName = typeof error === 'object' && error !== null && 'name' in error
+          ? String(error.name)
+          : 'UnknownError';
+        await this.waitForRetry(url, attempt, retryLimit, errorName);
+      }
+    }
+  }
+
+  private isRetryableFetchError(error: unknown): boolean {
+    if (error instanceof TypeError) {
+      return true;
+    }
+    if (typeof error !== 'object' || error === null || !('name' in error)) {
+      return false;
+    }
+    const name = String(error.name);
+    return name === 'AbortError' || name === 'TimeoutError';
+  }
+
+  private async waitForRetry(url: string, attempt: number, maxRetries: number, reason: string): Promise<void> {
+    const delayMs = calculateRetryDelay({
+      attempt,
+      baseDelayMs: RETRY_BASE_DELAY_MS,
+      maxDelayMs: RETRY_MAX_DELAY_MS,
+    });
+    const retryAttempt = attempt + 1;
+    log.debug(`ProjectMemory retry ${retryAttempt}/${maxRetries} for ${url} in ${delayMs}ms (${reason})`);
+    await this.sleep(delayMs);
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, ms);
+    });
+  }
+
   async search(query: string, limit = 10): Promise<ProjectMemoryResult<ClaudeMemResult[]>> {
     try {
       const params = new URLSearchParams({ query, limit: String(limit) });
-      const res = await fetch(`${this.baseUrl}/api/search?${params}`, {
-        signal: AbortSignal.timeout(5000),
-      });
+      const res = await this.fetchWithRetry(`${this.baseUrl}/api/search?${params}`, {});
       if (!res.ok) {
         const error = `ProjectMemory search failed with HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ''}`;
         log.warn(error);
@@ -62,9 +122,7 @@ export class ProjectMemory {
         depth_before: String(depthBefore),
         depth_after: String(depthAfter),
       });
-      const res = await fetch(`${this.baseUrl}/api/timeline?${params}`, {
-        signal: AbortSignal.timeout(5000),
-      });
+      const res = await this.fetchWithRetry(`${this.baseUrl}/api/timeline?${params}`, {});
       if (!res.ok) {
         const error = `ProjectMemory timeline failed with HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ''}`;
         log.warn(error);
@@ -86,11 +144,10 @@ export class ProjectMemory {
       const body: Record<string, string> = { text };
       if (title) body.title = title;
       if (project) body.project = project;
-      const res = await fetch(`${this.baseUrl}/api/memory/save`, {
+      const res = await this.fetchWithRetry(`${this.baseUrl}/api/memory/save`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(5000),
       });
       return res.ok;
     } catch {
