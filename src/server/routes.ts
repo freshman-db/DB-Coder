@@ -12,7 +12,7 @@ import type { PlanRequest } from '../prompts/brain.js';
 import type { MemoryCategory, PromptName } from '../types/constants.js';
 import { memoryCategories, promptNames } from '../types/constants.js';
 import { log, type LogEntry } from '../utils/logger.js';
-import { isRecord } from '../utils/parse.js';
+import { isPositiveFinite, isRecord } from '../utils/parse.js';
 
 interface RouteContext {
   loop: MainLoop;
@@ -176,7 +176,7 @@ export function createSseStream(req: IncomingMessage, res: ServerResponse, optio
   }
 
   const configuredTimeout = options.connectionTimeoutMs;
-  const connectionTimeoutMs = typeof configuredTimeout === 'number' && Number.isFinite(configuredTimeout) && configuredTimeout > 0
+  const connectionTimeoutMs = isPositiveFinite(configuredTimeout)
     ? configuredTimeout
     : SSE_CONNECTION_TIMEOUT_MS;
   const onCleanup = options.onCleanup;

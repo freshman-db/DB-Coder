@@ -7,6 +7,7 @@ import type { ProjectAnalysis } from '../memory/types.js';
 import type { ClaudeBridge } from '../bridges/ClaudeBridge.js';
 import { createSystemDataMcpServer } from '../mcp/SystemDataMcp.js';
 import { log } from '../utils/logger.js';
+import { isPositiveFinite } from '../utils/parse.js';
 
 // Keywords for categorizing adjustments
 const CATEGORY_KEYWORDS: Record<AdjustmentCategory, string[]> = {
@@ -354,7 +355,7 @@ export class EvolutionEngine {
 
   private resolveMaxActivePromptPatches(): number {
     const configuredMaxActive = this.config.values.evolution?.maxActivePromptPatches;
-    return typeof configuredMaxActive === 'number' && Number.isFinite(configuredMaxActive) && configuredMaxActive > 0
+    return isPositiveFinite(configuredMaxActive)
       ? configuredMaxActive
       : 3;
   }
@@ -398,7 +399,7 @@ export class EvolutionEngine {
     if (typeof projectPath !== 'string' || projectPath.trim().length === 0) {
       throw new Error('projectPath is required for prompt patch storage');
     }
-    if (!Number.isFinite(maxActive) || maxActive <= 0) {
+    if (!isPositiveFinite(maxActive)) {
       throw new Error('maxActive must be a positive number');
     }
 

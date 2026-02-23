@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { extractJsonFromText, getErrorMessage, isRecord, truncate, tryParseJson, tryParseReview } from './parse.js';
+import { extractJsonFromText, getErrorMessage, isPositiveFinite, isRecord, truncate, tryParseJson, tryParseReview } from './parse.js';
 
 test('truncate returns short strings unchanged', () => {
   assert.equal(truncate('hello', 10), 'hello');
@@ -26,6 +26,16 @@ test('isRecord identifies plain objects and rejects non-objects', () => {
   assert.equal(isRecord(null), false);
   assert.equal(isRecord(undefined), false);
   assert.equal(isRecord('text'), false);
+});
+
+test('isPositiveFinite validates only positive finite numbers', () => {
+  assert.equal(isPositiveFinite(5), true);
+  assert.equal(isPositiveFinite(0), false);
+  assert.equal(isPositiveFinite(-1), false);
+  assert.equal(isPositiveFinite(Infinity), false);
+  assert.equal(isPositiveFinite(Number.NaN), false);
+  assert.equal(isPositiveFinite('5'), false);
+  assert.equal(isPositiveFinite(null), false);
 });
 
 test('getErrorMessage normalizes unknown errors to strings', () => {

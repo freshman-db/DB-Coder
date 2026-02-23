@@ -2,7 +2,7 @@ import type { CodingAgent, AgentResult, ReviewResult } from './CodingAgent.js';
 import type { CodexConfig, TokenPricing } from '../config/types.js';
 import { runProcess, spawnWithJsonl, type JsonlEvent } from '../utils/process.js';
 import { log } from '../utils/logger.js';
-import { tryParseJson, tryParseReview } from '../utils/parse.js';
+import { isPositiveFinite, tryParseJson, tryParseReview } from '../utils/parse.js';
 import { readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -270,9 +270,9 @@ function estimateFromTokenUsage(events: JsonlEvent[], pricing?: TokenPricing): n
   for (const event of events) {
     if (event.type !== 'turn.completed' || typeof event.usage !== 'object' || event.usage === null) continue;
     const usage = event.usage as Record<string, unknown>;
-    if (typeof usage.input_tokens === 'number' && Number.isFinite(usage.input_tokens)) totalInput += usage.input_tokens;
-    if (typeof usage.cached_input_tokens === 'number' && Number.isFinite(usage.cached_input_tokens)) totalCached += usage.cached_input_tokens;
-    if (typeof usage.output_tokens === 'number' && Number.isFinite(usage.output_tokens)) totalOutput += usage.output_tokens;
+    if (isPositiveFinite(usage.input_tokens)) totalInput += usage.input_tokens;
+    if (isPositiveFinite(usage.cached_input_tokens)) totalCached += usage.cached_input_tokens;
+    if (isPositiveFinite(usage.output_tokens)) totalOutput += usage.output_tokens;
   }
 
   if (totalInput <= 0 && totalCached <= 0 && totalOutput <= 0) return null;
@@ -309,7 +309,7 @@ function extractLastPositiveMatch(text: string, pattern: string): number | null 
 
   for (const match of text.matchAll(new RegExp(pattern, 'gi'))) {
     const maybeValue = Number(match[1]);
-    if (Number.isFinite(maybeValue) && maybeValue > 0) {
+    if (isPositiveFinite(maybeValue)) {
       lastValue = maybeValue;
     }
   }
@@ -350,7 +350,7 @@ function collectStringValues(
 
 function firstPositiveNumber(values: unknown[]): number | null {
   for (const value of values) {
-    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    if (isPositiveFinite(value)) {
       return value;
     }
   }
