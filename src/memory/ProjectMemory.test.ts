@@ -8,6 +8,7 @@ const CLAUDE_MEM_URL = 'http://claude-mem.local';
 
 const originalFetch = globalThis.fetch;
 const originalWarn = log.warn;
+const originalDebug = log.debug;
 
 function installFetchMock(
   implementation: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
@@ -24,10 +25,15 @@ function jsonResponse(payload: unknown, status = 200): Response {
   });
 }
 
+function disableRetryDelay(memory: ProjectMemory): void {
+  (memory as unknown as { sleep: (ms: number) => Promise<void> }).sleep = async () => {};
+}
+
 describe('ProjectMemory', { concurrency: false }, () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
     log.warn = originalWarn;
+    log.debug = originalDebug;
     mock.restoreAll();
   });
 
@@ -51,27 +57,55 @@ describe('ProjectMemory', { concurrency: false }, () => {
   test('search() returns empty array and logs warning on HTTP 500', async () => {
     const warnMock = mock.fn((_message: string) => {});
     log.warn = warnMock as typeof log.warn;
-    installFetchMock(async () => jsonResponse({ error: 'boom' }, 500));
+    const fetchMock = installFetchMock(async () => jsonResponse({ error: 'boom' }, 500));
     const memory = new ProjectMemory(CLAUDE_MEM_URL);
+    disableRetryDelay(memory);
 
     const results = await memory.search('example');
 
     assert.equal(results.ok, false);
     assert.equal(results.length, 0);
+    assert.equal(fetchMock.mock.calls.length, 3);
     assert.equal(warnMock.mock.calls.length, 1);
     assert.match(String(warnMock.mock.calls[0]?.arguments[0]), /HTTP 500/);
   });
 
+  test('search() retries on HTTP 500 and succeeds on second attempt', async () => {
+    let attempts = 0;
+    const debugMock = mock.fn((_message: string) => {});
+    log.debug = debugMock as typeof log.debug;
+    const fetchMock = installFetchMock(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return jsonResponse({ error: 'temporary' }, 500);
+      }
+      return jsonResponse({ content: [{ type: 'text', text: 'recovered' }] }, 200);
+    });
+    const memory = new ProjectMemory(CLAUDE_MEM_URL);
+    disableRetryDelay(memory);
+
+    const results = await memory.search('retry me');
+
+    assert.equal(results.ok, true);
+    assert.equal(results[0]?.text, 'recovered');
+    assert.equal(fetchMock.mock.calls.length, 2);
+    assert.equal(debugMock.mock.calls.length, 1);
+    assert.match(String(debugMock.mock.calls[0]?.arguments[0]), /retry 1\/2/);
+    assert.match(String(debugMock.mock.calls[0]?.arguments[0]), /HTTP 500/);
+  });
+
   test('search() returns empty array when fetch rejects with AbortError', async () => {
-    installFetchMock(async () => {
+    const fetchMock = installFetchMock(async () => {
       throw new DOMException('The operation was aborted.', 'AbortError');
     });
     const memory = new ProjectMemory(CLAUDE_MEM_URL);
+    disableRetryDelay(memory);
 
     const results = await memory.search('slow request');
 
     assert.equal(results.ok, false);
     assert.equal(results.length, 0);
+    assert.equal(fetchMock.mock.calls.length, 3);
   });
 
   test('search() returns empty array when response JSON is malformed', async () => {
@@ -110,6 +144,28 @@ describe('ProjectMemory', { concurrency: false }, () => {
     });
   });
 
+  test('save() retries on network error and succeeds on second attempt', async () => {
+    let attempts = 0;
+    const debugMock = mock.fn((_message: string) => {});
+    log.debug = debugMock as typeof log.debug;
+    const fetchMock = installFetchMock(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new TypeError('fetch failed');
+      }
+      return jsonResponse({ ok: true }, 201);
+    });
+    const memory = new ProjectMemory(CLAUDE_MEM_URL);
+    disableRetryDelay(memory);
+
+    const saved = await memory.save('remember this');
+
+    assert.equal(saved, true);
+    assert.equal(fetchMock.mock.calls.length, 2);
+    assert.equal(debugMock.mock.calls.length, 1);
+    assert.match(String(debugMock.mock.calls[0]?.arguments[0]), /TypeError/);
+  });
+
   test('save() logs warning and returns false when fetch rejects', async () => {
     const warnMock = mock.fn((_message: string) => {});
     log.warn = warnMock as typeof log.warn;
@@ -146,13 +202,47 @@ describe('ProjectMemory', { concurrency: false }, () => {
   });
 
   test('timeline() returns empty array on failure', async () => {
-    installFetchMock(async () => jsonResponse({ error: 'unavailable' }, 503));
+    const fetchMock = installFetchMock(async () => jsonResponse({ error: 'unavailable' }, 503));
     const memory = new ProjectMemory(CLAUDE_MEM_URL);
+    disableRetryDelay(memory);
 
     const results = await memory.timeline(7);
 
     assert.equal(results.ok, false);
     assert.equal(results.length, 0);
+    assert.equal(fetchMock.mock.calls.length, 3);
+  });
+
+  test('timeline() does not retry on HTTP 400', async () => {
+    const debugMock = mock.fn((_message: string) => {});
+    log.debug = debugMock as typeof log.debug;
+    const fetchMock = installFetchMock(async () => jsonResponse({ error: 'bad request' }, 400));
+    const memory = new ProjectMemory(CLAUDE_MEM_URL);
+    disableRetryDelay(memory);
+
+    const results = await memory.timeline(7);
+
+    assert.equal(results.ok, false);
+    assert.equal(results.length, 0);
+    assert.equal(fetchMock.mock.calls.length, 1);
+    assert.equal(debugMock.mock.calls.length, 0);
+  });
+
+  test('search() gives up after max retries', async () => {
+    const debugMock = mock.fn((_message: string) => {});
+    log.debug = debugMock as typeof log.debug;
+    const fetchMock = installFetchMock(async () => jsonResponse({ error: 'still down' }, 503));
+    const memory = new ProjectMemory(CLAUDE_MEM_URL);
+    disableRetryDelay(memory);
+
+    const results = await memory.search('still failing');
+
+    assert.equal(results.ok, false);
+    assert.equal(results.length, 0);
+    assert.equal(fetchMock.mock.calls.length, 3);
+    assert.equal(debugMock.mock.calls.length, 2);
+    assert.match(String(debugMock.mock.calls[0]?.arguments[0]), /retry 1\/2/);
+    assert.match(String(debugMock.mock.calls[1]?.arguments[0]), /retry 2\/2/);
   });
 
   test('extractText() returns empty string for an empty content array', () => {
