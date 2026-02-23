@@ -9,6 +9,7 @@ import { TaskStore } from './memory/TaskStore.js';
 import { CodexBridge } from './bridges/CodexBridge.js';
 import { TaskQueue } from './core/TaskQueue.js';
 import { MainLoop } from './core/MainLoop.js';
+import { CycleEventBus } from './core/CycleEventBus.js';
 import { CostTracker } from './utils/cost.js';
 import { Server } from './server/Server.js';
 import { PatrolManager } from './core/ModeManager.js';
@@ -59,7 +60,8 @@ program
     const taskQueue = new TaskQueue(taskStore);
     const costTracker = new CostTracker(taskStore, budget);
 
-    const mainLoop = new MainLoop(config, taskQueue, codexBridge, taskStore, costTracker);
+    const eventBus = new CycleEventBus();
+    const mainLoop = new MainLoop(config, taskQueue, codexBridge, taskStore, costTracker, eventBus);
     const patrolManager = new PatrolManager(mainLoop, taskStore, projectPath);
     const planChat = new PlanChatManager(taskStore, config);
 

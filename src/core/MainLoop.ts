@@ -17,6 +17,8 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { safeBuild } from '../utils/safeBuild.js';
+import { CycleEventBus } from './CycleEventBus.js';
+import type { CycleEvent, CyclePhase, CycleTiming } from './CycleEvents.js';
 
 const PAUSE_INTERVAL_MS = 5000;
 const ERROR_RECOVERY_MS = 30_000;
@@ -74,10 +76,15 @@ export class MainLoop {
     private codex: CodexBridge,
     private taskStore: TaskStore,
     private costTracker: CostTracker,
+    private eventBus: CycleEventBus = CycleEventBus.noop(),
   ) {
     const hash = createHash('md5').update(config.projectPath).digest('hex').slice(0, BRANCH_ID_LENGTH);
     const lockDir = join(homedir(), '.db-coder');
     this.lockFile = join(lockDir, `${hash}.lock`);
+  }
+
+  private makeEvent(phase: CyclePhase, timing: CycleTiming, data: Record<string, unknown> = {}): CycleEvent {
+    return { phase, timing, taskId: this.currentTaskId ?? undefined, data, timestamp: Date.now() };
   }
 
   // --- Public interface (backward compatible) ---
@@ -233,6 +240,7 @@ export class MainLoop {
 
     // 1. Brain decides what to do
     this.setState('scanning');
+    this.eventBus.emit(this.makeEvent('decide', 'before'));
     let decision = await this.brainDecide(projectPath);
     if (decision.costUsd > 0) await this.taskStore.addDailyCost(decision.costUsd);
 
@@ -266,11 +274,14 @@ export class MainLoop {
       return false;
     }
 
+    this.eventBus.emit(this.makeEvent('decide', 'after', { taskDescription: decision.taskDescription }));
+
     // 2. Create task record
     this.setState('planning');
     const task = await this.taskStore.createTask(projectPath, decision.taskDescription, decision.priority ?? 2);
     this.setCurrentTaskId(task.id);
     log.info(`Task: ${truncate(decision.taskDescription, TASK_DESC_MAX_LENGTH)}`);
+    this.eventBus.emit(this.makeEvent('create-task', 'after', { taskId: task.id, taskDescription: decision.taskDescription }));
 
     // 3. Budget check
     if (await this.checkBudgetOrAbort(task.id)) {
@@ -303,6 +314,16 @@ export class MainLoop {
 
       // 5. Worker executes
       this.setState('executing');
+      const guardErrors = await this.eventBus.emitAndWait(this.makeEvent('execute', 'before', { taskDescription: task.task_description }));
+      if (guardErrors.length > 0) {
+        log.warn(`Guard blocked execution: ${guardErrors[0].message}`);
+        await this.taskStore.updateTask(task.id, { status: 'blocked', phase: 'blocked' });
+        await switchBranch(originalBranch, projectPath).catch(() => {});
+        await this.cleanupTaskBranch(branchName);
+        this.setCurrentTaskId(null);
+        this.setState('idle');
+        return false;
+      }
       const workerResult = await this.workerExecute(task);
       if (workerResult.costUsd > 0) await this.costTracker.addCost(task.id, workerResult.costUsd);
 
@@ -315,10 +336,12 @@ export class MainLoop {
         cost_usd: workerResult.costUsd,
         duration_ms: workerResult.durationMs,
       });
+      this.eventBus.emit(this.makeEvent('execute', 'after', { startCommit, result: { costUsd: workerResult.costUsd, durationMs: workerResult.durationMs } }));
 
       // 6. Hard verification (zero LLM cost)
       this.setState('reviewing');
       const verification = await this.hardVerify(baselineErrors, startCommit, projectPath);
+      this.eventBus.emit(this.makeEvent('verify', 'after', { verification, startCommit }));
 
       // 7. If verification failed, give worker a chance to fix
       if (!verification.passed && workerResult.sessionId) {
@@ -335,6 +358,7 @@ export class MainLoop {
         }
         verification.passed = reVerify.passed;
         verification.reason = reVerify.reason;
+        this.eventBus.emit(this.makeEvent('fix', 'after', { verification }));
       }
 
       // 8. Codex review (parallel with brain review would be ideal but sequential for simplicity)
@@ -354,11 +378,13 @@ export class MainLoop {
 
       // 9. Decide: merge or discard
       const shouldMerge = verification.passed && codexReviewPassed;
+      this.eventBus.emit(this.makeEvent('review', 'after', { passed: codexReviewPassed }));
 
       // 10. Brain reflects and learns
       this.setState('reflecting');
       const outcome = shouldMerge ? 'success' : 'failed';
       await this.brainReflect(task, outcome, verification, projectPath);
+      this.eventBus.emit(this.makeEvent('reflect', 'after'));
 
       // 11. Merge or cleanup
       if (shouldMerge) {
@@ -367,6 +393,7 @@ export class MainLoop {
         await deleteBranch(branchName, projectPath);
         log.info(`Task completed and merged: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`);
         await this.taskStore.updateTask(task.id, { status: 'done', phase: 'done' });
+        this.eventBus.emit(this.makeEvent('merge', 'after', { merged: true, taskDescription: task.task_description }));
 
         // Self-modification: rebuild after merging own code changes
         if (this.isSelfProject()) {
@@ -383,6 +410,7 @@ export class MainLoop {
         await this.cleanupTaskBranch(branchName);
         log.warn(`Task rejected: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`);
         await this.taskStore.updateTask(task.id, { status: 'blocked', phase: 'blocked' });
+        this.eventBus.emit(this.makeEvent('merge', 'after', { merged: false }));
       }
 
       // 12. Periodic deep chain review
@@ -400,6 +428,7 @@ export class MainLoop {
       }
     } catch (err) {
       log.error('Task execution error', err);
+      this.eventBus.emit(this.makeEvent('execute', 'error', { error: String(err) }));
       await this.taskStore.updateTask(task.id, { status: 'failed', phase: 'failed' });
       await switchBranch(originalBranch, projectPath).catch(() => {});
       await this.cleanupTaskBranch(branchName);
