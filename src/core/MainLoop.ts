@@ -340,7 +340,17 @@ export class MainLoop {
 
       // 6. Hard verification (zero LLM cost)
       this.setState('reviewing');
+      const verifyStart = Date.now();
       const verification = await this.hardVerify(baselineErrors, startCommit, projectPath);
+      await this.taskStore.addLog({
+        task_id: task.id,
+        phase: 'verify',
+        agent: 'tsc',
+        input_summary: `baseline=${baselineErrors}, startCommit=${startCommit}`,
+        output_summary: verification.passed ? 'PASS' : `FAIL: ${verification.reason}`,
+        cost_usd: 0,
+        duration_ms: Date.now() - verifyStart,
+      });
       this.eventBus.emit(this.makeEvent('verify', 'after', { verification, startCommit }));
 
       // 7. If verification failed, give worker a chance to fix
@@ -365,6 +375,7 @@ export class MainLoop {
       let codexReviewPassed = true;
       const changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
       if (changedFiles.length > 0) {
+        const reviewStart = Date.now();
         const codexReview = await this.codex.review(
           `Review these changed files for bugs, security issues, and code quality:\n${changedFiles.join('\n')}`,
           projectPath,
@@ -385,6 +396,16 @@ export class MainLoop {
           log.warn('Codex review returned passed=false with zero issues — likely output parse failure, treating as PASS');
           codexReviewPassed = true;
         }
+
+        await this.taskStore.addLog({
+          task_id: task.id,
+          phase: 'review',
+          agent: 'codex',
+          input_summary: `files: ${changedFiles.join(', ').slice(0, SUMMARY_PREVIEW_LEN)}`,
+          output_summary: `${codexReviewPassed ? 'PASS' : 'FAIL'}: ${codexReview.summary ?? ''}`.slice(0, SUMMARY_PREVIEW_LEN),
+          cost_usd: codexReview.cost_usd,
+          duration_ms: Date.now() - reviewStart,
+        });
       }
 
       // 9. Decide: merge or discard

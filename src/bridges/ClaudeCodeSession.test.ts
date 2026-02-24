@@ -1,5 +1,6 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { ClaudeCodeSession, buildArgs, type SessionOptions, type SessionResult, type StreamEvent } from './ClaudeCodeSession.js';
 
 // --- Helpers to build stream-json events ---
@@ -400,6 +401,82 @@ describe('ClaudeCodeSession', () => {
 
       assert.deepStrictEqual(collected, []);
       assert.deepStrictEqual(callbackTexts, []);
+    });
+  });
+
+  describe('timeout handling', () => {
+    /** Create a fake ChildProcess-like object for mocking spawn */
+    function createFakeChild() {
+      const stdout = new EventEmitter();
+      const stderr = new EventEmitter();
+      const stdin = { end: () => {} };
+      const child = new EventEmitter() as EventEmitter & {
+        stdout: EventEmitter;
+        stderr: EventEmitter;
+        stdin: { end: () => void };
+        kill: (signal?: string) => boolean;
+        killed: boolean;
+        pid: number;
+      };
+      child.stdout = stdout;
+      child.stderr = stderr;
+      child.stdin = stdin;
+      child.killed = false;
+      child.pid = 12345;
+      child.kill = (signal?: string) => {
+        child.killed = true;
+        // Simulate OS behavior: killed process emits close with code=null
+        process.nextTick(() => child.emit('close', null, signal));
+        return true;
+      };
+      return child;
+    }
+
+    function fakeSpawn() {
+      return createFakeChild() as any;
+    }
+
+    it('should return exitCode -1 and isError true when timeout kills process', async () => {
+      const fakeChild = createFakeChild();
+      const session = new ClaudeCodeSession((() => fakeChild) as any);
+      const resultPromise = session.run('test prompt', {
+        permissionMode: 'bypassPermissions',
+        timeout: 50, // 50ms timeout
+      });
+
+      // Don't send any output — let the timeout fire
+      const result = await resultPromise;
+
+      assert.strictEqual(result.exitCode, -1, 'timeout should set exitCode to -1');
+      assert.strictEqual(result.isError, true, 'timeout should set isError to true');
+      assert.ok(
+        result.errors.some(e => /time(?:d?\s*)?out/i.test(e)),
+        `errors should mention timeout, got: ${JSON.stringify(result.errors)}`,
+      );
+    });
+
+    it('should return normal exitCode when process exits without timeout', async () => {
+      const fakeChild = createFakeChild();
+      const session = new ClaudeCodeSession((() => fakeChild) as any);
+      const resultPromise = session.run('test prompt', {
+        permissionMode: 'bypassPermissions',
+        timeout: 5000, // long timeout, won't fire
+      });
+
+      // Simulate normal exit immediately
+      process.nextTick(() => {
+        fakeChild.stdout.emit('data', Buffer.from(
+          resultEvent('sess-1') + '\n',
+        ));
+        // Override kill to prevent double close
+        fakeChild.kill = () => true;
+        process.nextTick(() => fakeChild.emit('close', 0, null));
+      });
+
+      const result = await resultPromise;
+
+      assert.strictEqual(result.exitCode, 0, 'normal exit should have exitCode 0');
+      assert.strictEqual(result.isError, false, 'normal exit should not be an error');
     });
   });
 });
