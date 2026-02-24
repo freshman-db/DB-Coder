@@ -26,7 +26,7 @@
 │              db-coder 服务 (systemd, 24h 运行)           │
 │                                                         │
 │  ┌───────────────────────────────────────────────────┐  │
-│  │            Main Loop 编排器 (~530行)               │  │
+│  │            Main Loop 编排器 (~2400行)              │  │
 │  │  brainDecide → workerExecute → hardVerify         │  │
 │  │      → codexReview → brainReflect → merge         │  │
 │  │     ↑                                │             │  │
@@ -180,12 +180,19 @@ review_events, goal_progress, prompt_versions, config_proposals
 | GET | `/api/metrics` | 运营指标 |
 | GET/POST | `/api/tasks` | 任务列表/创建 |
 | GET | `/api/tasks/:id` | 任务详情 |
+| GET | `/api/tasks/pending-review` | 待审查任务 |
+| POST | `/api/tasks/:id/approve` | 批准任务 |
+| POST | `/api/tasks/:id/skip` | 跳过任务 |
 | POST | `/api/control/pause\|resume\|scan` | 循环控制 |
 | POST | `/api/patrol/start\|stop` | 巡逻启停 |
 | GET | `/api/logs?follow=true` | SSE 日志流 |
 | GET | `/api/cost` | 费用数据 |
-| GET | `/api/plans` | 计划列表 (只读) |
-| POST | `/api/plans/*` | 计划操作 (v2 返回 503) |
+| GET | `/api/cycle/metrics` | 循环性能指标 |
+| GET | `/api/cycle/entries` | 循环历史记录 |
+| GET | `/api/personas` | Persona 列表 |
+| PUT | `/api/personas/:name` | 更新 Persona 内容 |
+| GET | `/api/plans` | 计划列表 |
+| POST | `/api/plans/:id/approve\|reject\|execute` | 计划操作 |
 
 使用 Node.js 内置 `http` 模块，Bearer Token 认证，CSP 安全头。
 
@@ -214,27 +221,48 @@ review_events, goal_progress, prompt_versions, config_proposals
 src/
 ├── index.ts                         # CLI 入口 (commander)
 ├── core/
-│   ├── MainLoop.ts                  # 核心编排循环 (~530行)
+│   ├── MainLoop.ts                  # 核心编排循环 (~2400行)
 │   ├── MainLoop.test.ts             # 纯函数测试 (mergeReviews, countTscErrors 等)
+│   ├── PersonaLoader.ts             # Persona 加载 + Skill 映射 + Worker Prompt 构建
+│   ├── CycleEventBus.ts             # 类型化事件总线 (循环生命周期)
+│   ├── CycleEvents.ts               # 循环事件类型定义
 │   ├── ModeManager.ts               # PatrolManager (巡逻启停)
+│   ├── PlanChatManager.ts           # 计划对话管理
 │   ├── TaskQueue.ts                 # 任务队列 (从 DB 获取 queued 任务)
-│   ├── ModuleScheduler.ts           # 模块扫描调度
 │   ├── Shutdown.ts                  # 优雅退出
-│   └── types.ts                     # 核心类型
+│   ├── types.ts                     # 核心类型
+│   ├── guards/                      # 执行前验证
+│   │   ├── BudgetGuard.ts           # 预算超限检查
+│   │   ├── ConcurrencyGuard.ts      # 并发控制
+│   │   ├── EmptyDiffGuard.ts        # 空 diff 检测
+│   │   ├── StructuredOutputGuard.ts # 结构化输出验证
+│   │   └── WorkerFixResultGuard.ts  # Worker 修复结果检查
+│   ├── observers/                   # 循环事件观察者
+│   │   ├── CycleMetricsCollector.ts # 循环性能指标收集
+│   │   ├── NotificationObserver.ts  # 通知推送
+│   │   ├── StructuredCycleLogger.ts # 结构化日志
+│   │   └── WebUIRealtimeObserver.ts # Web UI 实时更新
+│   └── strategies/                  # 决策策略
+│       ├── DynamicPriorityStrategy.ts # 动态优先级
+│       ├── FailureLearningStrategy.ts # 失败学习
+│       └── TaskQualityEvaluator.ts    # 任务质量评估
 ├── bridges/
-│   ├── ClaudeCodeSession.ts         # Claude Code CLI stream-json 封装 (~230行)
-│   ├── ClaudeCodeSession.test.ts    # Session 单元测试
+│   ├── ClaudeCodeSession.ts         # Claude Code Agent SDK query() 封装 (~210行)
+│   ├── sdkMessageCollector.ts       # SDK 流事件收集 + 错误合成
+│   ├── buildSdkOptions.ts           # SDK 选项构建器
+│   ├── hooks.ts                     # 程序化 PreToolUse/PostToolUse hooks
+│   ├── pluginDiscovery.ts           # 自动发现 ~/.claude/plugins/cache 插件
 │   ├── CodingAgent.ts               # ReviewResult / ReviewIssue 接口
-│   └── CodexBridge.ts               # Codex CLI 子进程封装
+│   └── CodexBridge.ts               # Codex CLI 子进程封装 + token 费用估算
 ├── memory/
-│   ├── TaskStore.ts                 # PostgreSQL: 任务/日志/费用/计划
+│   ├── TaskStore.ts                 # PostgreSQL: 任务/日志/费用/计划/personas
 │   ├── GlobalMemory.ts              # PostgreSQL: 全局记忆 (逐步淡出)
 │   ├── ProjectMemory.ts             # claude-mem HTTP 客户端
 │   ├── schemas.ts                   # DB 表创建 (DDL)
 │   └── types.ts                     # 记忆类型
 ├── server/
 │   ├── Server.ts                    # HTTP 服务 (API + 静态文件 + 安全头)
-│   ├── routes.ts                    # REST API 路由 (~600行)
+│   ├── routes.ts                    # REST API 路由 (~900行)
 │   └── rateLimit.ts                 # 速率限制
 ├── config/
 │   ├── Config.ts                    # 配置加载 (全局 + 项目级)
@@ -245,7 +273,8 @@ src/
 │   ├── process.ts                   # 子进程工具
 │   ├── safeBuild.ts                 # 原子 dist/ 替换 (自修改安全)
 │   ├── logger.ts                    # 日志
-│   ├── parse.ts                     # JSON 解析 + review 结构验证
+│   ├── parse.ts                     # JSON 解析 + review 结构验证 + Markdown 回退解析
+│   ├── validateConfig.ts            # 配置校验 (启动时)
 │   ├── similarity.ts                # 文本相似度 (审查交叉匹配)
 │   └── retry.ts                     # 重试工具
 ├── evolution/
@@ -275,9 +304,10 @@ src/
 
 ```jsonc
 {
-  "brain": { "model": "opus", "scanInterval": 3600 },
-  "claude": { "model": "opus", "maxTaskBudget": 2.0 },
-  "budget": { "maxPerTask": 5.0, "maxPerDay": 200.0 },
+  "brain": { "model": "opus", "scanInterval": 300 },
+  "claude": { "model": "opus", "maxTaskBudget": 10.0, "maxTurns": 200 },
+  "codex": { "model": "gpt-5.3-codex", "tokenPricing": { "inputPerMillion": 1.75, "cachedInputPerMillion": 0.175, "outputPerMillion": 14 } },
+  "budget": { "maxPerTask": 20.0, "maxPerDay": 300.0 },
   "memory": {
     "pgConnectionString": "postgresql://db:db@localhost:5432/db_coder"
   },

@@ -45,27 +45,35 @@ DB-Coder is a fully autonomous AI coding system that continuously improves targe
 src/
 ├── index.ts                         # CLI entry (commander)
 ├── core/
-│   ├── MainLoop.ts                  # Orchestration loop (~530 lines)
+│   ├── MainLoop.ts                  # Orchestration loop (~2400 lines)
+│   ├── PersonaLoader.ts             # Persona loading + skill mapping + worker prompt building
+│   ├── CycleEventBus.ts             # Typed event bus for cycle lifecycle
 │   ├── ModeManager.ts               # PatrolManager (patrol start/stop)
 │   ├── TaskQueue.ts                 # Task queue from DB
 │   ├── Shutdown.ts                  # Graceful shutdown
-│   └── ModuleScheduler.ts           # Module scan scheduling
+│   ├── guards/                      # BudgetGuard, ConcurrencyGuard, EmptyDiffGuard, etc.
+│   ├── observers/                   # CycleMetricsCollector, NotificationObserver, etc.
+│   └── strategies/                  # DynamicPriority, FailureLearning, TaskQuality
 ├── bridges/
-│   ├── ClaudeCodeSession.ts         # Claude Code CLI stream-json wrapper (~230 lines)
+│   ├── ClaudeCodeSession.ts         # Claude Code Agent SDK query() wrapper (~210 lines)
+│   ├── sdkMessageCollector.ts       # SDK stream event collection + error synthesis
+│   ├── buildSdkOptions.ts           # SDK options builder
+│   ├── hooks.ts                     # Programmatic PreToolUse/PostToolUse hooks
+│   ├── pluginDiscovery.ts           # Auto-discover plugins from ~/.claude/plugins/cache
 │   ├── CodingAgent.ts               # ReviewResult / ReviewIssue interfaces
-│   └── CodexBridge.ts               # Codex CLI subprocess wrapper
+│   └── CodexBridge.ts               # Codex CLI subprocess wrapper + token cost estimation
 ├── memory/
-│   ├── TaskStore.ts                 # PostgreSQL: tasks / logs / costs / plans
+│   ├── TaskStore.ts                 # PostgreSQL: tasks / logs / costs / plans / personas
 │   ├── GlobalMemory.ts              # PostgreSQL: global memory (legacy, phasing out)
 │   └── ProjectMemory.ts             # claude-mem HTTP client
 ├── server/
 │   ├── Server.ts                    # HTTP server (API + static files + security headers)
-│   ├── routes.ts                    # REST API routes (~600 lines)
+│   ├── routes.ts                    # REST API routes (~900 lines)
 │   └── rateLimit.ts                 # Rate limiting
 ├── config/
 │   ├── Config.ts                    # Config loading (global + project-level)
 │   └── types.ts                     # Config type definitions
-├── utils/                           # Git, cost tracking, process, logging, etc.
+├── utils/                           # Git, cost tracking, process, logging, validation, etc.
 └── web/                             # SPA frontend (HTML/CSS/JS + marked.js)
 ```
 
@@ -106,9 +114,10 @@ Global config: `~/.db-coder/config.json`
 
 ```jsonc
 {
-  "brain": { "model": "opus", "scanInterval": 3600 },
-  "claude": { "model": "opus", "maxTaskBudget": 2.0 },
-  "budget": { "maxPerTask": 5.0, "maxPerDay": 200.0 },
+  "brain": { "model": "opus", "scanInterval": 300 },
+  "claude": { "model": "opus", "maxTaskBudget": 10.0, "maxTurns": 200 },
+  "codex": { "model": "gpt-5.3-codex", "tokenPricing": { "inputPerMillion": 1.75, "cachedInputPerMillion": 0.175, "outputPerMillion": 14 } },
+  "budget": { "maxPerTask": 20.0, "maxPerDay": 300.0 },
   "memory": {
     "pgConnectionString": "postgresql://db:db@localhost:5432/db_coder"
   },
@@ -165,6 +174,9 @@ The server runs on `http://127.0.0.1:18800`. All APIs require Bearer Token authe
 | GET | `/api/metrics` | Operational metrics |
 | GET/POST | `/api/tasks` | List / Create tasks |
 | GET | `/api/tasks/:id` | Task details |
+| GET | `/api/tasks/pending-review` | Tasks pending review |
+| POST | `/api/tasks/:id/approve` | Approve task |
+| POST | `/api/tasks/:id/skip` | Skip task |
 | POST | `/api/control/pause` | Pause loop |
 | POST | `/api/control/resume` | Resume loop |
 | POST | `/api/control/scan` | Trigger scan |
@@ -172,6 +184,10 @@ The server runs on `http://127.0.0.1:18800`. All APIs require Bearer Token authe
 | POST | `/api/patrol/stop` | Stop patrol |
 | GET | `/api/logs?follow=true` | SSE log stream |
 | GET | `/api/cost` | Cost details |
+| GET | `/api/cycle/metrics` | Cycle performance metrics |
+| GET | `/api/cycle/entries` | Cycle history entries |
+| GET | `/api/personas` | List personas |
+| PUT | `/api/personas/:name` | Update persona content |
 | GET | `/api/plans` | List plan drafts |
 | POST | `/api/plans/:id/approve` | Approve plan |
 | POST | `/api/plans/:id/reject` | Reject plan |

@@ -5,7 +5,7 @@
 ## 架构
 
 ```
-编排器 (MainLoop, ~1100行)
+编排器 (MainLoop, ~2400行)
   ├── 大脑 session (Agent SDK query(), 只读+记忆, 决策+反思)
   ├── 工人 session (Agent SDK query(), 读写, 编码执行)
   ├── 程序化 Hooks (PreToolUse/PostToolUse 观察)
@@ -117,3 +117,6 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 - SDK systemPrompt preset 'claude_code' 获得完整工具链: 不要自定义系统 prompt
 - SDK kill() vs timeout: exitCode -2 = manual kill, -1 = timeout, 用 killed 布尔标志区分
 - 流式行解析 buffer flush: split('\n') + buffer 模式最后一行可能没有 trailing newline, close handler 必须 flush 剩余 buffer
+- SDK is_error 与 errors 字段独立: subtype=success 但 is_error=true 时 errors 可能为空, 需要合成诊断信息
+- Codex 输出是 Markdown 不是 JSON: tryParseReview 必须有 Markdown 回退解析, 否则丢失审查发现
+- Codex token 定价要跟踪模型实际价格: output 价格差异最大 (曾经低估 43%), 导致费用追踪不准
