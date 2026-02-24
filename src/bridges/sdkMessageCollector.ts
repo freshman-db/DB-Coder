@@ -1,5 +1,9 @@
-import type { SDKMessage, SDKResultMessage, SDKAssistantMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { SessionResult, TokenUsage } from './ClaudeCodeSession.js';
+import type {
+  SDKMessage,
+  SDKResultMessage,
+  SDKAssistantMessage,
+} from "@anthropic-ai/claude-agent-sdk";
+import type { SessionResult, TokenUsage } from "./ClaudeCodeSession.js";
 
 export interface CollectOptions {
   /** Callback invoked for each text block extracted from assistant messages */
@@ -22,22 +26,22 @@ export async function collectResult(
 ): Promise<CollectedResult> {
   const textParts: string[] = [];
   let resultMsg: SDKResultMessage | null = null;
-  let sessionId = '';
+  let sessionId = "";
 
   for await (const message of stream) {
     opts?.onEvent?.(message);
 
     // Capture session_id from first message that has it
-    if ('session_id' in message && message.session_id && !sessionId) {
+    if ("session_id" in message && message.session_id && !sessionId) {
       sessionId = message.session_id;
     }
 
-    if (message.type === 'assistant') {
+    if (message.type === "assistant") {
       const assistantMsg = message as SDKAssistantMessage;
       const content = assistantMsg.message?.content;
       if (Array.isArray(content)) {
         for (const block of content) {
-          if (block.type === 'text' && 'text' in block) {
+          if (block.type === "text" && "text" in block) {
             textParts.push(block.text);
             opts?.onText?.(block.text);
           }
@@ -45,7 +49,7 @@ export async function collectResult(
       }
     }
 
-    if (message.type === 'result') {
+    if (message.type === "result") {
       resultMsg = message as SDKResultMessage;
     }
   }
@@ -53,22 +57,34 @@ export async function collectResult(
   // No result message received — stream was empty or malformed
   if (!resultMsg) {
     return {
-      text: textParts.join(''),
+      text: textParts.join(""),
       costUsd: 0,
       sessionId,
       exitCode: 1,
       numTurns: 0,
       durationMs: 0,
       isError: true,
-      errors: ['No result message received from SDK'],
-      usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+      errors: ["No result message received from SDK"],
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+      },
     };
   }
 
   // Extract fields from the result message (success or error variants)
-  const resultText = 'result' in resultMsg ? (resultMsg as any).result ?? '' : '';
-  const structuredOutput = 'structured_output' in resultMsg ? (resultMsg as any).structured_output : undefined;
-  const errors: string[] = 'errors' in resultMsg ? ((resultMsg as any).errors ?? []) : [];
+  let resultText = "";
+  let structuredOutput: unknown;
+  let errors: string[] = [];
+
+  if (resultMsg.subtype === "success") {
+    resultText = resultMsg.result;
+    structuredOutput = resultMsg.structured_output;
+  } else {
+    errors = resultMsg.errors;
+  }
 
   const usage: TokenUsage = {
     inputTokens: resultMsg.usage?.input_tokens ?? 0,
@@ -78,10 +94,10 @@ export async function collectResult(
   };
 
   // Map subtype to exitCode: success → 0, any error variant → 1
-  const exitCode = resultMsg.subtype === 'success' ? 0 : 1;
+  const exitCode = resultMsg.subtype === "success" ? 0 : 1;
 
   return {
-    text: resultText || textParts.join(''),
+    text: resultText || textParts.join(""),
     json: structuredOutput,
     costUsd: resultMsg.total_cost_usd ?? 0,
     sessionId: resultMsg.session_id ?? sessionId,
