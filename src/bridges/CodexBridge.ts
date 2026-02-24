@@ -187,7 +187,7 @@ export class CodexBridge implements CodingAgent {
       }
 
       const cost = extractCost(events, this.config.tokenPricing);
-      const reviewText = output || events.map(e => String(e.content ?? e.text ?? '')).join('\n');
+      const reviewText = output || events.map(e => String(e.content ?? e.output ?? e.text ?? '')).join('\n');
       log.info('CodexBridge review raw output', {
         outputLen: output.length,
         outputPreview: output.slice(0, 500),
