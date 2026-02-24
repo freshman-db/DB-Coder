@@ -128,7 +128,9 @@ export class PersonaLoader {
     personaName?: string;
     taskType?: string;
   }): Promise<{ prompt: string; systemPrompt: string }> {
-    const personaContent = await this.getPersonaContent(opts.personaName);
+    const persona = opts.personaName ? await this.taskStore.getPersona(opts.personaName) : null;
+    const personaContent = persona?.content ?? DEFAULT_PERSONA_CONTENT;
+    const role = persona?.role ?? 'coding worker';
     const skills = this.getSkillsForType(opts.taskType);
 
     const prompt = `Execute this coding task:
@@ -143,8 +145,6 @@ ${skills.map(s => `- ${s}`).join('\n')}
 
 Commit with a descriptive message when done.`;
 
-    const persona = await this.taskStore.getPersona(opts.personaName ?? '');
-    const role = persona?.role ?? 'coding worker';
     const systemPrompt = `You are a ${role}.\n\n${personaContent}`;
 
     return { prompt, systemPrompt };
