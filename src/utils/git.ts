@@ -187,6 +187,11 @@ export async function getDiffStats(
   };
 }
 
+export async function getDiffSince(fromCommit: string, cwd: string): Promise<string> {
+  const r = await git(['diff', fromCommit, 'HEAD'], cwd);
+  return r.stdout;
+}
+
 export async function isGitRepo(cwd: string): Promise<boolean> {
   const r = await git(['rev-parse', '--git-dir'], cwd);
   return r.exitCode === 0;

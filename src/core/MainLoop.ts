@@ -7,7 +7,7 @@ import { ClaudeCodeSession, type SessionResult } from '../bridges/ClaudeCodeSess
 import type { Task, SubTaskRecord } from '../memory/types.js';
 import type { MergedReviewResult, LoopState, StatusSnapshot } from './types.js';
 import type { ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
-import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch, branchExists, getChangedFilesSince, getModifiedAndAddedFiles, mergeBranch, deleteBranch, listBranches, forceDeleteBranch, getDiffStats } from '../utils/git.js';
+import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch, branchExists, getChangedFilesSince, getModifiedAndAddedFiles, mergeBranch, deleteBranch, listBranches, forceDeleteBranch, getDiffStats, getDiffSince } from '../utils/git.js';
 import { log } from '../utils/logger.js';
 import { truncate } from '../utils/parse.js';
 import { wordJaccard } from '../utils/similarity.js';
@@ -431,45 +431,60 @@ export class MainLoop {
         verification.reason = singleVerify.reason;
       }
 
-      // 8. Codex review (parallel with brain review would be ideal but sequential for simplicity)
-      let codexReviewPassed = true;
-      const changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
-      if (changedFiles.length > 0) {
-        const reviewStart = Date.now();
-        const codexReview = await this.codex.review(
-          `Review these changed files for bugs, security issues, and code quality:\n${changedFiles.join('\n')}`,
-          projectPath,
-        );
-        if (codexReview.cost_usd > 0) await this.costTracker.addCost(task.id, codexReview.cost_usd);
-        codexReviewPassed = codexReview.passed;
-
-        // Store review results and log for traceability
-        const reviewIssues = codexReview.issues ?? [];
-        await this.taskStore.updateTask(task.id, { review_results: reviewIssues });
-        if (!codexReview.passed) {
-          log.info(`Codex review: FAIL — ${codexReview.summary}`, { issues: reviewIssues.length, summary: codexReview.summary });
+      // 7.5 Spec compliance review (Stage 1)
+      let specReviewPassed = true;
+      if (workerPassed) {
+        this.setState('reviewing');
+        const spec = await this.specReview(task, startCommit, projectPath);
+        specReviewPassed = spec.passed;
+        if (!specReviewPassed) {
+          log.info(`Spec review: FAIL — missing: ${spec.missing.join(', ')}, extra: ${spec.extra.join(', ')}`);
         } else {
-          log.info(`Codex review: PASS — ${codexReview.summary}`);
+          log.info(`Spec review: PASS${spec.concerns.length > 0 ? ` (concerns: ${spec.concerns.join(', ')})` : ''}`);
         }
-        // Warn on suspicious parse failure (no issues but failed = likely parse error)
-        if (!codexReview.passed && reviewIssues.length === 0) {
-          log.warn('Codex review returned passed=false with zero issues — likely output parse failure, treating as PASS');
-          codexReviewPassed = true;
-        }
+      }
 
-        await this.taskStore.addLog({
-          task_id: task.id,
-          phase: 'review',
-          agent: 'codex',
-          input_summary: `files: ${changedFiles.join(', ').slice(0, SUMMARY_PREVIEW_LEN)}`,
-          output_summary: `${codexReviewPassed ? 'PASS' : 'FAIL'}: ${codexReview.summary ?? ''}`.slice(0, SUMMARY_PREVIEW_LEN),
-          cost_usd: codexReview.cost_usd,
-          duration_ms: Date.now() - reviewStart,
-        });
+      // 8. Codex review (only if worker + spec passed)
+      let codexReviewPassed = true;
+      if (workerPassed && specReviewPassed) {
+        const changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
+        if (changedFiles.length > 0) {
+          const reviewStart = Date.now();
+          const codexReview = await this.codex.review(
+            `Review these changed files for bugs, security issues, and code quality:\n${changedFiles.join('\n')}`,
+            projectPath,
+          );
+          if (codexReview.cost_usd > 0) await this.costTracker.addCost(task.id, codexReview.cost_usd);
+          codexReviewPassed = codexReview.passed;
+
+          // Store review results and log for traceability
+          const reviewIssues = codexReview.issues ?? [];
+          await this.taskStore.updateTask(task.id, { review_results: reviewIssues });
+          if (!codexReview.passed) {
+            log.info(`Codex review: FAIL — ${codexReview.summary}`, { issues: reviewIssues.length, summary: codexReview.summary });
+          } else {
+            log.info(`Codex review: PASS — ${codexReview.summary}`);
+          }
+          // Warn on suspicious parse failure (no issues but failed = likely parse error)
+          if (!codexReview.passed && reviewIssues.length === 0) {
+            log.warn('Codex review returned passed=false with zero issues — likely output parse failure, treating as PASS');
+            codexReviewPassed = true;
+          }
+
+          await this.taskStore.addLog({
+            task_id: task.id,
+            phase: 'review',
+            agent: 'codex',
+            input_summary: `files: ${changedFiles.join(', ').slice(0, SUMMARY_PREVIEW_LEN)}`,
+            output_summary: `${codexReviewPassed ? 'PASS' : 'FAIL'}: ${codexReview.summary ?? ''}`.slice(0, SUMMARY_PREVIEW_LEN),
+            cost_usd: codexReview.cost_usd,
+            duration_ms: Date.now() - reviewStart,
+          });
+        }
       }
 
       // 9. Decide: merge or discard
-      const shouldMerge = workerPassed && codexReviewPassed;
+      const shouldMerge = workerPassed && specReviewPassed && codexReviewPassed;
       this.eventBus.emit(this.makeEvent('review', 'after', { passed: codexReviewPassed }));
 
       // 10. Brain reflects and learns
@@ -874,6 +889,64 @@ Respond with EXACTLY this JSON (no markdown):
     } catch { /* non-critical */ }
 
     return { passed: true };
+  }
+
+  // --- Spec compliance review ---
+
+  private async specReview(
+    task: Task,
+    startCommit: string,
+    projectPath: string,
+  ): Promise<{ passed: boolean; missing: string[]; extra: string[]; concerns: string[] }> {
+    const diff = await getDiffSince(startCommit, projectPath).catch(() => '(diff unavailable)');
+    const subtaskList = (task.subtasks ?? []).map(s => `- ${s.description}`).join('\n');
+
+    const prompt = `You are reviewing code changes for spec compliance. DO NOT trust commit messages — only examine the actual code.
+
+## Original Task
+${task.task_description}
+
+${subtaskList ? `## Subtasks\n${subtaskList}\n` : ''}## Git Diff
+\`\`\`diff
+${diff.slice(0, 15000)}
+\`\`\`
+
+## Review Instructions
+1. Does the implementation fully cover the task requirements?
+2. Are there any missing requirements that were not implemented?
+3. Are there any changes that go beyond the scope (extra work not requested)?
+4. Any concerns about the implementation approach?
+
+Respond with EXACTLY this JSON (no markdown, no extra text):
+{"passed": true/false, "missing": ["..."], "extra": ["..."], "concerns": ["..."]}`;
+
+    const result = await this.brainThink(prompt);
+    if (result.costUsd > 0 && task.id) {
+      await this.costTracker.addCost(task.id, result.costUsd);
+    }
+
+    await this.taskStore.addLog({
+      task_id: task.id,
+      phase: 'review',
+      agent: 'brain-spec',
+      input_summary: 'Spec compliance review',
+      output_summary: result.text.slice(0, SUMMARY_PREVIEW_LEN),
+      cost_usd: result.costUsd,
+      duration_ms: result.durationMs,
+    });
+
+    try {
+      const parsed = JSON.parse(result.text);
+      return {
+        passed: parsed.passed === true,
+        missing: Array.isArray(parsed.missing) ? parsed.missing : [],
+        extra: Array.isArray(parsed.extra) ? parsed.extra : [],
+        concerns: Array.isArray(parsed.concerns) ? parsed.concerns : [],
+      };
+    } catch {
+      log.warn('Spec review returned unparseable JSON, treating as PASS');
+      return { passed: true, missing: [], extra: [], concerns: [] };
+    }
   }
 
   // --- Brain reflection ---
