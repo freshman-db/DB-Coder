@@ -5,6 +5,30 @@ export interface ProcessResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  signal?: string;
+}
+
+const SIGNAL_CODES: Record<string, number> = {
+  SIGHUP: 1,
+  SIGINT: 2,
+  SIGQUIT: 3,
+  SIGILL: 4,
+  SIGTRAP: 5,
+  SIGABRT: 6,
+  SIGBUS: 7,
+  SIGFPE: 8,
+  SIGKILL: 9,
+  SIGUSR1: 10,
+  SIGSEGV: 11,
+  SIGUSR2: 12,
+  SIGPIPE: 13,
+  SIGALRM: 14,
+  SIGTERM: 15,
+};
+
+function signalExitCode(signal: string | null): number {
+  if (!signal) return 1;
+  return 128 + (SIGNAL_CODES[signal] ?? 1);
 }
 
 export interface JsonlEvent {
@@ -57,12 +81,24 @@ export function runProcess(
       reject(err);
     });
 
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       if (timer) clearTimeout(timer);
       if (killed) {
-        resolve({ exitCode: -1, stdout, stderr: stderr + "\n[TIMEOUT]" });
+        resolve({
+          exitCode: -1,
+          stdout,
+          stderr: stderr + "\n[TIMEOUT]",
+          signal: "SIGTERM",
+        });
+      } else if (code !== null) {
+        resolve({ exitCode: code, stdout, stderr });
       } else {
-        resolve({ exitCode: code ?? 0, stdout, stderr });
+        resolve({
+          exitCode: signalExitCode(signal),
+          stdout,
+          stderr,
+          signal: signal ?? undefined,
+        });
       }
     });
   });
@@ -94,7 +130,12 @@ export function spawnWithJsonl(
     timeout?: number;
     onEvent?: (event: JsonlEvent) => void;
   } = {},
-): Promise<{ exitCode: number; events: JsonlEvent[]; stderr: string }> {
+): Promise<{
+  exitCode: number;
+  events: JsonlEvent[];
+  stderr: string;
+  signal?: string;
+}> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
@@ -143,7 +184,7 @@ export function spawnWithJsonl(
       reject(err);
     });
 
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       if (timer) clearTimeout(timer);
       const remaining = buffer.trim();
       if (remaining) {
@@ -158,7 +199,18 @@ export function spawnWithJsonl(
           });
         }
       }
-      resolve({ exitCode: killed ? -1 : (code ?? 0), events, stderr });
+      if (killed) {
+        resolve({ exitCode: -1, events, stderr, signal: "SIGTERM" });
+      } else if (code !== null) {
+        resolve({ exitCode: code, events, stderr });
+      } else {
+        resolve({
+          exitCode: signalExitCode(signal),
+          events,
+          stderr,
+          signal: signal ?? undefined,
+        });
+      }
     });
   });
 }
