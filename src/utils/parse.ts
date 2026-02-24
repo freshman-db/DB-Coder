@@ -20,6 +20,10 @@ export function isPositiveFinite(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
 
+export function asNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
 function findBalancedJson(
   text: string,
   matcher?: (value: unknown) => boolean,
