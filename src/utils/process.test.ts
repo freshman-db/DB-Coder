@@ -39,6 +39,36 @@ describe("runProcess", () => {
     assert.match(result.stderr, /\[TIMEOUT\]/);
   });
 
+  it("reports non-zero exitCode and signal when process is killed by SIGTERM", async () => {
+    const result = await runProcess(process.execPath, [
+      "-e",
+      "process.kill(process.pid, 'SIGTERM');",
+    ]);
+
+    assert.equal(result.exitCode, 143); // 128 + 15 (SIGTERM)
+    assert.equal(result.signal, "SIGTERM");
+  });
+
+  it("reports signal field for SIGKILL", async () => {
+    const result = await runProcess(process.execPath, [
+      "-e",
+      "process.kill(process.pid, 'SIGKILL');",
+    ]);
+
+    assert.equal(result.exitCode, 137); // 128 + 9 (SIGKILL)
+    assert.equal(result.signal, "SIGKILL");
+  });
+
+  it("does not set signal field on normal exit", async () => {
+    const result = await runProcess(process.execPath, [
+      "-e",
+      "process.exit(42);",
+    ]);
+
+    assert.equal(result.exitCode, 42);
+    assert.equal(result.signal, undefined);
+  });
+
   it("writes input to stdin", async () => {
     const result = await runProcess(
       process.execPath,
@@ -126,5 +156,15 @@ describe("spawnWithJsonl", () => {
       { type: "finish", index: 2 },
     ]);
     assert.deepEqual(callbackEvents, result.events);
+  });
+
+  it("reports signal termination with correct exitCode", async () => {
+    const result = await spawnWithJsonl(process.execPath, [
+      "-e",
+      "process.kill(process.pid, 'SIGTERM');",
+    ]);
+
+    assert.equal(result.exitCode, 143); // 128 + 15 (SIGTERM)
+    assert.equal(result.signal, "SIGTERM");
   });
 });
