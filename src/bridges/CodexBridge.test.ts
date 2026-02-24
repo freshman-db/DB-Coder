@@ -251,6 +251,7 @@ test('review parses valid review JSON and tags issues as codex-sourced', async (
         line: 42,
         suggestion: 'Use parameterized placeholders',
         source: 'codex',
+        confidence: undefined,
       },
     ]);
   });

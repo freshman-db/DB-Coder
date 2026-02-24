@@ -126,6 +126,7 @@ export function tryParseReview(text: string): Omit<ReviewResult, 'cost_usd'> {
               line: typeof issue.line === 'number' ? issue.line : undefined,
               suggestion: typeof issue.suggestion === 'string' ? issue.suggestion : undefined,
               source: issue.source === 'claude' || issue.source === 'codex' ? issue.source : 'claude',
+              confidence: typeof issue.confidence === 'number' ? issue.confidence : undefined,
             }))
         : [],
       summary: typeof parsed.summary === 'string' ? parsed.summary : '',

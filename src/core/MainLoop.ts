@@ -1338,7 +1338,10 @@ export function mergeReviews(claude: ReviewResult, codex: ReviewResult): MergedR
   if (claudeRawFail) shouldFix.push({ description: 'Claude reviewer explicitly failed without structured issues', severity: 'medium', source: 'claude' });
   if (codexRawFail) shouldFix.push({ description: 'Codex reviewer explicitly failed without structured issues', severity: 'medium', source: 'codex' });
 
-  const hasCriticalMustFix = mustFix.some(i => i.severity === 'critical' || i.severity === 'high');
+  const effectiveConfidence = (i: ReviewIssue) => i.confidence ?? 1.0;
+  const hasCriticalMustFix = mustFix.some(
+    i => (i.severity === 'critical' || i.severity === 'high') && effectiveConfidence(i) >= 0.8
+  );
   const hasRawFail = claudeRawFail || codexRawFail;
   const passed = !hasRawFail && (mustFix.length === 0 || !hasCriticalMustFix);
 
