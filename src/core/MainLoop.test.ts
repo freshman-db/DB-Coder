@@ -131,6 +131,37 @@ describe('mergeReviews', () => {
     assert.equal(result.mustFix.length, 1);
   });
 
+  it('low-confidence critical issues do not block merge', () => {
+    const claude: ReviewResult = {
+      passed: false,
+      issues: [{ severity: 'critical', description: 'Uncertain bug in handler', file: 'src/handler.ts', source: 'claude', confidence: 0.5 }],
+      summary: 'unsure', cost_usd: 0,
+    };
+    const codex: ReviewResult = {
+      passed: false,
+      issues: [{ severity: 'critical', description: 'Uncertain bug in handler', file: 'src/handler.ts', source: 'codex', confidence: 0.4 }],
+      summary: 'unsure', cost_usd: 0,
+    };
+    const result = mergeReviews(claude, codex);
+    assert.ok(result.mustFix.length > 0, 'Issue should be in mustFix (matched by both)');
+    assert.ok(result.passed, 'Should pass because confidence < 0.8');
+  });
+
+  it('high-confidence critical issues block merge as before', () => {
+    const claude: ReviewResult = {
+      passed: false,
+      issues: [{ severity: 'critical', description: 'Real bug in query builder', file: 'src/db.ts', source: 'claude', confidence: 0.95 }],
+      summary: 'real', cost_usd: 0,
+    };
+    const codex: ReviewResult = {
+      passed: false,
+      issues: [{ severity: 'critical', description: 'Real bug in query builder', file: 'src/db.ts', source: 'codex', confidence: 0.9 }],
+      summary: 'real', cost_usd: 0,
+    };
+    const result = mergeReviews(claude, codex);
+    assert.ok(!result.passed, 'Should NOT pass — high confidence critical issue');
+  });
+
   it('should include summary from both reviewers', () => {
     const result = mergeReviews(
       makeReview({ summary: 'Claude found 2 issues' }),

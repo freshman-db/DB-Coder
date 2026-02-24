@@ -5,11 +5,13 @@
 ## 架构
 
 ```
-编排器 (MainLoop, ~530行)
-  ├── 大脑 session (Claude Code CLI, 只读+记忆, 决策+反思)
-  ├── 工人 session (Claude Code CLI, 读写, 编码执行)
+编排器 (MainLoop, ~1100行)
+  ├── 大脑 session (Agent SDK query(), 只读+记忆, 决策+反思)
+  ├── 工人 session (Agent SDK query(), 读写, 编码执行)
+  ├── 程序化 Hooks (PreToolUse/PostToolUse 观察)
+  ├── 插件自动发现 (~/.claude/plugins/cache)
   ├── 硬验证 (tsc 错误计数对比)
-  ├── Codex 审查 (codex exec, diff 级审查)
+  ├── Codex 审查 (codex exec, diff 级审查, 置信度过滤)
   └── Web UI + API (SPA :18800)
 ```
 
@@ -18,13 +20,14 @@
 ## 当前状态
 
 - [x] 核心循环 (MainLoop v2, brain+worker 模式)
-- [x] ClaudeCodeSession (Claude Code CLI stream-json 封装)
+- [x] ClaudeCodeSession (Agent SDK query() API 封装)
+- [x] Agent SDK 回迁 (v0.2.52 query API + hooks + plugins + 复杂度分级)
 - [x] 巡逻模式 (自动循环, PatrolManager 管理启停)
 - [x] Web UI (SPA, 巡逻控制 + 任务列表)
 - [x] 费用追踪 (daily_costs 表 + CostTracker)
 - [x] Git 分支管理 (自动创建/合并/清理/孤儿分支清理)
 - [x] 硬验证 (tsc 错误计数对比基线)
-- [x] Codex 双重审查 (交叉验证 mustFix/shouldFix)
+- [x] Codex 双重审查 (交叉验证 mustFix/shouldFix, 置信度过滤 ≥0.8)
 - [x] 自修改重启 (safeBuild + exit code 75)
 - [x] 计划对话 (PlanChatManager + ClaudeCodeSession)
 - [x] 始终进化模式 (10 维度 + 模块轮转扫描 + 三层防御)
@@ -70,8 +73,8 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 
 ### 任务执行
 入口: `workerExecute(task)`
-路径: ClaudeCodeSession.run(prompt) → 编码 → git commit → 返回 SessionResult
-关注: timeout 处理, 成本追踪, sessionId 用于 workerFix 续传
+路径: ClaudeCodeSession.run(prompt) → Agent SDK query() → 编码 → git commit → 返回 SessionResult
+关注: timeout 处理, 成本追踪, sessionId 用于 workerFix 续传, complexity 分级控制资源 (S/M/L/XL)
 
 ### 硬验证
 入口: `hardVerify(baselineErrors, startCommit, projectPath)`
@@ -80,7 +83,7 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 
 ### 审查合并
 入口: `mergeReviews(claude, codex)`
-路径: 文件+描述匹配 → 交集提升为 mustFix → 只有 critical/high mustFix 阻止通过
+路径: 文件+描述匹配 → 交集提升为 mustFix → 只有 confidence≥0.8 的 critical/high mustFix 阻止通过
 导出: `mergeReviews()`, `extractIssueCategories()`, `countTscErrors()` (可测试纯函数)
 
 ## 设计原则
@@ -109,3 +112,7 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 - 类型不要重复定义: import 已有类型而不是在本地重新派生, 类型漂移是静默 bug
 - 清理函数改动时: 检查所有 class 级 Map/Set 是否都有对应的 .delete() 清理
 - Brain "nothing to do" 死循环: prompt 不能给 null 出口, 必须提供进化维度和模块聚焦
+- SDK isolation mode 默认不加载任何设置: 必须设置 settingSources: ['user', 'project', 'local']
+- SDK bypassPermissions 必须同时设置 allowDangerouslySkipPermissions: true
+- SDK systemPrompt preset 'claude_code' 获得完整工具链: 不要自定义系统 prompt
+- SDK kill() vs timeout: exitCode -2 = manual kill, -1 = timeout, 用 killed 布尔标志区分

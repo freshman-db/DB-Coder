@@ -4,6 +4,7 @@ import type { CodexBridge } from '../bridges/CodexBridge.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { CostTracker } from '../utils/cost.js';
 import { ClaudeCodeSession, type SessionResult } from '../bridges/ClaudeCodeSession.js';
+import type { SdkExtras } from '../bridges/buildSdkOptions.js';
 import type { Task, SubTaskRecord } from '../memory/types.js';
 import type { MergedReviewResult, LoopState, StatusSnapshot } from './types.js';
 import type { ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
@@ -24,6 +25,13 @@ import { PersonaLoader } from './PersonaLoader.js';
 const PAUSE_INTERVAL_MS = 5000;
 const ERROR_RECOVERY_MS = 30_000;
 const BRANCH_ID_LENGTH = 8;
+
+const COMPLEXITY_CONFIG: Record<string, { maxTurns: number; maxBudget: number; timeout: number }> = {
+  S:  { maxTurns: 15, maxBudget: 1.0, timeout: 300_000 },
+  M:  { maxTurns: 30, maxBudget: 2.0, timeout: 600_000 },
+  L:  { maxTurns: 50, maxBudget: 3.0, timeout: 1_200_000 },
+  XL: { maxTurns: 80, maxBudget: 5.0, timeout: 1_800_000 },
+};
 
 type RunProcessFn = (
   command: string,
@@ -66,8 +74,8 @@ export class MainLoop {
   private stoppedPromise: Promise<void> | null = null;
   private stoppedResolve: (() => void) | null = null;
   private tasksCompleted = 0;
-  private brainSession = new ClaudeCodeSession();
-  private workerSession = new ClaudeCodeSession();
+  private brainSession!: ClaudeCodeSession;
+  private workerSession!: ClaudeCodeSession;
   private discoveredModules: string[] = [];
   private moduleIndex = 0;
   private personaLoader: PersonaLoader;
@@ -79,11 +87,14 @@ export class MainLoop {
     private taskStore: TaskStore,
     private costTracker: CostTracker,
     private eventBus: CycleEventBus = CycleEventBus.noop(),
+    private sdkExtras?: SdkExtras,
   ) {
     const hash = createHash('md5').update(config.projectPath).digest('hex').slice(0, BRANCH_ID_LENGTH);
     const lockDir = join(homedir(), '.db-coder');
     this.lockFile = join(lockDir, `${hash}.lock`);
     this.personaLoader = new PersonaLoader(taskStore, join(config.projectPath, 'personas'));
+    this.brainSession = new ClaudeCodeSession(sdkExtras);
+    this.workerSession = new ClaudeCodeSession(sdkExtras);
   }
 
   private makeEvent(phase: CyclePhase, timing: CycleTiming, data: Record<string, unknown> = {}): CycleEvent {
@@ -253,7 +264,7 @@ export class MainLoop {
     this.setState('scanning');
     const queued = await this.taskQueue.getNext(projectPath);
     let task: Task;
-    let brainOpts: { persona?: string; taskType?: string; subtasks?: Array<{ description: string; order: number }> } | undefined;
+    let brainOpts: { persona?: string; taskType?: string; complexity?: string; subtasks?: Array<{ description: string; order: number }> } | undefined;
 
     if (queued) {
       task = queued;
@@ -306,19 +317,24 @@ export class MainLoop {
       log.info(`Task: ${truncate(decision.taskDescription, TASK_DESC_MAX_LENGTH)}`);
       this.eventBus.emit(this.makeEvent('create-task', 'after', { taskId: task.id, taskDescription: decision.taskDescription }));
 
-      // Store subtasks metadata from brain decision
-      if (decision.subtasks && decision.subtasks.length > 0) {
-        await this.taskStore.updateTask(task.id, {
-          subtasks: decision.subtasks.map((st, i) => ({
+      // Store complexity and subtasks metadata from brain decision
+      if (decision.complexity || (decision.subtasks && decision.subtasks.length > 0)) {
+        const updates: Record<string, unknown> = {};
+        if (decision.complexity) {
+          updates.plan = { complexity: decision.complexity };
+        }
+        if (decision.subtasks && decision.subtasks.length > 0) {
+          updates.subtasks = decision.subtasks.map((st, i) => ({
             id: String(i + 1),
             description: st.description,
             executor: 'claude' as const,
             status: 'pending' as const,
-          })),
-        });
+          }));
+        }
+        await this.taskStore.updateTask(task.id, updates);
       }
 
-      brainOpts = { persona: decision.persona, taskType: decision.taskType, subtasks: decision.subtasks };
+      brainOpts = { persona: decision.persona, taskType: decision.taskType, complexity: decision.complexity, subtasks: decision.subtasks };
     }
 
     // 3. Budget check
@@ -371,6 +387,7 @@ export class MainLoop {
         const result = await this.executeSubtasks(task, brainOpts.subtasks, {
           persona: brainOpts.persona,
           taskType: brainOpts.taskType,
+          complexity: brainOpts.complexity,
           baselineErrors,
           startCommit,
         });
@@ -604,6 +621,7 @@ ${changedFiles.join('\n')}
     priority?: number;
     persona?: string;
     taskType?: string;
+    complexity?: string;
     subtasks?: Array<{ description: string; order: number }>;
     costUsd: number;
   }> {
@@ -645,11 +663,12 @@ ${context}
 - Be specific: name the file, function, or module to change. Vague tasks waste worker time.
 
 Respond with EXACTLY this JSON (no markdown, no extra text):
-{"task": "specific description", "priority": 0-3, "persona": "persona-name", "taskType": "feature|bugfix|refactoring|test|security|performance|frontend|code-quality|docs", "subtasks": [{"description": "subtask 1", "order": 1}], "reasoning": "why"}
+{"task": "specific description", "priority": 0-3, "persona": "persona-name", "taskType": "feature|bugfix|refactoring|test|security|performance|frontend|code-quality|docs", "complexity": "S|M|L|XL", "subtasks": [{"description": "subtask 1", "order": 1}], "reasoning": "why"}
 
-Rules for persona/taskType:
+Rules for persona/taskType/complexity:
 - persona: choose from available personas (feature-builder, refactoring-expert, bugfix-debugger, test-engineer, security-auditor, performance-optimizer, frontend-specialist)
 - taskType: categorize the task (feature, bugfix, refactoring, test, security, performance, frontend, code-quality, docs)
+- complexity: estimate task size (S=small fix, M=typical task, L=multi-file change, XL=large refactor). Default: M
 - subtasks: ONLY for complex tasks that need 2+ independent steps. Most tasks should NOT have subtasks. Each subtask must be independently completable and verifiable.`;
 
     const brainDecideSchema = {
@@ -679,6 +698,8 @@ Rules for persona/taskType:
         priority: typeof parsed.priority === 'number' ? parsed.priority : 2,
         persona: typeof parsed.persona === 'string' ? parsed.persona : undefined,
         taskType: typeof parsed.taskType === 'string' ? parsed.taskType : undefined,
+        complexity: typeof parsed.complexity === 'string' && parsed.complexity in COMPLEXITY_CONFIG
+          ? parsed.complexity : undefined,
         subtasks: Array.isArray(parsed.subtasks) ? parsed.subtasks : undefined,
         costUsd: result.costUsd,
       };
@@ -857,6 +878,7 @@ Respond with EXACTLY this JSON (no markdown):
   private async workerExecute(task: Task, opts?: {
     persona?: string;
     taskType?: string;
+    complexity?: string;
     subtaskDescription?: string;
   }): Promise<SessionResult> {
     const description = opts?.subtaskDescription ?? task.task_description;
@@ -866,12 +888,15 @@ Respond with EXACTLY this JSON (no markdown):
       taskType: opts?.taskType,
     });
 
+    const complexity = opts?.complexity ?? (task.plan as Record<string, unknown> | null)?.complexity as string | undefined;
+    const cConfig = COMPLEXITY_CONFIG[complexity ?? 'M'];
+
     return this.workerSession.run(prompt, {
       permissionMode: 'bypassPermissions',
-      maxTurns: 30,
-      maxBudget: this.config.values.claude.maxTaskBudget,
+      maxTurns: cConfig.maxTurns,
+      maxBudget: Math.min(cConfig.maxBudget, this.config.values.claude.maxTaskBudget),
       cwd: this.config.projectPath,
-      timeout: this.config.values.autonomy.subtaskTimeout * 1000,
+      timeout: cConfig.timeout,
       model: this.config.values.claude.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
       appendSystemPrompt: systemPrompt,
     });
@@ -880,7 +905,7 @@ Respond with EXACTLY this JSON (no markdown):
   private async executeSubtasks(
     task: Task,
     subtasks: Array<{ description: string; order: number }>,
-    opts: { persona?: string; taskType?: string; baselineErrors: number; startCommit: string },
+    opts: { persona?: string; taskType?: string; complexity?: string; baselineErrors: number; startCommit: string },
   ): Promise<{ success: boolean; sessionId?: string }> {
     const sorted = [...subtasks].sort((a, b) => a.order - b.order);
 
@@ -898,6 +923,7 @@ Respond with EXACTLY this JSON (no markdown):
       const result = await this.workerExecute(task, {
         persona: opts.persona,
         taskType: opts.taskType,
+        complexity: opts.complexity,
         subtaskDescription: st.description,
       });
 
@@ -1393,7 +1419,10 @@ export function mergeReviews(claude: ReviewResult, codex: ReviewResult): MergedR
   if (claudeRawFail) shouldFix.push({ description: 'Claude reviewer explicitly failed without structured issues', severity: 'medium', source: 'claude' });
   if (codexRawFail) shouldFix.push({ description: 'Codex reviewer explicitly failed without structured issues', severity: 'medium', source: 'codex' });
 
-  const hasCriticalMustFix = mustFix.some(i => i.severity === 'critical' || i.severity === 'high');
+  const effectiveConfidence = (i: ReviewIssue) => i.confidence ?? 1.0;
+  const hasCriticalMustFix = mustFix.some(
+    i => (i.severity === 'critical' || i.severity === 'high') && effectiveConfidence(i) >= 0.8
+  );
   const hasRawFail = claudeRawFail || codexRawFail;
   const passed = !hasRawFail && (mustFix.length === 0 || !hasCriticalMustFix);
 

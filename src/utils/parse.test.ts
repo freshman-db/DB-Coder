@@ -162,6 +162,7 @@ test('tryParseReview keeps valid issues with accepted severity values', () => {
     line: undefined,
     suggestion: undefined,
     source: 'claude',
+    confidence: undefined,
   });
 });
 
@@ -219,6 +220,22 @@ test('tryParseReview handles empty input safely with fail-closed fallback', () =
     issues: [],
     summary: '',
   });
+});
+
+test('tryParseReview preserves confidence field', () => {
+  const json = JSON.stringify({
+    passed: false,
+    issues: [
+      { severity: 'high', description: 'Bug', confidence: 0.7 },
+      { severity: 'critical', description: 'Real bug', confidence: 0.95 },
+      { severity: 'medium', description: 'No confidence field' },
+    ],
+    summary: 'test',
+  });
+  const result = tryParseReview(json);
+  assert.strictEqual(result.issues[0].confidence, 0.7);
+  assert.strictEqual(result.issues[1].confidence, 0.95);
+  assert.strictEqual(result.issues[2].confidence, undefined);
 });
 
 test('tryParseReview handles non-string input safely with fail-closed fallback', () => {

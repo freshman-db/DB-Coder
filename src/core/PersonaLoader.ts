@@ -33,7 +33,16 @@ export const GLOBAL_WORKER_RULES = `## GLOBAL RULES (non-negotiable)
 - TYPE SAFETY: Do not introduce \`any\` types. Use precise types or \`unknown\` with type guards.
 - VERIFY: Run tsc and tests before your final commit. Do not commit code that doesn't compile.
 - ONE CONCERN: Each commit addresses one logical change. Do not bundle unrelated changes.
-- IMPORTS: Import existing types — do not re-derive or duplicate type definitions.`;
+- IMPORTS: Import existing types — do not re-derive or duplicate type definitions.
+
+## ANTI-RATIONALIZATION
+If you think any of these, STOP:
+| Your thought | Reality |
+| "This is too simple to need tests" | Simple bugs are the hardest to find. Write the test. |
+| "I'll just change it first" | Read CLAUDE.md rules before touching code. |
+| "This change won't affect anything else" | Use find_referencing_symbols to verify. |
+| "Tests pass so it's fine" | tsc pass + test pass + non-empty diff: all three required. |
+| "I know a faster way" | Follow the task description exactly. No shortcuts. |`;
 
 const DEFAULT_PERSONA_CONTENT = `## Identity
 You are a general-purpose coding worker. Execute the task precisely.

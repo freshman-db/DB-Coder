@@ -23,6 +23,7 @@ export interface ReviewIssue {
   line?: number;
   suggestion?: string;
   source: 'claude' | 'codex';
+  confidence?: number;  // 0-1, undefined treated as 1.0
 }
 
 export interface CodingAgent {
