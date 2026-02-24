@@ -44,6 +44,19 @@ export interface SubTaskRecord {
   result?: string;
 }
 
+export interface Persona {
+  id: number;
+  name: string;
+  role: string;
+  content: string;
+  task_types: string[];
+  focus_areas: string[];
+  usage_count: number;
+  success_rate: number;
+  created_at: Date;
+  updated_at: Date;
+}
+
 export interface TaskLog {
   id: number;
   task_id: string;

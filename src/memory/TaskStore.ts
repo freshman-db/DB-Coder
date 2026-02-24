@@ -1,5 +1,5 @@
 import type postgres from 'postgres';
-import type { Task, TaskLog, TaskStatus, ScanResult, PlanDraft, PlanReviewStatus, PlanDraftAnnotation, ChatMessage, ChatStatus, OperationalMetrics } from './types.js';
+import type { Task, TaskLog, TaskStatus, ScanResult, PlanDraft, PlanReviewStatus, PlanDraftAnnotation, ChatMessage, ChatStatus, OperationalMetrics, Persona } from './types.js';
 import type { EvaluationScore } from '../core/types.js';
 import type {
   ChatMessageMetadata,
@@ -193,6 +193,19 @@ CREATE TABLE IF NOT EXISTS scan_modules (
 );
 
 ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS module_name TEXT DEFAULT NULL;
+
+CREATE TABLE IF NOT EXISTS personas (
+  id SERIAL PRIMARY KEY,
+  name TEXT UNIQUE NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  task_types TEXT[] DEFAULT '{}',
+  focus_areas TEXT[] DEFAULT '{}',
+  usage_count INTEGER DEFAULT 0,
+  success_rate REAL DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
 `;
 
 type TaskUpdateInput = Partial<Pick<Task, 'phase' | 'status' | 'plan' | 'subtasks' | 'review_results' | 'iteration' | 'total_cost_usd' | 'git_branch' | 'start_commit'>>
@@ -687,6 +700,49 @@ export class TaskStore {
     await sql`INSERT INTO service_state (project_path, key, value, updated_at)
               VALUES (${projectPath}, ${key}, ${value}, NOW())
               ON CONFLICT (project_path, key) DO UPDATE SET value = ${value}, updated_at = NOW()`;
+  }
+
+  // --- Personas ---
+
+  async getPersona(name: string): Promise<Persona | null> {
+    const sql = this.getSql();
+    const rows = await sql<Persona[]>`SELECT * FROM personas WHERE name = ${name} LIMIT 1`;
+    return rows[0] ?? null;
+  }
+
+  async listPersonas(): Promise<Persona[]> {
+    const sql = this.getSql();
+    return sql<Persona[]>`SELECT * FROM personas ORDER BY name`;
+  }
+
+  async upsertPersona(p: { name: string; role: string; content: string; task_types: string[]; focus_areas: string[] }): Promise<Persona> {
+    const sql = this.getSql();
+    const rows = await sql<Persona[]>`
+      INSERT INTO personas (name, role, content, task_types, focus_areas)
+      VALUES (${p.name}, ${p.role}, ${p.content}, ${p.task_types}, ${p.focus_areas})
+      ON CONFLICT (name) DO UPDATE SET
+        role = EXCLUDED.role,
+        content = EXCLUDED.content,
+        task_types = EXCLUDED.task_types,
+        focus_areas = EXCLUDED.focus_areas,
+        updated_at = NOW()
+      RETURNING *`;
+    return rows[0];
+  }
+
+  async updatePersonaStats(name: string, success: boolean): Promise<void> {
+    const sql = this.getSql();
+    await sql`
+      UPDATE personas SET
+        usage_count = usage_count + 1,
+        success_rate = (success_rate * usage_count + ${success ? 1 : 0}) / (usage_count + 1),
+        updated_at = NOW()
+      WHERE name = ${name}`;
+  }
+
+  async updatePersonaContent(name: string, content: string): Promise<void> {
+    const sql = this.getSql();
+    await sql`UPDATE personas SET content = ${content}, updated_at = NOW() WHERE name = ${name}`;
   }
 
   async close(): Promise<void> {
