@@ -1,42 +1,93 @@
-import type { Config } from '../config/Config.js';
-import type { TaskQueue } from './TaskQueue.js';
-import type { CodexBridge } from '../bridges/CodexBridge.js';
-import type { TaskStore } from '../memory/TaskStore.js';
-import type { CostTracker } from '../utils/cost.js';
-import { ClaudeCodeSession, type SessionResult } from '../bridges/ClaudeCodeSession.js';
-import type { SdkExtras } from '../bridges/buildSdkOptions.js';
-import type { Task, SubTaskRecord } from '../memory/types.js';
-import type { MergedReviewResult, LoopState, StatusSnapshot } from './types.js';
-import type { ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
-import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch, branchExists, getChangedFilesSince, getModifiedAndAddedFiles, mergeBranch, deleteBranch, listBranches, forceDeleteBranch, getDiffStats, getDiffSince } from '../utils/git.js';
-import { log } from '../utils/logger.js';
-import { truncate, extractJsonFromText, isRecord } from '../utils/parse.js';
-import { wordJaccard } from '../utils/similarity.js';
-import { SUMMARY_PREVIEW_LEN, TASK_DESC_MAX_LENGTH } from '../types/constants.js';
-import { readFileSync, existsSync, writeFileSync, mkdirSync, unlinkSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
-import { createHash } from 'node:crypto';
-import { safeBuild } from '../utils/safeBuild.js';
-import { CycleEventBus } from './CycleEventBus.js';
-import type { CycleEvent, CyclePhase, CycleTiming } from './CycleEvents.js';
-import { PersonaLoader } from './PersonaLoader.js';
+import type { Config } from "../config/Config.js";
+import type { TaskQueue } from "./TaskQueue.js";
+import type { CodexBridge } from "../bridges/CodexBridge.js";
+import type { TaskStore } from "../memory/TaskStore.js";
+import type { CostTracker } from "../utils/cost.js";
+import {
+  ClaudeCodeSession,
+  type SessionResult,
+} from "../bridges/ClaudeCodeSession.js";
+import type { SdkExtras } from "../bridges/buildSdkOptions.js";
+import type { Task, SubTaskRecord } from "../memory/types.js";
+import type {
+  MergedReviewResult,
+  LoopState,
+  StatusSnapshot,
+  CycleStep,
+  CycleStepStatus,
+  TaskPlan,
+  PlanTask,
+  TaskType,
+} from "./types.js";
+import { CYCLE_PIPELINE } from "./types.js";
+import type { ReviewResult, ReviewIssue } from "../bridges/CodingAgent.js";
+import {
+  createBranch,
+  switchBranch,
+  commitAll,
+  getHeadCommit,
+  getCurrentBranch,
+  branchExists,
+  getChangedFilesSince,
+  getModifiedAndAddedFiles,
+  mergeBranch,
+  deleteBranch,
+  listBranches,
+  forceDeleteBranch,
+  getDiffStats,
+  getDiffSince,
+} from "../utils/git.js";
+import { log } from "../utils/logger.js";
+import { truncate, extractJsonFromText, isRecord } from "../utils/parse.js";
+import { wordJaccard } from "../utils/similarity.js";
+import {
+  SUMMARY_PREVIEW_LEN,
+  TASK_DESC_MAX_LENGTH,
+} from "../types/constants.js";
+import {
+  readFileSync,
+  existsSync,
+  writeFileSync,
+  mkdirSync,
+  unlinkSync,
+  readdirSync,
+} from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import { createHash } from "node:crypto";
+import { safeBuild } from "../utils/safeBuild.js";
+import { CycleEventBus } from "./CycleEventBus.js";
+import type { CycleEvent, CyclePhase, CycleTiming } from "./CycleEvents.js";
+import {
+  PersonaLoader,
+  formatWorkInstructions,
+  type WorkInstructions,
+  type StructuredWorkInstructions,
+} from "./PersonaLoader.js";
 
 const PAUSE_INTERVAL_MS = 5000;
 const ERROR_RECOVERY_MS = 30_000;
 const BRANCH_ID_LENGTH = 8;
 
-const COMPLEXITY_CONFIG: Record<string, { maxTurns: number; maxBudget: number; timeout: number }> = {
-  S:  { maxTurns: 15, maxBudget: 1.0, timeout: 300_000 },
-  M:  { maxTurns: 30, maxBudget: 2.0, timeout: 600_000 },
-  L:  { maxTurns: 50, maxBudget: 3.0, timeout: 1_200_000 },
-  XL: { maxTurns: 80, maxBudget: 5.0, timeout: 1_800_000 },
+const COMPLEXITY_CONFIG: Record<
+  string,
+  { maxTurns: number; maxBudget: number; timeout: number }
+> = {
+  S: { maxTurns: 30, maxBudget: 2.0, timeout: 600_000 }, // 10 min
+  M: { maxTurns: 60, maxBudget: 4.0, timeout: 1_200_000 }, // 20 min
+  L: { maxTurns: 100, maxBudget: 6.0, timeout: 2_400_000 }, // 40 min
+  XL: { maxTurns: 160, maxBudget: 10.0, timeout: 3_600_000 }, // 60 min
 };
 
 type RunProcessFn = (
   command: string,
   args: string[],
-  options?: { cwd?: string; env?: Record<string, string>; timeout?: number; input?: string },
+  options?: {
+    cwd?: string;
+    env?: Record<string, string>;
+    timeout?: number;
+    input?: string;
+  },
 ) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
 
 type CountTscErrorsDeps = {
@@ -47,14 +98,16 @@ type CountTscErrorsDeps = {
 const defaultCountTscErrorsDeps: CountTscErrorsDeps = {
   existsSync,
   runProcess: async (command, args, options) => {
-    const { runProcess } = await import('../utils/process.js');
+    const { runProcess } = await import("../utils/process.js");
     return runProcess(command, args, options);
   },
 };
 
 let countTscErrorsDeps: CountTscErrorsDeps = defaultCountTscErrorsDeps;
 
-export function setCountTscErrorsDepsForTests(overrides?: Partial<CountTscErrorsDeps>): void {
+export function setCountTscErrorsDepsForTests(
+  overrides?: Partial<CountTscErrorsDeps>,
+): void {
   countTscErrorsDeps = overrides
     ? { ...defaultCountTscErrorsDeps, ...overrides }
     : defaultCountTscErrorsDeps;
@@ -63,10 +116,14 @@ export function setCountTscErrorsDepsForTests(overrides?: Partial<CountTscErrors
 type StatusListener = (status: StatusSnapshot) => void;
 
 export class MainLoop {
-  private state: LoopState = 'idle';
+  private state: LoopState = "idle";
   private running = false;
   private paused = false;
   private currentTaskId: string | null = null;
+  private currentTaskDescription: string | null = null;
+  private cycleNumber = 0;
+  private currentPhase: string | null = null;
+  private cycleSteps: CycleStep[] = [];
   private statusListeners = new Set<StatusListener>();
   private lockFile: string;
   private restartPending = false;
@@ -89,76 +146,148 @@ export class MainLoop {
     private eventBus: CycleEventBus = CycleEventBus.noop(),
     private sdkExtras?: SdkExtras,
   ) {
-    const hash = createHash('md5').update(config.projectPath).digest('hex').slice(0, BRANCH_ID_LENGTH);
-    const lockDir = join(homedir(), '.db-coder');
+    const hash = createHash("md5")
+      .update(config.projectPath)
+      .digest("hex")
+      .slice(0, BRANCH_ID_LENGTH);
+    const lockDir = join(homedir(), ".db-coder");
     this.lockFile = join(lockDir, `${hash}.lock`);
-    this.personaLoader = new PersonaLoader(taskStore, join(config.projectPath, 'personas'));
+    this.personaLoader = new PersonaLoader(
+      taskStore,
+      join(config.projectPath, "personas"),
+    );
     this.brainSession = new ClaudeCodeSession(sdkExtras);
     this.workerSession = new ClaudeCodeSession(sdkExtras);
   }
 
-  private makeEvent(phase: CyclePhase, timing: CycleTiming, data: Record<string, unknown> = {}): CycleEvent {
-    return { phase, timing, taskId: this.currentTaskId ?? undefined, data, timestamp: Date.now() };
+  private makeEvent(
+    phase: CyclePhase,
+    timing: CycleTiming,
+    data: Record<string, unknown> = {},
+  ): CycleEvent {
+    return {
+      phase,
+      timing,
+      taskId: this.currentTaskId ?? undefined,
+      data,
+      timestamp: Date.now(),
+    };
   }
 
   // --- Public interface (backward compatible) ---
 
-  getState(): LoopState { return this.state; }
-  getCurrentTaskId(): string | null { return this.currentTaskId; }
-  isPaused(): boolean { return this.paused; }
-  isRunning(): boolean { return this.running; }
+  getState(): LoopState {
+    return this.state;
+  }
+  getCurrentTaskId(): string | null {
+    return this.currentTaskId;
+  }
+  isPaused(): boolean {
+    return this.paused;
+  }
+  isRunning(): boolean {
+    return this.running;
+  }
+
+  /** Return a full status snapshot for initial SSE push. */
+  getStatusSnapshot(): StatusSnapshot {
+    return {
+      state: this.state,
+      currentTaskId: this.currentTaskId,
+      patrolling: this.running,
+      paused: this.paused,
+      cycleNumber: this.cycleNumber,
+      currentPhase: this.currentPhase ?? undefined,
+      cycleSteps: [...this.cycleSteps],
+      taskDescription: this.currentTaskDescription ?? undefined,
+    };
+  }
 
   onRestart(listener: () => void): () => void {
     this.restartListeners.add(listener);
-    return () => { this.restartListeners.delete(listener); };
+    return () => {
+      this.restartListeners.delete(listener);
+    };
   }
 
   addStatusListener(listener: StatusListener): () => void {
     this.statusListeners.add(listener);
-    return () => { this.statusListeners.delete(listener); };
+    return () => {
+      this.statusListeners.delete(listener);
+    };
   }
 
-  pause(): void { this.setPaused(true); log.info('Loop paused'); }
-  resume(): void { this.setPaused(false); log.info('Loop resumed'); }
+  pause(): void {
+    this.setPaused(true);
+    log.info("Loop paused");
+  }
+  resume(): void {
+    this.setPaused(false);
+    log.info("Loop resumed");
+  }
 
   // Legacy setters — kept for backward compatibility, no-ops in v2
-  setEvolutionEngine(_engine: unknown): void { /* no-op in v2 */ }
-  setPluginMonitor(_monitor: unknown): void { /* no-op in v2 */ }
-  setPromptRegistry(_registry: unknown): void { /* no-op in v2 */ }
+  setEvolutionEngine(_engine: unknown): void {
+    /* no-op in v2 */
+  }
+  setPluginMonitor(_monitor: unknown): void {
+    /* no-op in v2 */
+  }
+  setPromptRegistry(_registry: unknown): void {
+    /* no-op in v2 */
+  }
 
   /** Run a manual scan via brain session (not allowed while patrol is running) */
-  async triggerScan(depth: 'quick' | 'normal' | 'deep' = 'normal'): Promise<void> {
-    if (this.running) throw new Error('Cannot trigger manual scan while patrol loop is running');
-    this.setState('scanning');
+  async triggerScan(
+    depth: "quick" | "normal" | "deep" = "normal",
+  ): Promise<void> {
+    if (this.running)
+      throw new Error(
+        "Cannot trigger manual scan while patrol loop is running",
+      );
+    this.setState("scanning");
     try {
-      const result = await this.brainThink(`Scan this project at "${depth}" depth. Identify issues and opportunities but do NOT create tasks. Just report what you find.`);
+      const result = await this.brainThink(
+        `Scan this project at "${depth}" depth. Identify issues and opportunities but do NOT create tasks. Just report what you find.`,
+      );
       if (result.costUsd > 0) await this.taskStore.addDailyCost(result.costUsd);
     } finally {
-      this.setState('idle');
+      this.setState("idle");
     }
   }
 
   /** Manually trigger module identification — delegates to brain */
   async triggerIdentifyModules(): Promise<void> {
-    if (this.running) throw new Error('Cannot identify modules while patrol loop is running');
-    this.setState('scanning');
+    if (this.running)
+      throw new Error("Cannot identify modules while patrol loop is running");
+    this.setState("scanning");
     try {
-      const result = await this.brainThink('Identify the functional modules/chains in this project. Update CLAUDE.md with the chain definitions.');
+      const result = await this.brainThink(
+        "Identify the functional modules/chains in this project. Update CLAUDE.md with the chain definitions.",
+      );
       if (result.costUsd > 0) await this.taskStore.addDailyCost(result.costUsd);
     } finally {
-      this.setState('idle');
+      this.setState("idle");
     }
   }
 
   /** Manually trigger a single module scan */
-  async triggerModuleScan(moduleName: string, _depth: 'quick' | 'normal' = 'normal'): Promise<void> {
-    if (this.running) throw new Error('Cannot trigger module scan while patrol loop is running');
-    this.setState('scanning');
+  async triggerModuleScan(
+    moduleName: string,
+    _depth: "quick" | "normal" = "normal",
+  ): Promise<void> {
+    if (this.running)
+      throw new Error(
+        "Cannot trigger module scan while patrol loop is running",
+      );
+    this.setState("scanning");
     try {
-      const result = await this.brainThink(`Deep scan the "${moduleName}" functional chain. Trace data flow from entry point, check edge cases, error handling, and data transformations.`);
+      const result = await this.brainThink(
+        `Deep scan the "${moduleName}" functional chain. Trace data flow from entry point, check edge cases, error handling, and data transformations.`,
+      );
       if (result.costUsd > 0) await this.taskStore.addDailyCost(result.costUsd);
     } finally {
-      this.setState('idle');
+      this.setState("idle");
     }
   }
 
@@ -168,18 +297,23 @@ export class MainLoop {
     if (this.running) return;
     if (this.stoppedPromise) await this.waitForStopped();
     if (!this.acquireLock()) {
-      log.error('Another instance is running. Lock file: ' + this.lockFile);
+      log.error("Another instance is running. Lock file: " + this.lockFile);
       return;
     }
 
     this.setRunning(true);
-    this.stoppedPromise = new Promise<void>(resolve => { this.stoppedResolve = resolve; });
-    log.info('Main loop started');
+    this.stoppedPromise = new Promise<void>((resolve) => {
+      this.stoppedResolve = resolve;
+    });
+    log.info("Main loop started");
 
     // Recover zombie tasks from previous crash
     try {
-      const recovered = await this.taskStore.recoverActiveTasks(this.config.projectPath);
-      if (recovered > 0) log.warn(`Recovered ${recovered} active task(s) back to queued`);
+      const recovered = await this.taskStore.recoverActiveTasks(
+        this.config.projectPath,
+      );
+      if (recovered > 0)
+        log.warn(`Recovered ${recovered} active task(s) back to queued`);
     } catch (err) {
       log.warn(`Failed to recover active tasks: ${err}`);
     }
@@ -202,7 +336,7 @@ export class MainLoop {
     try {
       while (this.running) {
         if (this.paused) {
-          this.setState('paused');
+          this.setState("paused");
           await sleep(PAUSE_INTERVAL_MS);
           continue;
         }
@@ -211,31 +345,37 @@ export class MainLoop {
         try {
           wasProductive = await this.runCycle();
         } catch (err) {
-          log.error('Cycle error', err);
-          this.setState('error');
+          log.error("Cycle error", err);
+          this.setState("error");
           await sleep(ERROR_RECOVERY_MS);
         }
 
         if (this.restartPending) {
-          log.info('Restart pending after self-build, exiting loop');
+          log.info("Restart pending after self-build, exiting loop");
           break;
         }
 
         // Productive cycle → short pause then continue; idle → scanInterval
-        await sleep(wasProductive ? 10_000 : this.config.values.brain.scanInterval * 1000);
+        await sleep(
+          wasProductive ? 10_000 : this.config.values.brain.scanInterval * 1000,
+        );
       }
     } finally {
       this.releaseLock();
       this.setRunning(false);
-      this.setState('idle');
-      log.info('Main loop stopped');
+      this.setState("idle");
+      log.info("Main loop stopped");
       this.stoppedResolve?.();
       this.stoppedResolve = null;
       this.stoppedPromise = null;
 
       if (this.restartPending) {
         for (const listener of this.restartListeners) {
-          try { listener(); } catch { /* ignore */ }
+          try {
+            listener();
+          } catch {
+            /* ignore */
+          }
         }
       }
     }
@@ -250,39 +390,88 @@ export class MainLoop {
   async waitForStopped(timeoutMs = 120_000): Promise<void> {
     if (!this.stoppedPromise) return;
     const timeout = new Promise<void>((_, reject) =>
-      setTimeout(() => reject(new Error('Timeout waiting for MainLoop to stop')), timeoutMs),
+      setTimeout(
+        () => reject(new Error("Timeout waiting for MainLoop to stop")),
+        timeoutMs,
+      ),
     );
-    await Promise.race([this.stoppedPromise, timeout]).catch(err => { log.warn(`${err}`); });
+    await Promise.race([this.stoppedPromise, timeout]).catch((err) => {
+      log.warn(`${err}`);
+    });
   }
 
   // --- Core cycle: Brain → Worker → Verify → Review → Reflect ---
 
   async runCycle(): Promise<boolean> {
     const projectPath = this.config.projectPath;
+    this.resetCycleSteps();
 
     // 0. Drain queued tasks first — skip brain entirely if work is waiting
-    this.setState('scanning');
+    this.setState("scanning");
+    this.beginStep("decide");
     const queued = await this.taskQueue.getNext(projectPath);
     let task: Task;
-    let brainOpts: { persona?: string; taskType?: string; complexity?: string; subtasks?: Array<{ description: string; order: number }> } | undefined;
+    let brainOpts:
+      | {
+          persona?: string;
+          taskType?: string;
+          complexity?: string;
+          subtasks?: Array<{ description: string; order: number }>;
+          workInstructions?: WorkInstructions;
+        }
+      | undefined;
 
     if (queued) {
       task = queued;
-      await this.taskStore.updateTask(task.id, { status: 'active', phase: 'executing' });
+      await this.taskStore.updateTask(task.id, {
+        status: "active",
+        phase: "executing",
+      });
       this.setCurrentTaskId(task.id);
-      log.info(`Queue pickup: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`);
-      this.eventBus.emit(this.makeEvent('decide', 'after', { taskDescription: task.task_description }));
+
+      // Reconstruct brainOpts from stored plan (JSONB)
+      const plan = task.plan as Record<string, unknown> | null;
+      if (plan) {
+        brainOpts = {
+          persona: typeof plan.persona === "string" ? plan.persona : undefined,
+          taskType: typeof plan.type === "string" ? plan.type : undefined,
+          complexity:
+            typeof plan.estimatedComplexity === "string"
+              ? (
+                  { low: "S", medium: "M", high: "L" } as Record<string, string>
+                )[plan.estimatedComplexity]
+              : undefined,
+          workInstructions:
+            typeof plan.workInstructions === "string"
+              ? plan.workInstructions
+              : undefined,
+        };
+      }
+
+      log.info(
+        `Queue pickup: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`,
+      );
+      this.currentTaskDescription = task.task_description;
+      this.eventBus.emit(
+        this.makeEvent("decide", "after", {
+          taskDescription: task.task_description,
+        }),
+      );
+      this.endStep("decide", "done", "Queue pickup");
+      this.endStep("create-task", "skipped");
     } else {
       // 1. Brain decides what to do
-      this.eventBus.emit(this.makeEvent('decide', 'before'));
+      this.eventBus.emit(this.makeEvent("decide", "before"));
       let decision = await this.brainDecide(projectPath);
-      if (decision.costUsd > 0) await this.taskStore.addDailyCost(decision.costUsd);
+      if (decision.costUsd > 0)
+        await this.taskStore.addDailyCost(decision.costUsd);
 
       // Layer 2: directive fallback if brain returned null
       if (!decision.taskDescription) {
-        log.warn('Brain returned no task — retrying with directive prompt');
+        log.warn("Brain returned no task — retrying with directive prompt");
         const directive = await this.brainDecideDirective(projectPath);
-        if (directive.costUsd > 0) await this.taskStore.addDailyCost(directive.costUsd);
+        if (directive.costUsd > 0)
+          await this.taskStore.addDailyCost(directive.costUsd);
         if (directive.taskDescription) {
           decision = directive;
         }
@@ -290,35 +479,81 @@ export class MainLoop {
 
       // Layer 3: if still null, short sleep will retry (handled by start())
       if (!decision.taskDescription) {
-        log.warn('Brain: no task after directive retry. Short sleep then retry.');
-        this.setState('idle');
+        log.warn(
+          "Brain: no task after directive retry. Short sleep then retry.",
+        );
+        this.endStep("decide", "failed", "No task found");
+        this.skipRemainingSteps("decide");
+        this.setState("idle");
         return false;
       }
 
       // Dedup check: avoid creating duplicate or recently-failed tasks
-      const similar = await this.taskStore.findSimilarTask(projectPath, decision.taskDescription);
-      if (similar && (similar.status === 'queued' || similar.status === 'active' || similar.status === 'done')) {
-        log.info(`Dedup: skipping task similar to [${similar.status}] "${truncate(similar.task_description, 80)}"`);
-        this.setState('idle');
+      const similar = await this.taskStore.findSimilarTask(
+        projectPath,
+        decision.taskDescription,
+      );
+      if (
+        similar &&
+        (similar.status === "queued" ||
+          similar.status === "active" ||
+          similar.status === "done")
+      ) {
+        log.info(
+          `Dedup: skipping task similar to [${similar.status}] "${truncate(similar.task_description, 80)}"`,
+        );
+        this.endStep("decide", "skipped", "Dedup");
+        this.skipRemainingSteps("decide");
+        this.setState("idle");
         return false;
       }
-      if (await this.taskStore.hasRecentlyFailedSimilar(projectPath, decision.taskDescription)) {
-        log.info(`Cooldown: skipping task similar to recently failed one: "${truncate(decision.taskDescription, 80)}"`);
-        this.setState('idle');
+      if (
+        await this.taskStore.hasRecentlyFailedSimilar(
+          projectPath,
+          decision.taskDescription,
+        )
+      ) {
+        log.info(
+          `Cooldown: skipping task similar to recently failed one: "${truncate(decision.taskDescription, 80)}"`,
+        );
+        this.endStep("decide", "skipped", "Cooldown");
+        this.skipRemainingSteps("decide");
+        this.setState("idle");
         return false;
       }
 
-      this.eventBus.emit(this.makeEvent('decide', 'after', { taskDescription: decision.taskDescription }));
+      this.currentTaskDescription = decision.taskDescription;
+      this.eventBus.emit(
+        this.makeEvent("decide", "after", {
+          taskDescription: decision.taskDescription,
+        }),
+      );
+      this.endStep("decide", "done");
 
       // 2. Create task record
-      this.setState('planning');
-      task = await this.taskStore.createTask(projectPath, decision.taskDescription, decision.priority ?? 2);
+      this.beginStep("create-task");
+      this.setState("planning");
+      task = await this.taskStore.createTask(
+        projectPath,
+        decision.taskDescription,
+        decision.priority ?? 2,
+      );
       this.setCurrentTaskId(task.id);
-      log.info(`Task: ${truncate(decision.taskDescription, TASK_DESC_MAX_LENGTH)}`);
-      this.eventBus.emit(this.makeEvent('create-task', 'after', { taskId: task.id, taskDescription: decision.taskDescription }));
+      log.info(
+        `Task: ${truncate(decision.taskDescription, TASK_DESC_MAX_LENGTH)}`,
+      );
+      this.eventBus.emit(
+        this.makeEvent("create-task", "after", {
+          taskId: task.id,
+          taskDescription: decision.taskDescription,
+        }),
+      );
 
       // Store complexity and subtasks metadata from brain decision
-      if (decision.complexity || (decision.subtasks && decision.subtasks.length > 0)) {
+      if (
+        decision.complexity ||
+        (decision.subtasks && decision.subtasks.length > 0)
+      ) {
         const updates: Record<string, unknown> = {};
         if (decision.complexity) {
           updates.plan = { complexity: decision.complexity };
@@ -327,30 +562,85 @@ export class MainLoop {
           updates.subtasks = decision.subtasks.map((st, i) => ({
             id: String(i + 1),
             description: st.description,
-            executor: 'claude' as const,
-            status: 'pending' as const,
+            executor: "claude" as const,
+            status: "pending" as const,
           }));
         }
         await this.taskStore.updateTask(task.id, updates);
       }
 
-      brainOpts = { persona: decision.persona, taskType: decision.taskType, complexity: decision.complexity, subtasks: decision.subtasks };
+      brainOpts = {
+        persona: decision.persona,
+        taskType: decision.taskType,
+        complexity: decision.complexity,
+        subtasks: decision.subtasks,
+        workInstructions: decision.workInstructions,
+      };
+
+      // Enqueue extra tasks from brain's batch output
+      if (decision.extraTasks && decision.extraTasks.length > 0) {
+        try {
+          const planTasks: PlanTask[] = decision.extraTasks.map((et, i) => ({
+            id: `extra-${i + 1}`,
+            description: et.task,
+            priority: et.priority ?? 2,
+            executor: "claude" as const,
+            subtasks: (et.subtasks ?? []).map((st, si) => ({
+              id: `extra-${i + 1}-sub-${si + 1}`,
+              description: st.description,
+              executor: "claude" as const,
+            })),
+            dependsOn: [],
+            estimatedComplexity:
+              (
+                { S: "low", M: "medium", L: "high", XL: "high" } as Record<
+                  string,
+                  "low" | "medium" | "high"
+                >
+              )[et.complexity ?? "M"] ?? "medium",
+            type: et.taskType as TaskType | undefined,
+            // BMAD: pass through workInstructions + persona to queue
+            workInstructions: et.workInstructions
+              ? typeof et.workInstructions === "string"
+                ? et.workInstructions
+                : formatWorkInstructions(et.workInstructions) || undefined
+              : undefined,
+            persona: et.persona,
+          }));
+          const plan: TaskPlan = {
+            tasks: planTasks,
+            reasoning: "Extra tasks from brain batch output",
+          };
+          const enqueuedIds = await this.taskQueue.enqueue(projectPath, plan);
+          if (enqueuedIds.length > 0) {
+            log.info(
+              `Enqueued ${enqueuedIds.length} extra task(s) from brain batch`,
+            );
+          }
+        } catch (err) {
+          log.warn(`Failed to enqueue extra tasks: ${err}`);
+        }
+      }
+
+      this.endStep("create-task", "done");
     }
 
     // 3. Budget check
     if (await this.checkBudgetOrAbort(task.id)) {
+      this.skipRemainingSteps();
       this.setCurrentTaskId(null);
-      this.setState('idle');
+      this.currentTaskDescription = null;
+      this.setState("idle");
       return false;
     }
 
     const branchName = `${this.config.values.git.branchPrefix}${task.id.slice(0, BRANCH_ID_LENGTH)}`;
-    let originalBranch = 'main';
+    let originalBranch = "main";
 
     try {
       // 4. Prepare git branch
-      originalBranch = await getCurrentBranch(projectPath).catch(() => 'main');
-      const startCommit = await getHeadCommit(projectPath).catch(() => '');
+      originalBranch = await getCurrentBranch(projectPath).catch(() => "main");
+      const startCommit = await getHeadCommit(projectPath).catch(() => "");
       const baselineErrors = await countTscErrors(projectPath);
 
       if (await branchExists(branchName, projectPath)) {
@@ -360,27 +650,40 @@ export class MainLoop {
       }
 
       await this.taskStore.updateTask(task.id, {
-        status: 'active',
-        phase: 'executing',
+        status: "active",
+        phase: "executing",
         git_branch: branchName,
         start_commit: startCommit,
       });
 
       // 5. Execute (subtask loop or single shot)
-      this.setState('executing');
-      const guardErrors = await this.eventBus.emitAndWait(this.makeEvent('execute', 'before', { taskDescription: task.task_description }));
+      this.beginStep("execute");
+      this.setState("executing");
+      const guardErrors = await this.eventBus.emitAndWait(
+        this.makeEvent("execute", "before", {
+          taskDescription: task.task_description,
+        }),
+      );
       if (guardErrors.length > 0) {
         log.warn(`Guard blocked execution: ${guardErrors[0].message}`);
-        await this.taskStore.updateTask(task.id, { status: 'blocked', phase: 'blocked' });
+        this.endStep("execute", "failed", "Guard blocked");
+        this.skipRemainingSteps("execute");
+        await this.taskStore.updateTask(task.id, {
+          status: "blocked",
+          phase: "blocked",
+        });
         await switchBranch(originalBranch, projectPath).catch(() => {});
         await this.cleanupTaskBranch(branchName);
         this.setCurrentTaskId(null);
-        this.setState('idle');
+        this.currentTaskDescription = null;
+        this.setState("idle");
         return false;
       }
 
       let workerPassed: boolean;
-      const verification: { passed: boolean; reason?: string } = { passed: true };
+      const verification: { passed: boolean; reason?: string } = {
+        passed: true,
+      };
 
       if (brainOpts?.subtasks && brainOpts.subtasks.length > 0) {
         // Subtask execution loop
@@ -388,72 +691,135 @@ export class MainLoop {
           persona: brainOpts.persona,
           taskType: brainOpts.taskType,
           complexity: brainOpts.complexity,
+          workInstructions: brainOpts.workInstructions,
           baselineErrors,
           startCommit,
         });
         workerPassed = result.success;
         verification.passed = result.success;
-        if (!result.success) verification.reason = 'Subtask verification failed';
-        this.eventBus.emit(this.makeEvent('execute', 'after', { startCommit, result: { costUsd: 0, durationMs: 0 } }));
+        if (!result.success)
+          verification.reason = "Subtask verification failed";
+        this.endStep("execute", result.success ? "done" : "failed");
+        this.endStep(
+          "verify",
+          result.success ? "done" : "failed",
+          verification.reason,
+        );
+        this.eventBus.emit(
+          this.makeEvent("execute", "after", {
+            startCommit,
+            result: { costUsd: 0, durationMs: 0 },
+          }),
+        );
       } else {
         // Single-shot execution (existing flow)
         const workerResult = await this.workerExecute(task, brainOpts);
-        if (workerResult.costUsd > 0) await this.costTracker.addCost(task.id, workerResult.costUsd);
+        if (workerResult.costUsd > 0)
+          await this.costTracker.addCost(task.id, workerResult.costUsd);
 
         await this.taskStore.addLog({
           task_id: task.id,
-          phase: 'execute',
-          agent: 'claude-code',
+          phase: "execute",
+          agent: "claude-code",
           input_summary: truncate(task.task_description, SUMMARY_PREVIEW_LEN),
           output_summary: workerResult.text.slice(0, SUMMARY_PREVIEW_LEN),
           cost_usd: workerResult.costUsd,
           duration_ms: workerResult.durationMs,
         });
-        this.eventBus.emit(this.makeEvent('execute', 'after', { startCommit, result: { costUsd: workerResult.costUsd, durationMs: workerResult.durationMs } }));
+        this.endStep("execute", "done");
+        this.eventBus.emit(
+          this.makeEvent("execute", "after", {
+            startCommit,
+            result: {
+              costUsd: workerResult.costUsd,
+              durationMs: workerResult.durationMs,
+            },
+          }),
+        );
 
         // Hard verification
-        this.setState('reviewing');
+        this.beginStep("verify");
+        this.setState("reviewing");
         const verifyStart = Date.now();
-        const singleVerify = await this.hardVerify(baselineErrors, startCommit, projectPath);
+        const singleVerify = await this.hardVerify(
+          baselineErrors,
+          startCommit,
+          projectPath,
+        );
         await this.taskStore.addLog({
           task_id: task.id,
-          phase: 'verify',
-          agent: 'tsc',
+          phase: "verify",
+          agent: "tsc",
           input_summary: `baseline=${baselineErrors}, startCommit=${startCommit}`,
-          output_summary: singleVerify.passed ? 'PASS' : `FAIL: ${singleVerify.reason}`,
+          output_summary: singleVerify.passed
+            ? "PASS"
+            : `FAIL: ${singleVerify.reason}`,
           cost_usd: 0,
           duration_ms: Date.now() - verifyStart,
         });
-        this.eventBus.emit(this.makeEvent('verify', 'after', { verification: singleVerify, startCommit }));
+        this.eventBus.emit(
+          this.makeEvent("verify", "after", {
+            verification: singleVerify,
+            startCommit,
+          }),
+        );
 
         // HALT retry loop: fix up to maxRetries times
         const maxRetries = this.config.values.autonomy.maxRetries;
         let fixAttempts = 0;
         let currentSessionId = workerResult.sessionId;
 
-        while (!singleVerify.passed && currentSessionId && fixAttempts < maxRetries) {
+        while (
+          !singleVerify.passed &&
+          currentSessionId &&
+          fixAttempts < maxRetries
+        ) {
           fixAttempts++;
-          log.warn(`Hard verification failed (attempt ${fixAttempts}/${maxRetries}): ${singleVerify.reason}`);
-          const fixResult = await this.workerFix(currentSessionId, singleVerify.reason ?? 'Unknown error', task);
-          if (fixResult.costUsd > 0) await this.costTracker.addCost(task.id, fixResult.costUsd);
+          log.warn(
+            `Hard verification failed (attempt ${fixAttempts}/${maxRetries}): ${singleVerify.reason}`,
+          );
+          const fixResult = await this.workerFix(
+            currentSessionId,
+            singleVerify.reason ?? "Unknown error",
+            task,
+          );
+          if (fixResult.costUsd > 0)
+            await this.costTracker.addCost(task.id, fixResult.costUsd);
           currentSessionId = fixResult.sessionId ?? currentSessionId;
 
-          const changedFilesForCommit = await getModifiedAndAddedFiles(projectPath).catch(() => []);
-          await commitAll('db-coder: fix verification issues', projectPath, changedFilesForCommit).catch(() => {});
-          const reVerify = await this.hardVerify(baselineErrors, startCommit, projectPath);
+          const changedFilesForCommit = await getModifiedAndAddedFiles(
+            projectPath,
+          ).catch(() => []);
+          await commitAll(
+            "db-coder: fix verification issues",
+            projectPath,
+            changedFilesForCommit,
+          ).catch(() => {});
+          const reVerify = await this.hardVerify(
+            baselineErrors,
+            startCommit,
+            projectPath,
+          );
           singleVerify.passed = reVerify.passed;
           singleVerify.reason = reVerify.reason;
-          this.eventBus.emit(this.makeEvent('fix', 'after', { verification: singleVerify }));
+          this.eventBus.emit(
+            this.makeEvent("fix", "after", { verification: singleVerify }),
+          );
         }
 
         if (!singleVerify.passed && fixAttempts >= maxRetries) {
-          log.warn(`HALT after ${fixAttempts} fix attempts: ${singleVerify.reason}`);
+          log.warn(
+            `HALT after ${fixAttempts} fix attempts: ${singleVerify.reason}`,
+          );
           if (brainOpts?.persona) {
             await this.taskStore.addLog({
-              task_id: task.id, phase: 'halt-learning', agent: 'system',
+              task_id: task.id,
+              phase: "halt-learning",
+              agent: "system",
               input_summary: `persona=${brainOpts.persona}`,
               output_summary: `HALT triggered: ${singleVerify.reason} (after ${fixAttempts} attempts)`,
-              cost_usd: 0, duration_ms: 0,
+              cost_usd: 0,
+              duration_ms: 0,
             });
           }
         }
@@ -461,32 +827,50 @@ export class MainLoop {
         workerPassed = singleVerify.passed;
         verification.passed = singleVerify.passed;
         verification.reason = singleVerify.reason;
+        this.endStep(
+          "verify",
+          singleVerify.passed ? "done" : "failed",
+          singleVerify.reason,
+        );
       }
 
       // 7.5 Spec compliance review (Stage 1)
       let specReviewPassed = true;
       if (workerPassed) {
-        this.setState('reviewing');
-        const spec = await this.specReview(task, startCommit, projectPath);
+        this.setState("reviewing");
+        const spec = await this.specReview(
+          task,
+          startCommit,
+          projectPath,
+          brainOpts?.workInstructions,
+        );
         specReviewPassed = spec.passed;
         if (!specReviewPassed) {
-          log.info(`Spec review: FAIL — missing: ${spec.missing.join(', ')}, extra: ${spec.extra.join(', ')}`);
+          log.info(
+            `Spec review: FAIL — missing: ${spec.missing.join(", ")}, extra: ${spec.extra.join(", ")}`,
+          );
         } else {
-          log.info(`Spec review: PASS${spec.concerns.length > 0 ? ` (concerns: ${spec.concerns.join(', ')})` : ''}`);
+          log.info(
+            `Spec review: PASS${spec.concerns.length > 0 ? ` (concerns: ${spec.concerns.join(", ")})` : ""}`,
+          );
         }
       }
 
       // 8. Codex review (only if worker + spec passed)
+      this.beginStep("review");
       let codexReviewPassed = true;
       if (workerPassed && specReviewPassed) {
-        const changedFiles = await getChangedFilesSince(startCommit, projectPath).catch(() => []);
+        const changedFiles = await getChangedFilesSince(
+          startCommit,
+          projectPath,
+        ).catch(() => []);
         if (changedFiles.length > 0) {
           const reviewStart = Date.now();
           const codexReview = await this.codex.review(
             `You are an adversarial code reviewer. Presume issues exist — find them.
 
 ## Changed Files
-${changedFiles.join('\n')}
+${changedFiles.join("\n")}
 
 ## Review Focus Areas
 
@@ -520,29 +904,41 @@ ${changedFiles.join('\n')}
 - Be concrete — cite specific code patterns, not vague concerns.`,
             projectPath,
           );
-          if (codexReview.cost_usd > 0) await this.costTracker.addCost(task.id, codexReview.cost_usd);
+          if (codexReview.cost_usd > 0)
+            await this.costTracker.addCost(task.id, codexReview.cost_usd);
           codexReviewPassed = codexReview.passed;
 
           // Store review results and log for traceability
           const reviewIssues = codexReview.issues ?? [];
-          await this.taskStore.updateTask(task.id, { review_results: reviewIssues });
+          await this.taskStore.updateTask(task.id, {
+            review_results: reviewIssues,
+          });
           if (!codexReview.passed) {
-            log.info(`Codex review: FAIL — ${codexReview.summary}`, { issues: reviewIssues.length, summary: codexReview.summary });
+            log.info(`Codex review: FAIL — ${codexReview.summary}`, {
+              issues: reviewIssues.length,
+              summary: codexReview.summary,
+            });
           } else {
             log.info(`Codex review: PASS — ${codexReview.summary}`);
           }
           // Warn on suspicious parse failure (no issues but failed = likely parse error)
           if (!codexReview.passed && reviewIssues.length === 0) {
-            log.warn('Codex review returned passed=false with zero issues — likely output parse failure, treating as PASS');
+            log.warn(
+              "Codex review returned passed=false with zero issues — likely output parse failure, treating as PASS",
+            );
             codexReviewPassed = true;
           }
 
           await this.taskStore.addLog({
             task_id: task.id,
-            phase: 'review',
-            agent: 'codex',
-            input_summary: `files: ${changedFiles.join(', ').slice(0, SUMMARY_PREVIEW_LEN)}`,
-            output_summary: `${codexReviewPassed ? 'PASS' : 'FAIL'}: ${codexReview.summary ?? ''}`.slice(0, SUMMARY_PREVIEW_LEN),
+            phase: "review",
+            agent: "codex",
+            input_summary: `files: ${changedFiles.join(", ").slice(0, SUMMARY_PREVIEW_LEN)}`,
+            output_summary:
+              `${codexReviewPassed ? "PASS" : "FAIL"}: ${codexReview.summary ?? ""}`.slice(
+                0,
+                SUMMARY_PREVIEW_LEN,
+              ),
             cost_usd: codexReview.cost_usd,
             duration_ms: Date.now() - reviewStart,
           });
@@ -551,29 +947,56 @@ ${changedFiles.join('\n')}
 
       // 9. Decide: merge or discard
       const shouldMerge = workerPassed && specReviewPassed && codexReviewPassed;
-      this.eventBus.emit(this.makeEvent('review', 'after', { passed: codexReviewPassed }));
+      this.endStep(
+        "review",
+        shouldMerge ? "done" : "failed",
+        shouldMerge ? "PASS" : "Review rejected",
+      );
+      this.eventBus.emit(
+        this.makeEvent("review", "after", { passed: codexReviewPassed }),
+      );
 
       // 10. Brain reflects and learns
-      this.setState('reflecting');
-      const outcome = shouldMerge ? 'success' : 'failed';
-      await this.brainReflect(task, outcome, verification, projectPath, brainOpts?.persona);
-      this.eventBus.emit(this.makeEvent('reflect', 'after'));
+      this.beginStep("reflect");
+      this.setState("reflecting");
+      const outcome = shouldMerge ? "success" : "failed";
+      await this.brainReflect(
+        task,
+        outcome,
+        verification,
+        projectPath,
+        brainOpts?.persona,
+      );
+      this.eventBus.emit(this.makeEvent("reflect", "after"));
+      this.endStep("reflect", "done");
 
       // 11. Merge or cleanup
+      this.beginStep("merge");
       if (shouldMerge) {
         await switchBranch(originalBranch, projectPath);
         await mergeBranch(branchName, projectPath);
         await deleteBranch(branchName, projectPath);
-        log.info(`Task completed and merged: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`);
-        await this.taskStore.updateTask(task.id, { status: 'done', phase: 'done' });
-        this.eventBus.emit(this.makeEvent('merge', 'after', { merged: true, taskDescription: task.task_description }));
+        log.info(
+          `Task completed and merged: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`,
+        );
+        await this.taskStore.updateTask(task.id, {
+          status: "done",
+          phase: "done",
+        });
+        this.endStep("merge", "done", "Merged");
+        this.eventBus.emit(
+          this.makeEvent("merge", "after", {
+            merged: true,
+            taskDescription: task.task_description,
+          }),
+        );
 
         // Self-modification: rebuild after merging own code changes
         if (this.isSelfProject()) {
           const buildResult = await safeBuild(projectPath);
           if (buildResult.success) {
             this.restartPending = true;
-            log.info('Self-build succeeded, restart pending');
+            log.info("Self-build succeeded, restart pending");
           } else {
             this.writeBuildError(buildResult.error);
           }
@@ -581,36 +1004,67 @@ ${changedFiles.join('\n')}
       } else {
         await switchBranch(originalBranch, projectPath).catch(() => {});
         await this.cleanupTaskBranch(branchName);
-        log.warn(`Task rejected: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`);
-        await this.taskStore.updateTask(task.id, { status: 'blocked', phase: 'blocked' });
-        this.eventBus.emit(this.makeEvent('merge', 'after', { merged: false }));
+        log.warn(
+          `Task rejected: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`,
+        );
+        await this.taskStore.updateTask(task.id, {
+          status: "blocked",
+          phase: "blocked",
+        });
+        this.endStep("merge", "failed", "Rejected");
+        this.eventBus.emit(this.makeEvent("merge", "after", { merged: false }));
       }
 
       // 12. Periodic deep chain review
       this.tasksCompleted++;
       if (this.tasksCompleted % 5 === 0) {
-        try { await this.deepChainReview(projectPath); }
-        catch (err) { log.warn('Deep chain review failed', err); }
+        try {
+          await this.deepChainReview(projectPath);
+        } catch (err) {
+          log.warn("Deep chain review failed", err);
+        }
       }
 
       // 13. Periodic CLAUDE.md maintenance
-      const { claudeMdMaintenanceEnabled: maintEnabled, claudeMdMaintenanceInterval: maintInterval } = this.config.values.brain;
-      if (maintEnabled && maintInterval > 0 && this.tasksCompleted % maintInterval === 0) {
-        try { await this.claudeMdMaintenance(projectPath); }
-        catch (err) { log.warn('CLAUDE.md maintenance failed', err); }
+      const {
+        claudeMdMaintenanceEnabled: maintEnabled,
+        claudeMdMaintenanceInterval: maintInterval,
+      } = this.config.values.brain;
+      if (
+        maintEnabled &&
+        maintInterval > 0 &&
+        this.tasksCompleted % maintInterval === 0
+      ) {
+        try {
+          await this.claudeMdMaintenance(projectPath);
+        } catch (err) {
+          log.warn("CLAUDE.md maintenance failed", err);
+        }
       }
     } catch (err) {
-      log.error('Task execution error', err);
-      this.eventBus.emit(this.makeEvent('execute', 'error', { error: String(err) }));
-      await this.taskStore.updateTask(task.id, { status: 'failed', phase: 'failed' });
+      log.error("Task execution error", err);
+      // Mark the currently active step as failed and skip the rest
+      const activeStep = this.cycleSteps.find((s) => s.status === "active");
+      if (activeStep) {
+        this.endStep(activeStep.phase, "failed", String(err));
+      }
+      this.skipRemainingSteps();
+      this.eventBus.emit(
+        this.makeEvent("execute", "error", { error: String(err) }),
+      );
+      await this.taskStore.updateTask(task.id, {
+        status: "failed",
+        phase: "failed",
+      });
       await switchBranch(originalBranch, projectPath).catch(() => {});
       await this.cleanupTaskBranch(branchName);
     } finally {
       await switchBranch(originalBranch, projectPath).catch(() => {});
       this.setCurrentTaskId(null);
+      this.currentTaskDescription = null;
     }
 
-    this.setState('idle');
+    this.setState("idle");
     return true;
   }
 
@@ -623,24 +1077,38 @@ ${changedFiles.join('\n')}
     taskType?: string;
     complexity?: string;
     subtasks?: Array<{ description: string; order: number }>;
+    workInstructions?: WorkInstructions;
+    extraTasks?: Array<{
+      task: string;
+      priority: number;
+      persona?: string;
+      taskType?: string;
+      complexity?: string;
+      subtasks?: Array<{ description: string; order: number }>;
+      workInstructions?: WorkInstructions;
+    }>;
     costUsd: number;
   }> {
     // Budget gate: if daily budget exhausted, don't spend on brain call
     const dailyCost = await this.taskStore.getDailyCost();
     const maxPerDay = this.config.values.budget.maxPerDay;
     if (dailyCost.total_cost_usd >= maxPerDay) {
-      log.info(`Daily budget exhausted ($${dailyCost.total_cost_usd.toFixed(2)}/$${maxPerDay}). Skipping brain call.`);
+      log.info(
+        `Daily budget exhausted ($${dailyCost.total_cost_usd.toFixed(2)}/$${maxPerDay}). Skipping brain call.`,
+      );
       return { taskDescription: null, costUsd: 0 };
     }
 
     const context = await this.gatherBrainContext(projectPath);
+    let totalCost = 0;
 
-    const prompt = `You are the brain of an autonomous coding agent in EVOLUTION MODE.
+    // --- Phase 1: Free exploration (no jsonSchema, tools enabled) ---
+    const explorationPrompt = `You are the brain of an autonomous coding agent in EVOLUTION MODE.
 Your job is to continuously improve the project — you are NOT a passive monitor.
-You MUST find an improvement task every cycle. "Nothing to do" is NOT acceptable.
 
 Read CLAUDE.md for project context, current status, and priorities.
 Use claude-mem to search for relevant past experiences.
+Actually explore the codebase — read files, search for patterns, trace call sites.
 
 ${context}
 
@@ -656,79 +1124,260 @@ ${context}
 9. **韧性** — Timeout handling, retry logic, graceful degradation for external services
 10. **安全** — Input validation, injection prevention, sensitive data in logs
 
-## RULES:
-- You MUST output exactly ONE task. Never say "nothing to do" or "project is healthy".
-- Avoid duplicating recent tasks (see list above).
-- If budget is low, pick small focused tasks (type safety, single function fix).
-- Be specific: name the file, function, or module to change. Vague tasks waste worker time.
+## YOUR TASK:
+Explore the project and identify 1-5 concrete improvement opportunities.
+For each, describe: what to change, which files/functions, why it matters, and how to verify.
+Be specific — name exact files, functions, line ranges. Vague findings waste worker time.
+Avoid duplicating recent tasks (see context above).
+If budget is low, focus on small targeted improvements.
 
-Respond with EXACTLY this JSON (no markdown, no extra text):
-{"task": "specific description", "priority": 0-3, "persona": "persona-name", "taskType": "feature|bugfix|refactoring|test|security|performance|frontend|code-quality|docs", "complexity": "S|M|L|XL", "subtasks": [{"description": "subtask 1", "order": 1}], "reasoning": "why"}
+## SELF-CRITIQUE (apply BEFORE writing your report)
+After exploring, pick ONE of these lenses to stress-test your findings:
+- **Pre-mortem**: Assume each proposed change fails in production. What would cause it?
+- **Red Team**: Attack your own findings. What's the weakest recommendation?
+- **Inversion**: What should we NOT change? What's working well that we might break?
 
-Rules for persona/taskType/complexity:
-- persona: choose from available personas (feature-builder, refactoring-expert, bugfix-debugger, test-engineer, security-auditor, performance-optimizer, frontend-specialist)
-- taskType: categorize the task (feature, bugfix, refactoring, test, security, performance, frontend, code-quality, docs)
-- complexity: estimate task size (S=small fix, M=typical task, L=multi-file change, XL=large refactor). Default: M
-- subtasks: ONLY for complex tasks that need 2+ independent steps. Most tasks should NOT have subtasks. Each subtask must be independently completable and verifiable.`;
+State which lens you chose and what it revealed. Discard or revise weak findings.
+
+Write your analysis as a natural language report.`;
+
+    const phase1Result = await this.brainThink(explorationPrompt);
+    totalCost += phase1Result.costUsd;
+    log.info(
+      `Brain phase1 (explore): cost=$${phase1Result.costUsd.toFixed(4)}, turns=${phase1Result.numTurns}, text=${phase1Result.text.length}chars`,
+    );
+    if (phase1Result.isError || phase1Result.exitCode !== 0) {
+      log.warn(`Brain phase1 errors: ${phase1Result.errors.join("; ")}`);
+    }
+
+    const analysisReport = phase1Result.text.slice(0, 12000);
+
+    // --- Phase 2: Structured output (jsonSchema, converts analysis to tasks) ---
+    const structuredPrompt = `Based on the analysis below, produce 1-5 prioritized tasks for the worker to execute.
+
+## Analysis Report
+${analysisReport}
+
+## OUTPUT RULES:
+- tasks[0] is the HIGHEST priority task — it will be executed immediately.
+- tasks[1..4] are extra tasks — they will be queued for later execution.
+- Each task needs: task (specific description), priority (0-3), persona, taskType, complexity (S/M/L/XL).
+- workInstructions: guidance for the worker. Can be:
+  - a plain string with free-form instructions, OR
+  - a structured object with fields: acceptanceCriteria (testable "done" statements),
+    filesToModify (explicit paths), guardrails (what NOT to do), verificationSteps,
+    references (related files/docs to read first)
+- subtasks: ONLY for complex tasks needing 2+ independent steps. Most tasks should NOT have subtasks.
+- persona: feature-builder, refactoring-expert, bugfix-debugger, test-engineer, security-auditor, performance-optimizer, frontend-specialist
+- taskType: feature, bugfix, refactoring, test, security, performance, frontend, code-quality, docs
+- reasoning: brief explanation of why these tasks were chosen`;
 
     const brainDecideSchema = {
-      type: 'object',
+      type: "object",
       properties: {
-        task: { type: 'string' },
-        priority: { type: 'number' },
-        persona: { type: 'string' },
-        taskType: { type: 'string' },
-        subtasks: { type: 'array', items: { type: 'object', properties: { description: { type: 'string' }, order: { type: 'number' } }, required: ['description'] } },
-        reasoning: { type: 'string' },
+        tasks: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              task: { type: "string" },
+              priority: { type: "number" },
+              persona: { type: "string" },
+              taskType: { type: "string" },
+              complexity: { type: "string" },
+              workInstructions: {
+                oneOf: [
+                  { type: "string" },
+                  {
+                    type: "object",
+                    properties: {
+                      acceptanceCriteria: {
+                        type: "array",
+                        items: { type: "string" },
+                      },
+                      filesToModify: {
+                        type: "array",
+                        items: { type: "string" },
+                      },
+                      guardrails: { type: "array", items: { type: "string" } },
+                      verificationSteps: {
+                        type: "array",
+                        items: { type: "string" },
+                      },
+                      references: { type: "array", items: { type: "string" } },
+                    },
+                  },
+                ],
+              },
+              subtasks: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    description: { type: "string" },
+                    order: { type: "number" },
+                  },
+                  required: ["description"],
+                },
+              },
+            },
+            required: ["task"],
+          },
+        },
+        reasoning: { type: "string" },
       },
-      required: ['task'],
+      required: ["tasks"],
     };
 
-    const result = await this.brainThink(prompt, { jsonSchema: brainDecideSchema });
-    log.info(`Brain decide raw: cost=$${result.costUsd.toFixed(4)}, exit=${result.exitCode}, isError=${result.isError}, turns=${result.numTurns}, json=${result.json ? 'yes' : 'no'}, text="${truncate(result.text, 200)}"`);
-    if (result.isError || result.exitCode !== 0) {
-      log.warn(`Brain session errors: ${result.errors.join('; ')}`);
+    const phase2Result = await this.brainThink(structuredPrompt, {
+      jsonSchema: brainDecideSchema,
+    });
+    totalCost += phase2Result.costUsd;
+    log.info(
+      `Brain phase2 (structured): cost=$${phase2Result.costUsd.toFixed(4)}, exit=${phase2Result.exitCode}, json=${phase2Result.json ? "yes" : "no"}, text="${truncate(phase2Result.text, 200)}"`,
+    );
+    if (phase2Result.isError || phase2Result.exitCode !== 0) {
+      log.warn(`Brain phase2 errors: ${phase2Result.errors.join("; ")}`);
     }
+
+    // --- Parse results with fallback chain ---
+    const parseTaskArray = (
+      obj: Record<string, unknown>,
+    ): ReturnType<typeof this.brainDecide> extends Promise<infer R>
+      ? R
+      : never => {
+      const tasks = Array.isArray(obj.tasks) ? obj.tasks : [];
+      const first = tasks[0];
+      if (!isRecord(first) || typeof first.task !== "string") {
+        return { taskDescription: null, costUsd: totalCost };
+      }
+
+      const parseWorkInstructions = (
+        v: unknown,
+      ): WorkInstructions | undefined => {
+        if (typeof v === "string") return v || undefined;
+        if (isRecord(v)) {
+          const parsed: StructuredWorkInstructions = {
+            acceptanceCriteria: Array.isArray(v.acceptanceCriteria)
+              ? v.acceptanceCriteria.filter(
+                  (x): x is string => typeof x === "string",
+                )
+              : [],
+            filesToModify: Array.isArray(v.filesToModify)
+              ? v.filesToModify.filter(
+                  (x): x is string => typeof x === "string",
+                )
+              : [],
+            guardrails: Array.isArray(v.guardrails)
+              ? v.guardrails.filter((x): x is string => typeof x === "string")
+              : [],
+            verificationSteps: Array.isArray(v.verificationSteps)
+              ? v.verificationSteps.filter(
+                  (x): x is string => typeof x === "string",
+                )
+              : [],
+            references: Array.isArray(v.references)
+              ? v.references.filter((x): x is string => typeof x === "string")
+              : [],
+          };
+          const hasContent = Object.values(parsed).some(
+            (arr) => arr && arr.length > 0,
+          );
+          return hasContent ? parsed : undefined;
+        }
+        return undefined;
+      };
+
+      const parseOne = (t: Record<string, unknown>) => ({
+        task: String(t.task),
+        priority: typeof t.priority === "number" ? t.priority : 2,
+        persona: typeof t.persona === "string" ? t.persona : undefined,
+        taskType: typeof t.taskType === "string" ? t.taskType : undefined,
+        complexity:
+          typeof t.complexity === "string" && t.complexity in COMPLEXITY_CONFIG
+            ? t.complexity
+            : undefined,
+        workInstructions: parseWorkInstructions(t.workInstructions),
+        subtasks: Array.isArray(t.subtasks) ? t.subtasks : undefined,
+      });
+
+      const primary = parseOne(first);
+      const extra = tasks
+        .slice(1)
+        .filter((t: unknown) => isRecord(t) && typeof t.task === "string")
+        .map((t: unknown) => parseOne(t as Record<string, unknown>));
+
+      return {
+        taskDescription: primary.task,
+        priority: primary.priority,
+        persona: primary.persona,
+        taskType: primary.taskType,
+        complexity: primary.complexity,
+        subtasks: primary.subtasks,
+        workInstructions: primary.workInstructions,
+        extraTasks: extra.length > 0 ? extra : undefined,
+        costUsd: totalCost,
+      };
+    };
 
     // Primary: structured output from --json-schema
-    const parsed = isRecord(result.json) ? result.json : null;
-    if (parsed && typeof parsed.task === 'string') {
-      return {
-        taskDescription: parsed.task,
-        priority: typeof parsed.priority === 'number' ? parsed.priority : 2,
-        persona: typeof parsed.persona === 'string' ? parsed.persona : undefined,
-        taskType: typeof parsed.taskType === 'string' ? parsed.taskType : undefined,
-        complexity: typeof parsed.complexity === 'string' && parsed.complexity in COMPLEXITY_CONFIG
-          ? parsed.complexity : undefined,
-        subtasks: Array.isArray(parsed.subtasks) ? parsed.subtasks : undefined,
-        costUsd: result.costUsd,
-      };
+    const parsed = isRecord(phase2Result.json) ? phase2Result.json : null;
+    if (parsed) {
+      const result = parseTaskArray(parsed);
+      if (result.taskDescription) return result;
     }
 
-    // Fallback: try extracting JSON from text (in case structured output fails)
-    const textParsed = extractJsonFromText(
-      result.text,
-      (v) => isRecord(v) && typeof (v as Record<string, unknown>).task === 'string',
-    );
-    if (isRecord(textParsed) && typeof textParsed.task === 'string') {
-      log.warn('brainDecide: structured output empty, fell back to text extraction');
-      return {
-        taskDescription: textParsed.task,
-        priority: typeof textParsed.priority === 'number' ? textParsed.priority : 2,
-        persona: typeof textParsed.persona === 'string' ? textParsed.persona : undefined,
-        taskType: typeof textParsed.taskType === 'string' ? textParsed.taskType : undefined,
-        subtasks: Array.isArray(textParsed.subtasks) ? textParsed.subtasks : undefined,
-        costUsd: result.costUsd,
-      };
+    // Fallback: try extracting JSON from text
+    const textParsed = extractJsonFromText(phase2Result.text, (v) => {
+      if (!isRecord(v)) return false;
+      const rec = v as Record<string, unknown>;
+      // Support both { tasks: [...] } and legacy { task: "..." }
+      return Array.isArray(rec.tasks) || typeof rec.task === "string";
+    });
+    if (isRecord(textParsed)) {
+      // Legacy single-task format
+      if (typeof textParsed.task === "string") {
+        log.warn(
+          "brainDecide: fell back to text extraction (legacy single-task)",
+        );
+        return {
+          taskDescription: textParsed.task,
+          priority:
+            typeof textParsed.priority === "number" ? textParsed.priority : 2,
+          persona:
+            typeof textParsed.persona === "string"
+              ? textParsed.persona
+              : undefined,
+          taskType:
+            typeof textParsed.taskType === "string"
+              ? textParsed.taskType
+              : undefined,
+          subtasks: Array.isArray(textParsed.subtasks)
+            ? textParsed.subtasks
+            : undefined,
+          costUsd: totalCost,
+        };
+      }
+      // Multi-task format from text
+      if (Array.isArray(textParsed.tasks)) {
+        log.warn("brainDecide: fell back to text extraction (multi-task)");
+        const result = parseTaskArray(textParsed);
+        if (result.taskDescription) return result;
+      }
     }
 
     // Last resort: raw text as task description
-    const rawText = result.text.trim();
+    const rawText = phase2Result.text.trim();
     if (rawText.length > 20) {
-      log.warn('brainDecide: no valid JSON found in any output, using raw text as task description');
-      return { taskDescription: rawText.slice(0, 500), costUsd: result.costUsd };
+      log.warn(
+        "brainDecide: no valid JSON found, using raw text as task description",
+      );
+      return {
+        taskDescription: rawText.slice(0, 500),
+        costUsd: totalCost,
+      };
     }
-    return { taskDescription: null, costUsd: result.costUsd };
+    return { taskDescription: null, costUsd: totalCost };
   }
 
   /** Gather rich context for brain decision-making */
@@ -738,34 +1387,54 @@ Rules for persona/taskType/complexity:
     // Queued tasks
     const queuedTasks = await this.taskQueue.getQueued(projectPath);
     if (queuedTasks.length > 0) {
-      parts.push(`Queued tasks (${queuedTasks.length}):\n${queuedTasks.slice(0, 5).map(t => `- [P${t.priority}] ${t.task_description}`).join('\n')}`);
+      parts.push(
+        `Queued tasks (${queuedTasks.length}):\n${queuedTasks
+          .slice(0, 5)
+          .map((t) => `- [P${t.priority}] ${t.task_description}`)
+          .join("\n")}`,
+      );
     }
 
     // Recent 15 tasks (expanded from 5 to avoid repeats)
-    const recentResult = await this.taskStore.listTasksPaged(projectPath, 1, 15);
+    const recentResult = await this.taskStore.listTasksPaged(
+      projectPath,
+      1,
+      15,
+    );
     const recentTasks = recentResult.tasks ?? [];
     if (recentTasks.length > 0) {
-      parts.push(`Recent tasks (DO NOT duplicate these):\n${recentTasks.map((t: Task) => `- [${t.status}] ${t.task_description}`).join('\n')}`);
+      parts.push(
+        `Recent tasks (DO NOT duplicate these):\n${recentTasks.map((t: Task) => `- [${t.status}] ${t.task_description}`).join("\n")}`,
+      );
     }
 
     // Budget remaining
     const dailyCost = await this.taskStore.getDailyCost();
-    const remaining = this.config.values.budget.maxPerDay - dailyCost.total_cost_usd;
-    parts.push(`Budget: $${remaining.toFixed(2)} remaining today (${dailyCost.task_count} tasks completed). ${remaining < 30 ? 'LOW BUDGET — pick small tasks.' : ''}`);
+    const remaining =
+      this.config.values.budget.maxPerDay - dailyCost.total_cost_usd;
+    parts.push(
+      `Budget: $${remaining.toFixed(2)} remaining today (${dailyCost.task_count} tasks completed). ${remaining < 30 ? "LOW BUDGET — pick small tasks." : ""}`,
+    );
 
     // Health metrics
     try {
       const metrics = await this.taskStore.getOperationalMetrics(projectPath);
-      parts.push(`Health: passRate=${metrics.taskPassRate}%, dailyCost=$${metrics.dailyCostUsd.toFixed(2)}, queue=${metrics.queueDepth}`);
-    } catch { /* metrics not critical */ }
+      parts.push(
+        `Health: passRate=${metrics.taskPassRate}%, dailyCost=$${metrics.dailyCostUsd.toFixed(2)}, queue=${metrics.queueDepth}`,
+      );
+    } catch {
+      /* metrics not critical */
+    }
 
     // Module rotation
     const currentModule = await this.getNextModule(projectPath);
     if (currentModule) {
-      parts.push(`Current focus module: ${currentModule}/\nDeeply scan this module for improvement opportunities. Prioritize other areas only if there's something more urgent.`);
+      parts.push(
+        `Current focus module: ${currentModule}/\nDeeply scan this module for improvement opportunities. Prioritize other areas only if there's something more urgent.`,
+      );
     }
 
-    return parts.join('\n\n');
+    return parts.join("\n\n");
   }
 
   /** Layer 2: Extremely specific directive when brain returns no task */
@@ -791,24 +1460,28 @@ Respond with EXACTLY this JSON (no markdown):
 {"task": "specific description", "priority": 2, "reasoning": "why"}`;
 
     const directiveSchema = {
-      type: 'object',
+      type: "object",
       properties: {
-        task: { type: 'string' },
-        priority: { type: 'number' },
-        reasoning: { type: 'string' },
+        task: { type: "string" },
+        priority: { type: "number" },
+        reasoning: { type: "string" },
       },
-      required: ['task'],
+      required: ["task"],
     };
 
-    const result = await this.brainThink(prompt, { jsonSchema: directiveSchema });
-    log.info(`Brain directive raw: cost=$${result.costUsd.toFixed(4)}, exit=${result.exitCode}, turns=${result.numTurns}, json=${result.json ? 'yes' : 'no'}, text="${truncate(result.text, 200)}"`);
+    const result = await this.brainThink(prompt, {
+      jsonSchema: directiveSchema,
+    });
+    log.info(
+      `Brain directive raw: cost=$${result.costUsd.toFixed(4)}, exit=${result.exitCode}, turns=${result.numTurns}, json=${result.json ? "yes" : "no"}, text="${truncate(result.text, 200)}"`,
+    );
 
     // Primary: structured output
     const parsed = isRecord(result.json) ? result.json : null;
-    if (parsed && typeof parsed.task === 'string') {
+    if (parsed && typeof parsed.task === "string") {
       return {
         taskDescription: parsed.task,
-        priority: typeof parsed.priority === 'number' ? parsed.priority : 2,
+        priority: typeof parsed.priority === "number" ? parsed.priority : 2,
         costUsd: result.costUsd,
       };
     }
@@ -816,34 +1489,49 @@ Respond with EXACTLY this JSON (no markdown):
     // Fallback: text extraction
     const textParsed = extractJsonFromText(
       result.text,
-      (v) => isRecord(v) && typeof (v as Record<string, unknown>).task === 'string',
+      (v) =>
+        isRecord(v) && typeof (v as Record<string, unknown>).task === "string",
     );
-    if (isRecord(textParsed) && typeof textParsed.task === 'string') {
-      log.warn('brainDecideDirective: structured output empty, fell back to text extraction');
+    if (isRecord(textParsed) && typeof textParsed.task === "string") {
+      log.warn(
+        "brainDecideDirective: structured output empty, fell back to text extraction",
+      );
       return {
         taskDescription: textParsed.task,
-        priority: typeof textParsed.priority === 'number' ? textParsed.priority : 2,
+        priority:
+          typeof textParsed.priority === "number" ? textParsed.priority : 2,
         costUsd: result.costUsd,
       };
     }
 
     const rawText = result.text.trim();
     if (rawText.length > 20) {
-      log.warn('brainDecideDirective: no valid JSON found in any output, using raw text');
-      return { taskDescription: rawText.slice(0, 500), costUsd: result.costUsd };
+      log.warn(
+        "brainDecideDirective: no valid JSON found in any output, using raw text",
+      );
+      return {
+        taskDescription: rawText.slice(0, 500),
+        costUsd: result.costUsd,
+      };
     }
     return { taskDescription: null, costUsd: result.costUsd };
   }
 
   /** Discover project modules by scanning src/ or root directory */
   private discoverModules(projectPath: string): string[] {
-    const srcDir = join(projectPath, 'src');
+    const srcDir = join(projectPath, "src");
     const baseDir = existsSync(srcDir) ? srcDir : projectPath;
     try {
       const entries = readdirSync(baseDir, { withFileTypes: true });
       return entries
-        .filter(e => e.isDirectory() && !e.name.startsWith('.') && e.name !== 'node_modules' && e.name !== 'dist')
-        .map(e => existsSync(srcDir) ? `src/${e.name}` : e.name);
+        .filter(
+          (e) =>
+            e.isDirectory() &&
+            !e.name.startsWith(".") &&
+            e.name !== "node_modules" &&
+            e.name !== "dist",
+        )
+        .map((e) => (existsSync(srcDir) ? `src/${e.name}` : e.name));
     } catch {
       return [];
     }
@@ -854,50 +1542,75 @@ Respond with EXACTLY this JSON (no markdown):
     if (this.discoveredModules.length === 0) {
       this.discoveredModules = this.discoverModules(projectPath);
     }
-    if (this.discoveredModules.length === 0) return '';
-    const mod = this.discoveredModules[this.moduleIndex % this.discoveredModules.length];
+    if (this.discoveredModules.length === 0) return "";
+    const mod =
+      this.discoveredModules[this.moduleIndex % this.discoveredModules.length];
     this.moduleIndex++;
     return mod;
   }
 
-  private async brainThink(prompt: string, opts?: { jsonSchema?: object }): Promise<SessionResult> {
+  private async brainThink(
+    prompt: string,
+    opts?: { jsonSchema?: object },
+  ): Promise<SessionResult> {
     return this.brainSession.run(prompt, {
-      permissionMode: 'bypassPermissions',
+      permissionMode: "bypassPermissions",
       maxTurns: 20,
       cwd: this.config.projectPath,
       timeout: 300_000,
-      model: this.config.values.brain.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
-      disallowedTools: ['Edit', 'Write', 'NotebookEdit'],
-      appendSystemPrompt: 'You are the brain of an autonomous coding agent. Read CLAUDE.md for context. Do not modify files — only analyze and decide.',
+      model:
+        this.config.values.brain.model === "opus"
+          ? "claude-opus-4-6"
+          : "claude-sonnet-4-6",
+      disallowedTools: ["Edit", "Write", "NotebookEdit"],
+      appendSystemPrompt:
+        "You are the brain of an autonomous coding agent. Read CLAUDE.md for context. Do not modify files — only analyze and decide.",
       jsonSchema: opts?.jsonSchema,
     });
   }
 
   // --- Worker session ---
 
-  private async workerExecute(task: Task, opts?: {
-    persona?: string;
-    taskType?: string;
-    complexity?: string;
-    subtaskDescription?: string;
-  }): Promise<SessionResult> {
+  private async workerExecute(
+    task: Task,
+    opts?: {
+      persona?: string;
+      taskType?: string;
+      complexity?: string;
+      subtaskDescription?: string;
+      workInstructions?: WorkInstructions;
+    },
+  ): Promise<SessionResult> {
     const description = opts?.subtaskDescription ?? task.task_description;
-    const { prompt, systemPrompt } = await this.personaLoader.buildWorkerPrompt({
-      taskDescription: description,
-      personaName: opts?.persona,
-      taskType: opts?.taskType,
-    });
+    const { prompt, systemPrompt } = await this.personaLoader.buildWorkerPrompt(
+      {
+        taskDescription: description,
+        personaName: opts?.persona,
+        taskType: opts?.taskType,
+        workInstructions: opts?.workInstructions,
+      },
+    );
 
-    const complexity = opts?.complexity ?? (task.plan as Record<string, unknown> | null)?.complexity as string | undefined;
-    const cConfig = COMPLEXITY_CONFIG[complexity ?? 'M'];
+    const complexity =
+      opts?.complexity ??
+      ((task.plan as Record<string, unknown> | null)?.complexity as
+        | string
+        | undefined);
+    const cConfig = COMPLEXITY_CONFIG[complexity ?? "M"];
 
     return this.workerSession.run(prompt, {
-      permissionMode: 'bypassPermissions',
+      permissionMode: "bypassPermissions",
       maxTurns: cConfig.maxTurns,
-      maxBudget: Math.min(cConfig.maxBudget, this.config.values.claude.maxTaskBudget),
+      maxBudget: Math.min(
+        cConfig.maxBudget,
+        this.config.values.claude.maxTaskBudget,
+      ),
       cwd: this.config.projectPath,
       timeout: cConfig.timeout,
-      model: this.config.values.claude.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
+      model:
+        this.config.values.claude.model === "opus"
+          ? "claude-opus-4-6"
+          : "claude-sonnet-4-6",
       appendSystemPrompt: systemPrompt,
     });
   }
@@ -905,17 +1618,26 @@ Respond with EXACTLY this JSON (no markdown):
   private async executeSubtasks(
     task: Task,
     subtasks: Array<{ description: string; order: number }>,
-    opts: { persona?: string; taskType?: string; complexity?: string; baselineErrors: number; startCommit: string },
+    opts: {
+      persona?: string;
+      taskType?: string;
+      complexity?: string;
+      workInstructions?: WorkInstructions;
+      baselineErrors: number;
+      startCommit: string;
+    },
   ): Promise<{ success: boolean; sessionId?: string }> {
     const sorted = [...subtasks].sort((a, b) => a.order - b.order);
 
     for (let i = 0; i < sorted.length; i++) {
       const st = sorted[i];
-      log.info(`Subtask ${i + 1}/${sorted.length}: ${truncate(st.description, 100)}`);
+      log.info(
+        `Subtask ${i + 1}/${sorted.length}: ${truncate(st.description, 100)}`,
+      );
 
       // Update subtask status to running
       const currentSubtasks = (task.subtasks ?? []).map((s, idx) =>
-        idx === i ? { ...s, status: 'running' as const } : s,
+        idx === i ? { ...s, status: "running" as const } : s,
       );
       await this.taskStore.updateTask(task.id, { subtasks: currentSubtasks });
 
@@ -924,15 +1646,17 @@ Respond with EXACTLY this JSON (no markdown):
         persona: opts.persona,
         taskType: opts.taskType,
         complexity: opts.complexity,
+        workInstructions: opts.workInstructions,
         subtaskDescription: st.description,
       });
 
-      if (result.costUsd > 0) await this.costTracker.addCost(task.id, result.costUsd);
+      if (result.costUsd > 0)
+        await this.costTracker.addCost(task.id, result.costUsd);
 
       await this.taskStore.addLog({
         task_id: task.id,
-        phase: 'execute',
-        agent: 'claude-code',
+        phase: "execute",
+        agent: "claude-code",
         input_summary: `subtask ${i + 1}/${sorted.length}: ${truncate(st.description, 80)}`,
         output_summary: result.text.slice(0, SUMMARY_PREVIEW_LEN),
         cost_usd: result.costUsd,
@@ -940,21 +1664,40 @@ Respond with EXACTLY this JSON (no markdown):
       });
 
       // Per-subtask hard verify with HALT retry loop
-      const verification = await this.hardVerify(opts.baselineErrors, opts.startCommit, this.config.projectPath);
+      const verification = await this.hardVerify(
+        opts.baselineErrors,
+        opts.startCommit,
+        this.config.projectPath,
+      );
       if (!verification.passed) {
         const maxRetries = this.config.values.autonomy.maxRetries;
         let fixAttempts = 0;
         let currentSessionId = result.sessionId;
         let lastVerification = verification;
 
-        while (!lastVerification.passed && currentSessionId && fixAttempts < maxRetries) {
+        while (
+          !lastVerification.passed &&
+          currentSessionId &&
+          fixAttempts < maxRetries
+        ) {
           fixAttempts++;
-          log.warn(`Subtask ${i + 1} verification failed (attempt ${fixAttempts}/${maxRetries}): ${lastVerification.reason}`);
-          const fixResult = await this.workerFix(currentSessionId, lastVerification.reason ?? 'Unknown', task);
-          if (fixResult.costUsd > 0) await this.costTracker.addCost(task.id, fixResult.costUsd);
+          log.warn(
+            `Subtask ${i + 1} verification failed (attempt ${fixAttempts}/${maxRetries}): ${lastVerification.reason}`,
+          );
+          const fixResult = await this.workerFix(
+            currentSessionId,
+            lastVerification.reason ?? "Unknown",
+            task,
+          );
+          if (fixResult.costUsd > 0)
+            await this.costTracker.addCost(task.id, fixResult.costUsd);
           currentSessionId = fixResult.sessionId ?? currentSessionId;
 
-          lastVerification = await this.hardVerify(opts.baselineErrors, opts.startCommit, this.config.projectPath);
+          lastVerification = await this.hardVerify(
+            opts.baselineErrors,
+            opts.startCommit,
+            this.config.projectPath,
+          );
         }
 
         if (!lastVerification.passed) {
@@ -965,24 +1708,35 @@ Respond with EXACTLY this JSON (no markdown):
 
           if (opts.persona) {
             await this.taskStore.addLog({
-              task_id: task.id, phase: 'halt-learning', agent: 'system',
+              task_id: task.id,
+              phase: "halt-learning",
+              agent: "system",
               input_summary: `persona=${opts.persona}, subtask=${i + 1}`,
               output_summary: `HALT triggered: ${lastVerification.reason} (after ${fixAttempts} attempts)`,
-              cost_usd: 0, duration_ms: 0,
+              cost_usd: 0,
+              duration_ms: 0,
             });
           }
 
           const failedSubtasks = (task.subtasks ?? []).map((s, idx) =>
-            idx === i ? { ...s, status: 'failed' as const, result: lastVerification.reason } : s,
+            idx === i
+              ? {
+                  ...s,
+                  status: "failed" as const,
+                  result: lastVerification.reason,
+                }
+              : s,
           );
-          await this.taskStore.updateTask(task.id, { subtasks: failedSubtasks });
+          await this.taskStore.updateTask(task.id, {
+            subtasks: failedSubtasks,
+          });
           return { success: false };
         }
       }
 
       // Mark subtask done
       const doneSubtasks = (task.subtasks ?? []).map((s, idx) =>
-        idx === i ? { ...s, status: 'done' as const } : s,
+        idx === i ? { ...s, status: "done" as const } : s,
       );
       await this.taskStore.updateTask(task.id, { subtasks: doneSubtasks });
       // Re-read task for updated subtask state
@@ -992,17 +1746,24 @@ Respond with EXACTLY this JSON (no markdown):
     return { success: true };
   }
 
-  private async workerFix(sessionId: string, errors: string, task: Task): Promise<SessionResult> {
+  private async workerFix(
+    sessionId: string,
+    errors: string,
+    task: Task,
+  ): Promise<SessionResult> {
     return this.workerSession.run(
       `The previous changes failed verification:\n${errors}\n\nFix these issues. The original task was: ${task.task_description}\n\nUse superpowers:systematic-debugging to investigate the root cause.\nFollow all 4 phases: investigate → analyze → hypothesize → implement.\nDo NOT guess or "try changing X". Find the actual root cause first.`,
       {
-        permissionMode: 'bypassPermissions',
+        permissionMode: "bypassPermissions",
         maxTurns: 15,
         maxBudget: this.config.values.claude.maxTaskBudget / 2,
         cwd: this.config.projectPath,
         timeout: 120_000,
         resumeSessionId: sessionId,
-        model: this.config.values.claude.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
+        model:
+          this.config.values.claude.model === "opus"
+            ? "claude-opus-4-6"
+            : "claude-sonnet-4-6",
       },
     );
   }
@@ -1017,7 +1778,7 @@ Respond with EXACTLY this JSON (no markdown):
     // 1. TypeScript errors
     const currentErrors = await countTscErrors(projectPath);
     if (currentErrors < 0) {
-      return { passed: false, reason: 'TypeScript compilation crashed' };
+      return { passed: false, reason: "TypeScript compilation crashed" };
     }
     if (baselineErrors >= 0 && currentErrors > baselineErrors) {
       return {
@@ -1028,11 +1789,15 @@ Respond with EXACTLY this JSON (no markdown):
 
     // 2. Diff anomaly check (warn only)
     try {
-      const stats = await getDiffStats(startCommit, 'HEAD', projectPath);
+      const stats = await getDiffStats(startCommit, "HEAD", projectPath);
       if (stats.files_changed > 15) {
-        log.warn(`Post-check warning: ${stats.files_changed} files changed (${stats.insertions}+ ${stats.deletions}-)`);
+        log.warn(
+          `Post-check warning: ${stats.files_changed} files changed (${stats.insertions}+ ${stats.deletions}-)`,
+        );
       }
-    } catch { /* non-critical */ }
+    } catch {
+      /* non-critical */
+    }
 
     return { passed: true };
   }
@@ -1043,17 +1808,37 @@ Respond with EXACTLY this JSON (no markdown):
     task: Task,
     startCommit: string,
     projectPath: string,
-  ): Promise<{ passed: boolean; missing: string[]; extra: string[]; concerns: string[] }> {
-    const diff = await getDiffSince(startCommit, projectPath).catch(() => '(diff unavailable)');
-    const subtaskList = (task.subtasks ?? []).map(s => `- ${s.description}`).join('\n');
+    workInstructions?: WorkInstructions,
+  ): Promise<{
+    passed: boolean;
+    missing: string[];
+    extra: string[];
+    concerns: string[];
+  }> {
+    const diff = await getDiffSince(startCommit, projectPath).catch(
+      () => "(diff unavailable)",
+    );
+    const subtaskList = (task.subtasks ?? [])
+      .map((s) => `- ${s.description}`)
+      .join("\n");
 
-    const prompt = `You are an adversarial code reviewer. Presume issues exist — your job is to find them before you can pass.
+    // BMAD: inject acceptance criteria from structured workInstructions
+    const acSection =
+      workInstructions &&
+      typeof workInstructions !== "string" &&
+      workInstructions.acceptanceCriteria?.length
+        ? `\n## Acceptance Criteria (verify against diff)\n${workInstructions.acceptanceCriteria.map((c) => `- [ ] ${c}`).join("\n")}\n`
+        : "";
+
+    const prompt = `You are a cynical, adversarial code reviewer. You EXPECT to find problems.
+Your job is NOT to confirm quality — it's to find what's wrong, missing, or dangerous.
 DO NOT trust commit messages — only examine the actual diff.
+If you find zero issues, that is suspicious — re-analyze with more skepticism.
 
 ## Original Task
 ${task.task_description}
-
-${subtaskList ? `## Subtasks\n${subtaskList}\n` : ''}## Git Diff
+${acSection}
+${subtaskList ? `## Subtasks\n${subtaskList}\n` : ""}## Git Diff
 \`\`\`diff
 ${diff.slice(0, 15000)}
 \`\`\`
@@ -1096,25 +1881,56 @@ Respond with EXACTLY this JSON (no markdown, no extra text):
 
     await this.taskStore.addLog({
       task_id: task.id,
-      phase: 'review',
-      agent: 'brain-spec',
-      input_summary: 'Spec compliance review',
+      phase: "review",
+      agent: "brain-spec",
+      input_summary: "Spec compliance review",
       output_summary: result.text.slice(0, SUMMARY_PREVIEW_LEN),
       cost_usd: result.costUsd,
       duration_ms: result.durationMs,
     });
 
-    try {
-      const parsed = JSON.parse(result.text);
-      return {
+    const parseSpecResult = (text: string) => {
+      const parsed = JSON.parse(text);
+      const res = {
         passed: parsed.passed === true,
         missing: Array.isArray(parsed.missing) ? parsed.missing : [],
         extra: Array.isArray(parsed.extra) ? parsed.extra : [],
         concerns: Array.isArray(parsed.concerns) ? parsed.concerns : [],
       };
+      // BMAD: zero findings with PASS is suspicious — inject concern for visibility
+      if (
+        res.passed &&
+        res.missing.length === 0 &&
+        res.extra.length === 0 &&
+        res.concerns.length === 0
+      ) {
+        res.concerns = [
+          "Reviewer found zero issues — may indicate insufficient analysis",
+        ];
+      }
+      return res;
+    };
+
+    try {
+      return parseSpecResult(result.text);
     } catch {
-      log.warn('Spec review returned unparseable JSON, treating as PASS');
-      return { passed: true, missing: [], extra: [], concerns: [] };
+      // BMAD: parse failure is suspicious — retry once then FAIL
+      log.warn("Spec review returned unparseable JSON, retrying once");
+      const retry = await this.brainThink(prompt);
+      if (retry.costUsd > 0 && task.id) {
+        await this.costTracker.addCost(task.id, retry.costUsd);
+      }
+      try {
+        return parseSpecResult(retry.text);
+      } catch {
+        log.warn("Spec review retry also unparseable — treating as FAIL");
+        return {
+          passed: false,
+          missing: ["spec review parse failure"],
+          extra: [],
+          concerns: [],
+        };
+      }
     }
   }
 
@@ -1128,8 +1944,11 @@ Respond with EXACTLY this JSON (no markdown, no extra text):
     personaName?: string,
   ): Promise<void> {
     // Build persona context for evolution
-    const personaData = personaName ? await this.taskStore.getPersona(personaName) : null;
-    const personaContext = personaData ? `
+    const personaData = personaName
+      ? await this.taskStore.getPersona(personaName)
+      : null;
+    const personaContext = personaData
+      ? `
 ## Current Persona: ${personaData.name}
 Role: ${personaData.role}
 Usage: ${personaData.usage_count} tasks, ${Math.round((personaData.success_rate ?? 0) * 100)}% success
@@ -1142,39 +1961,45 @@ you may update the persona content. Use this format to propose changes:
 PERSONA_UPDATE:
 [new full content for the persona, or "NO_CHANGE" if no update needed]
 END_PERSONA_UPDATE
-` : '';
+`
+      : "";
 
     const prompt = `Reflect on this completed task:
 
 Task: ${task.task_description}
 Outcome: ${outcome}
-Verification: ${verification.passed ? 'PASSED' : `FAILED — ${verification.reason}`}
+Verification: ${verification.passed ? "PASSED" : `FAILED — ${verification.reason}`}
 ${personaContext}
 1. What went well? What could be improved?
 2. If there are lessons learned, update CLAUDE.md "踩过的坑" section.
 3. Use claude-mem to save important experiences for future reference.
 4. If you notice patterns (recurring issues, good practices), add them to CLAUDE.md.
 5. Use superpowers:requesting-code-review to review the code changes if the task was merged.
-${personaData ? '6. If the persona needs updating based on this experience, include a PERSONA_UPDATE block.' : ''}
+${personaData ? "6. If the persona needs updating based on this experience, include a PERSONA_UPDATE block." : ""}
 
 Keep CLAUDE.md concise — only add genuinely useful rules.`;
 
     const result = await this.brainSession.run(prompt, {
-      permissionMode: 'bypassPermissions',
+      permissionMode: "bypassPermissions",
       maxTurns: 10,
       cwd: projectPath,
       timeout: 120_000,
-      model: this.config.values.brain.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
-      appendSystemPrompt: 'You are reflecting on a task. You CAN edit CLAUDE.md and use claude-mem. Do not modify source code.',
-      allowedTools: ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write'],
+      model:
+        this.config.values.brain.model === "opus"
+          ? "claude-opus-4-6"
+          : "claude-sonnet-4-6",
+      appendSystemPrompt:
+        "You are reflecting on a task. You CAN edit CLAUDE.md and use claude-mem. Do not modify source code.",
+      allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
     });
 
-    if (result.costUsd > 0) await this.costTracker.addCost(task.id, result.costUsd);
+    if (result.costUsd > 0)
+      await this.costTracker.addCost(task.id, result.costUsd);
 
     await this.taskStore.addLog({
       task_id: task.id,
-      phase: 'reflect',
-      agent: 'brain',
+      phase: "reflect",
+      agent: "brain",
       input_summary: `Reflect on ${outcome}`,
       output_summary: result.text.slice(0, SUMMARY_PREVIEW_LEN),
       cost_usd: result.costUsd,
@@ -1183,17 +2008,22 @@ Keep CLAUDE.md concise — only add genuinely useful rules.`;
 
     // Parse and apply persona evolution
     if (personaName && personaData) {
-      const updateMatch = result.text.match(/PERSONA_UPDATE:\s*\n([\s\S]*?)\nEND_PERSONA_UPDATE/);
+      const updateMatch = result.text.match(
+        /PERSONA_UPDATE:\s*\n([\s\S]*?)\nEND_PERSONA_UPDATE/,
+      );
       if (updateMatch) {
         const newContent = updateMatch[1].trim();
-        if (newContent && newContent !== 'NO_CHANGE') {
+        if (newContent && newContent !== "NO_CHANGE") {
           await this.taskStore.updatePersonaContent(personaName, newContent);
           log.info(`Persona ${personaName} evolved via brainReflect`);
           await this.taskStore.addLog({
-            task_id: task.id, phase: 'persona-evolution', agent: 'brain',
+            task_id: task.id,
+            phase: "persona-evolution",
+            agent: "brain",
             input_summary: `Persona ${personaName} updated`,
             output_summary: newContent.slice(0, SUMMARY_PREVIEW_LEN),
-            cost_usd: 0, duration_ms: 0,
+            cost_usd: 0,
+            duration_ms: 0,
           });
         }
       }
@@ -1201,16 +2031,18 @@ Keep CLAUDE.md concise — only add genuinely useful rules.`;
 
     // Update persona usage stats
     if (personaName) {
-      await this.taskStore.updatePersonaStats(personaName, outcome === 'success').catch(err =>
-        log.warn(`Failed to update persona stats for ${personaName}:`, err),
-      );
+      await this.taskStore
+        .updatePersonaStats(personaName, outcome === "success")
+        .catch((err) =>
+          log.warn(`Failed to update persona stats for ${personaName}:`, err),
+        );
     }
   }
 
   // --- Deep chain review (periodic) ---
 
   private async deepChainReview(projectPath: string): Promise<void> {
-    log.info('Starting periodic deep chain review');
+    log.info("Starting periodic deep chain review");
     const result = await this.brainSession.run(
       `Perform a deep review of the functional chains defined in CLAUDE.md.
 For each chain, trace the data flow and check:
@@ -1222,24 +2054,30 @@ For each chain, trace the data flow and check:
 If you find issues, create tasks for them by reporting what needs fixing.
 Update CLAUDE.md if you discover new patterns or pitfalls.`,
       {
-        permissionMode: 'bypassPermissions',
+        permissionMode: "bypassPermissions",
         maxTurns: 50,
         cwd: projectPath,
         timeout: 3_600_000,
-        model: this.config.values.brain.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
-        allowedTools: ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write'],
-        appendSystemPrompt: 'You are performing a deep code review. You CAN edit CLAUDE.md to add new patterns or pitfalls. Do not modify source code.',
+        model:
+          this.config.values.brain.model === "opus"
+            ? "claude-opus-4-6"
+            : "claude-sonnet-4-6",
+        allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
+        appendSystemPrompt:
+          "You are performing a deep code review. You CAN edit CLAUDE.md to add new patterns or pitfalls. Do not modify source code.",
       },
     );
 
     if (result.costUsd > 0) await this.taskStore.addDailyCost(result.costUsd);
-    log.info(`Deep chain review completed (${Math.round(result.durationMs / 1000)}s, $${result.costUsd.toFixed(4)})`);
+    log.info(
+      `Deep chain review completed (${Math.round(result.durationMs / 1000)}s, $${result.costUsd.toFixed(4)})`,
+    );
   }
 
   // --- Periodic CLAUDE.md maintenance ---
 
   private async claudeMdMaintenance(projectPath: string): Promise<void> {
-    log.info('Starting periodic CLAUDE.md maintenance');
+    log.info("Starting periodic CLAUDE.md maintenance");
     const result = await this.brainSession.run(
       `Perform a maintenance audit of CLAUDE.md. Keep it accurate, concise, and useful.
 
@@ -1257,18 +2095,24 @@ Rules:
 - Only state what you verify in the code.
 - Use claude-mem to note what you changed and why.`,
       {
-        permissionMode: 'bypassPermissions',
+        permissionMode: "bypassPermissions",
         maxTurns: 50,
         cwd: projectPath,
         timeout: 3_600_000,
-        model: this.config.values.brain.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
-        allowedTools: ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write'],
-        appendSystemPrompt: 'You are maintaining CLAUDE.md. You CAN edit CLAUDE.md. Do not modify source code.',
+        model:
+          this.config.values.brain.model === "opus"
+            ? "claude-opus-4-6"
+            : "claude-sonnet-4-6",
+        allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
+        appendSystemPrompt:
+          "You are maintaining CLAUDE.md. You CAN edit CLAUDE.md. Do not modify source code.",
       },
     );
 
     if (result.costUsd > 0) await this.taskStore.addDailyCost(result.costUsd);
-    log.info(`CLAUDE.md maintenance completed (${Math.round(result.durationMs / 1000)}s, $${result.costUsd.toFixed(4)})`);
+    log.info(
+      `CLAUDE.md maintenance completed (${Math.round(result.durationMs / 1000)}s, $${result.costUsd.toFixed(4)})`,
+    );
   }
 
   // --- State management ---
@@ -1297,6 +2141,61 @@ Rules:
     this.broadcastStatus();
   }
 
+  private resetCycleSteps(): void {
+    this.cycleNumber++;
+    this.cycleSteps = CYCLE_PIPELINE.map((phase) => ({
+      phase,
+      status: "pending" as CycleStepStatus,
+    }));
+    this.currentPhase = null;
+    this.broadcastStatus();
+  }
+
+  private beginStep(phase: string): void {
+    this.currentPhase = phase;
+    this.cycleSteps = this.cycleSteps.map((s) =>
+      s.phase === phase
+        ? { ...s, status: "active" as CycleStepStatus, startedAt: Date.now() }
+        : s,
+    );
+    this.broadcastStatus();
+  }
+
+  private endStep(
+    phase: string,
+    result: "done" | "failed" | "skipped",
+    summary?: string,
+  ): void {
+    const now = Date.now();
+    this.cycleSteps = this.cycleSteps.map((s) => {
+      if (s.phase !== phase) return s;
+      const durationMs = s.startedAt ? now - s.startedAt : undefined;
+      return {
+        ...s,
+        status: result as CycleStepStatus,
+        finishedAt: now,
+        durationMs,
+        summary,
+      };
+    });
+    this.broadcastStatus();
+  }
+
+  private skipRemainingSteps(fromPhase?: string): void {
+    let shouldSkip = !fromPhase;
+    this.cycleSteps = this.cycleSteps.map((s) => {
+      if (s.phase === fromPhase) {
+        shouldSkip = true;
+        return s;
+      }
+      if (shouldSkip && s.status === "pending") {
+        return { ...s, status: "skipped" as CycleStepStatus };
+      }
+      return s;
+    });
+    this.broadcastStatus();
+  }
+
   private broadcastStatus(): void {
     if (this.statusListeners.size === 0) return;
     const snapshot: StatusSnapshot = {
@@ -1304,9 +2203,17 @@ Rules:
       currentTaskId: this.currentTaskId,
       patrolling: this.running,
       paused: this.paused,
+      cycleNumber: this.cycleNumber,
+      currentPhase: this.currentPhase ?? undefined,
+      cycleSteps: [...this.cycleSteps],
+      taskDescription: this.currentTaskDescription ?? undefined,
     };
     for (const listener of this.statusListeners) {
-      try { listener(snapshot); } catch { /* ignore listener failures */ }
+      try {
+        listener(snapshot);
+      } catch {
+        /* ignore listener failures */
+      }
     }
   }
 
@@ -1314,46 +2221,72 @@ Rules:
 
   private isSelfProject(): boolean {
     try {
-      const pkgPath = join(this.config.projectPath, 'package.json');
+      const pkgPath = join(this.config.projectPath, "package.json");
       if (!existsSync(pkgPath)) return false;
-      const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
-      return pkg.name === 'db-coder';
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+      return pkg.name === "db-coder";
     } catch {
       return false;
     }
   }
 
   private writeBuildError(error: string): void {
-    const dir = join(homedir(), '.db-coder');
+    const dir = join(homedir(), ".db-coder");
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'build-error.json'), JSON.stringify({
-      timestamp: new Date().toISOString(), type: 'build', error,
-    }, null, 2));
+    writeFileSync(
+      join(dir, "build-error.json"),
+      JSON.stringify(
+        {
+          timestamp: new Date().toISOString(),
+          type: "build",
+          error,
+        },
+        null,
+        2,
+      ),
+    );
   }
 
   private acquireLock(): boolean {
     if (existsSync(this.lockFile)) {
       try {
-        const pid = parseInt(readFileSync(this.lockFile, 'utf-8'), 10);
-        if (pid === process.pid) { /* same process restart */ }
-        else { try { process.kill(pid, 0); return false; } catch { /* stale lock */ } }
-      } catch { /* invalid lock file */ }
+        const pid = parseInt(readFileSync(this.lockFile, "utf-8"), 10);
+        if (pid === process.pid) {
+          /* same process restart */
+        } else {
+          try {
+            process.kill(pid, 0);
+            return false;
+          } catch {
+            /* stale lock */
+          }
+        }
+      } catch {
+        /* invalid lock file */
+      }
     }
-    const lockDir = join(homedir(), '.db-coder');
+    const lockDir = join(homedir(), ".db-coder");
     mkdirSync(lockDir, { recursive: true });
     writeFileSync(this.lockFile, String(process.pid));
     return true;
   }
 
   private releaseLock(): void {
-    try { unlinkSync(this.lockFile); } catch { /* ignore */ }
+    try {
+      unlinkSync(this.lockFile);
+    } catch {
+      /* ignore */
+    }
   }
 
   private async checkBudgetOrAbort(taskId: string): Promise<boolean> {
     const budget = await this.costTracker.checkBudget(taskId);
     if (budget.allowed) return false;
     log.warn(`Budget exceeded: ${budget.reason}`);
-    await this.taskStore.updateTask(taskId, { status: 'blocked', phase: 'blocked' });
+    await this.taskStore.updateTask(taskId, {
+      status: "blocked",
+      phase: "blocked",
+    });
     return true;
   }
 
@@ -1364,16 +2297,20 @@ Rules:
     if (branches.length === 0) return;
 
     const [queued, active] = await Promise.all([
-      this.taskStore.listTasks(projectPath, 'queued'),
-      this.taskStore.listTasks(projectPath, 'active'),
+      this.taskStore.listTasks(projectPath, "queued"),
+      this.taskStore.listTasks(projectPath, "active"),
     ]);
-    const activeBranches = new Set([...queued, ...active].map(t => t.git_branch).filter(Boolean));
+    const activeBranches = new Set(
+      [...queued, ...active].map((t) => t.git_branch).filter(Boolean),
+    );
 
     let cleaned = 0;
     for (const branch of branches) {
       if (activeBranches.has(branch)) continue;
       await this.cleanupTaskBranch(branch);
-      const stillExists = await branchExists(branch, projectPath).catch(() => true);
+      const stillExists = await branchExists(branch, projectPath).catch(
+        () => true,
+      );
       if (!stillExists) cleaned++;
     }
     if (cleaned > 0) log.info(`Cleaned up ${cleaned} orphaned branch(es)`);
@@ -1390,18 +2327,24 @@ Rules:
 
 // --- Exported utilities (used by tests and routes) ---
 
-export function mergeReviews(claude: ReviewResult, codex: ReviewResult): MergedReviewResult {
+export function mergeReviews(
+  claude: ReviewResult,
+  codex: ReviewResult,
+): MergedReviewResult {
   const mustFix: ReviewIssue[] = [];
   const shouldFix: ReviewIssue[] = [];
 
   for (const ci of claude.issues) {
-    const match = codex.issues.find(xi => {
+    const match = codex.issues.find((xi) => {
       const fileMatch = !!(xi.file && ci.file && xi.file === ci.file);
       const descSim = wordJaccard(xi.description, ci.description);
       return fileMatch && descSim > 0.4;
     });
     if (match) {
-      mustFix.push({ ...ci, severity: higherSeverity(ci.severity, match.severity) });
+      mustFix.push({
+        ...ci,
+        severity: higherSeverity(ci.severity, match.severity),
+      });
     } else {
       shouldFix.push(ci);
     }
@@ -1409,19 +2352,34 @@ export function mergeReviews(claude: ReviewResult, codex: ReviewResult): MergedR
 
   for (const xi of codex.issues) {
     const alreadyMerged = mustFix.some(
-      m => wordJaccard(m.description, xi.description) > 0.4 && ((m.file && xi.file) ? m.file === xi.file : true),
+      (m) =>
+        wordJaccard(m.description, xi.description) > 0.4 &&
+        (m.file && xi.file ? m.file === xi.file : true),
     );
     if (!alreadyMerged) shouldFix.push(xi);
   }
 
   const claudeRawFail = !claude.passed && claude.issues.length === 0;
   const codexRawFail = !codex.passed && codex.issues.length === 0;
-  if (claudeRawFail) shouldFix.push({ description: 'Claude reviewer explicitly failed without structured issues', severity: 'medium', source: 'claude' });
-  if (codexRawFail) shouldFix.push({ description: 'Codex reviewer explicitly failed without structured issues', severity: 'medium', source: 'codex' });
+  if (claudeRawFail)
+    shouldFix.push({
+      description:
+        "Claude reviewer explicitly failed without structured issues",
+      severity: "medium",
+      source: "claude",
+    });
+  if (codexRawFail)
+    shouldFix.push({
+      description: "Codex reviewer explicitly failed without structured issues",
+      severity: "medium",
+      source: "codex",
+    });
 
   const effectiveConfidence = (i: ReviewIssue) => i.confidence ?? 1.0;
   const hasCriticalMustFix = mustFix.some(
-    i => (i.severity === 'critical' || i.severity === 'high') && effectiveConfidence(i) >= 0.8
+    (i) =>
+      (i.severity === "critical" || i.severity === "high") &&
+      effectiveConfidence(i) >= 0.8,
   );
   const hasRawFail = claudeRawFail || codexRawFail;
   const passed = !hasRawFail && (mustFix.length === 0 || !hasCriticalMustFix);
@@ -1436,24 +2394,27 @@ export function mergeReviews(claude: ReviewResult, codex: ReviewResult): MergedR
 
 export function extractIssueCategories(issues: ReviewIssue[]): string[] {
   const CATEGORY_PATTERNS: Record<string, RegExp> = {
-    'type-error': /type\s*(error|mismatch|incompatible)/i,
-    'null-safety': /null|undefined|optional/i,
-    'error-handling': /error\s*handl|try.catch|exception/i,
-    'security': /security|injection|xss|csrf|sanitiz/i,
-    'performance': /performance|slow|memory\s*leak|O\(n/i,
-    'code-style': /style|format|naming|convention|lint/i,
-    'logic-error': /logic|incorrect|wrong|bug/i,
-    'missing-test': /test|coverage|assert/i,
-    'import': /import|require|module|dependency/i,
-    'api-design': /api|interface|contract|signature/i,
+    "type-error": /type\s*(error|mismatch|incompatible)/i,
+    "null-safety": /null|undefined|optional/i,
+    "error-handling": /error\s*handl|try.catch|exception/i,
+    security: /security|injection|xss|csrf|sanitiz/i,
+    performance: /performance|slow|memory\s*leak|O\(n/i,
+    "code-style": /style|format|naming|convention|lint/i,
+    "logic-error": /logic|incorrect|wrong|bug/i,
+    "missing-test": /test|coverage|assert/i,
+    import: /import|require|module|dependency/i,
+    "api-design": /api|interface|contract|signature/i,
   };
 
   const categories = new Set<string>();
   for (const issue of issues) {
-    const text = `${issue.description} ${issue.suggestion ?? ''}`;
+    const text = `${issue.description} ${issue.suggestion ?? ""}`;
     let matched = false;
     for (const [cat, pattern] of Object.entries(CATEGORY_PATTERNS)) {
-      if (pattern.test(text)) { categories.add(cat); matched = true; }
+      if (pattern.test(text)) {
+        categories.add(cat);
+        matched = true;
+      }
     }
     if (!matched) categories.add(`severity-${issue.severity}`);
   }
@@ -1461,21 +2422,32 @@ export function extractIssueCategories(issues: ReviewIssue[]): string[] {
 }
 
 export async function countTscErrors(cwd: string): Promise<number> {
-  if (!countTscErrorsDeps.existsSync(join(cwd, 'tsconfig.json'))) return 0;
+  if (!countTscErrorsDeps.existsSync(join(cwd, "tsconfig.json"))) return 0;
   try {
-    const result = await countTscErrorsDeps.runProcess('npx', ['tsc', '--noEmit'], { cwd, timeout: 60_000 });
-    return (result.stdout + result.stderr).split('\n').filter(l => l.includes(': error TS')).length;
+    const result = await countTscErrorsDeps.runProcess(
+      "npx",
+      ["tsc", "--noEmit"],
+      { cwd, timeout: 60_000 },
+    );
+    return (result.stdout + result.stderr)
+      .split("\n")
+      .filter((l) => l.includes(": error TS")).length;
   } catch (e) {
-    log.warn('countTscErrors failed', { error: e instanceof Error ? e.message : String(e) });
+    log.warn("countTscErrors failed", {
+      error: e instanceof Error ? e.message : String(e),
+    });
     return -1;
   }
 }
 
-function higherSeverity(a: ReviewIssue['severity'], b: ReviewIssue['severity']): ReviewIssue['severity'] {
+function higherSeverity(
+  a: ReviewIssue["severity"],
+  b: ReviewIssue["severity"],
+): ReviewIssue["severity"] {
   const order = { critical: 0, high: 1, medium: 2, low: 3 };
   return order[a] <= order[b] ? a : b;
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
