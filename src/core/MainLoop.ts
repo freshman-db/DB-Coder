@@ -253,7 +253,7 @@ export class MainLoop {
     this.setState('scanning');
     const queued = await this.taskQueue.getNext(projectPath);
     let task: Task;
-    let personaOpts: { persona?: string; taskType?: string } | undefined;
+    let brainOpts: { persona?: string; taskType?: string; subtasks?: Array<{ description: string; order: number }> } | undefined;
 
     if (queued) {
       task = queued;
@@ -318,7 +318,7 @@ export class MainLoop {
         });
       }
 
-      personaOpts = { persona: decision.persona, taskType: decision.taskType };
+      brainOpts = { persona: decision.persona, taskType: decision.taskType, subtasks: decision.subtasks };
     }
 
     // 3. Budget check
@@ -350,7 +350,7 @@ export class MainLoop {
         start_commit: startCommit,
       });
 
-      // 5. Worker executes
+      // 5. Execute (subtask loop or single shot)
       this.setState('executing');
       const guardErrors = await this.eventBus.emitAndWait(this.makeEvent('execute', 'before', { taskDescription: task.task_description }));
       if (guardErrors.length > 0) {
@@ -362,51 +362,73 @@ export class MainLoop {
         this.setState('idle');
         return false;
       }
-      const workerResult = await this.workerExecute(task, personaOpts);
-      if (workerResult.costUsd > 0) await this.costTracker.addCost(task.id, workerResult.costUsd);
 
-      await this.taskStore.addLog({
-        task_id: task.id,
-        phase: 'execute',
-        agent: 'claude-code',
-        input_summary: truncate(task.task_description, SUMMARY_PREVIEW_LEN),
-        output_summary: workerResult.text.slice(0, SUMMARY_PREVIEW_LEN),
-        cost_usd: workerResult.costUsd,
-        duration_ms: workerResult.durationMs,
-      });
-      this.eventBus.emit(this.makeEvent('execute', 'after', { startCommit, result: { costUsd: workerResult.costUsd, durationMs: workerResult.durationMs } }));
+      let workerPassed: boolean;
+      const verification: { passed: boolean; reason?: string } = { passed: true };
 
-      // 6. Hard verification (zero LLM cost)
-      this.setState('reviewing');
-      const verifyStart = Date.now();
-      const verification = await this.hardVerify(baselineErrors, startCommit, projectPath);
-      await this.taskStore.addLog({
-        task_id: task.id,
-        phase: 'verify',
-        agent: 'tsc',
-        input_summary: `baseline=${baselineErrors}, startCommit=${startCommit}`,
-        output_summary: verification.passed ? 'PASS' : `FAIL: ${verification.reason}`,
-        cost_usd: 0,
-        duration_ms: Date.now() - verifyStart,
-      });
-      this.eventBus.emit(this.makeEvent('verify', 'after', { verification, startCommit }));
+      if (brainOpts?.subtasks && brainOpts.subtasks.length > 0) {
+        // Subtask execution loop
+        const result = await this.executeSubtasks(task, brainOpts.subtasks, {
+          persona: brainOpts.persona,
+          taskType: brainOpts.taskType,
+          baselineErrors,
+          startCommit,
+        });
+        workerPassed = result.success;
+        verification.passed = result.success;
+        if (!result.success) verification.reason = 'Subtask verification failed';
+        this.eventBus.emit(this.makeEvent('execute', 'after', { startCommit, result: { costUsd: 0, durationMs: 0 } }));
+      } else {
+        // Single-shot execution (existing flow)
+        const workerResult = await this.workerExecute(task, brainOpts);
+        if (workerResult.costUsd > 0) await this.costTracker.addCost(task.id, workerResult.costUsd);
 
-      // 7. If verification failed, give worker a chance to fix
-      if (!verification.passed && workerResult.sessionId) {
-        log.warn(`Hard verification failed: ${verification.reason}`);
-        const fixResult = await this.workerFix(workerResult.sessionId, verification.reason ?? 'Unknown error', task);
-        if (fixResult.costUsd > 0) await this.costTracker.addCost(task.id, fixResult.costUsd);
+        await this.taskStore.addLog({
+          task_id: task.id,
+          phase: 'execute',
+          agent: 'claude-code',
+          input_summary: truncate(task.task_description, SUMMARY_PREVIEW_LEN),
+          output_summary: workerResult.text.slice(0, SUMMARY_PREVIEW_LEN),
+          cost_usd: workerResult.costUsd,
+          duration_ms: workerResult.durationMs,
+        });
+        this.eventBus.emit(this.makeEvent('execute', 'after', { startCommit, result: { costUsd: workerResult.costUsd, durationMs: workerResult.durationMs } }));
 
-        // Re-verify after fix
-        const changedFilesForCommit = await getModifiedAndAddedFiles(projectPath).catch(() => []);
-        await commitAll('db-coder: fix verification issues', projectPath, changedFilesForCommit).catch(() => {});
-        const reVerify = await this.hardVerify(baselineErrors, startCommit, projectPath);
-        if (!reVerify.passed) {
-          log.warn(`Re-verification still failed: ${reVerify.reason}`);
+        // Hard verification
+        this.setState('reviewing');
+        const verifyStart = Date.now();
+        const singleVerify = await this.hardVerify(baselineErrors, startCommit, projectPath);
+        await this.taskStore.addLog({
+          task_id: task.id,
+          phase: 'verify',
+          agent: 'tsc',
+          input_summary: `baseline=${baselineErrors}, startCommit=${startCommit}`,
+          output_summary: singleVerify.passed ? 'PASS' : `FAIL: ${singleVerify.reason}`,
+          cost_usd: 0,
+          duration_ms: Date.now() - verifyStart,
+        });
+        this.eventBus.emit(this.makeEvent('verify', 'after', { verification: singleVerify, startCommit }));
+
+        // Fix attempt if verification failed
+        if (!singleVerify.passed && workerResult.sessionId) {
+          log.warn(`Hard verification failed: ${singleVerify.reason}`);
+          const fixResult = await this.workerFix(workerResult.sessionId, singleVerify.reason ?? 'Unknown error', task);
+          if (fixResult.costUsd > 0) await this.costTracker.addCost(task.id, fixResult.costUsd);
+
+          const changedFilesForCommit = await getModifiedAndAddedFiles(projectPath).catch(() => []);
+          await commitAll('db-coder: fix verification issues', projectPath, changedFilesForCommit).catch(() => {});
+          const reVerify = await this.hardVerify(baselineErrors, startCommit, projectPath);
+          if (!reVerify.passed) {
+            log.warn(`Re-verification still failed: ${reVerify.reason}`);
+          }
+          singleVerify.passed = reVerify.passed;
+          singleVerify.reason = reVerify.reason;
+          this.eventBus.emit(this.makeEvent('fix', 'after', { verification: singleVerify }));
         }
-        verification.passed = reVerify.passed;
-        verification.reason = reVerify.reason;
-        this.eventBus.emit(this.makeEvent('fix', 'after', { verification }));
+
+        workerPassed = singleVerify.passed;
+        verification.passed = singleVerify.passed;
+        verification.reason = singleVerify.reason;
       }
 
       // 8. Codex review (parallel with brain review would be ideal but sequential for simplicity)
@@ -447,7 +469,7 @@ export class MainLoop {
       }
 
       // 9. Decide: merge or discard
-      const shouldMerge = verification.passed && codexReviewPassed;
+      const shouldMerge = workerPassed && codexReviewPassed;
       this.eventBus.emit(this.makeEvent('review', 'after', { passed: codexReviewPassed }));
 
       // 10. Brain reflects and learns
@@ -730,6 +752,83 @@ Respond with EXACTLY this JSON (no markdown):
       model: this.config.values.claude.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
       appendSystemPrompt: systemPrompt,
     });
+  }
+
+  private async executeSubtasks(
+    task: Task,
+    subtasks: Array<{ description: string; order: number }>,
+    opts: { persona?: string; taskType?: string; baselineErrors: number; startCommit: string },
+  ): Promise<{ success: boolean; sessionId?: string }> {
+    const sorted = [...subtasks].sort((a, b) => a.order - b.order);
+
+    for (let i = 0; i < sorted.length; i++) {
+      const st = sorted[i];
+      log.info(`Subtask ${i + 1}/${sorted.length}: ${truncate(st.description, 100)}`);
+
+      // Update subtask status to running
+      const currentSubtasks = (task.subtasks ?? []).map((s, idx) =>
+        idx === i ? { ...s, status: 'running' as const } : s,
+      );
+      await this.taskStore.updateTask(task.id, { subtasks: currentSubtasks });
+
+      // Execute in fresh worker session
+      const result = await this.workerExecute(task, {
+        persona: opts.persona,
+        taskType: opts.taskType,
+        subtaskDescription: st.description,
+      });
+
+      if (result.costUsd > 0) await this.costTracker.addCost(task.id, result.costUsd);
+
+      await this.taskStore.addLog({
+        task_id: task.id,
+        phase: 'execute',
+        agent: 'claude-code',
+        input_summary: `subtask ${i + 1}/${sorted.length}: ${truncate(st.description, 80)}`,
+        output_summary: result.text.slice(0, SUMMARY_PREVIEW_LEN),
+        cost_usd: result.costUsd,
+        duration_ms: result.durationMs,
+      });
+
+      // Per-subtask hard verify
+      const verification = await this.hardVerify(opts.baselineErrors, opts.startCommit, this.config.projectPath);
+      if (!verification.passed) {
+        log.warn(`Subtask ${i + 1} verification failed: ${verification.reason}`);
+
+        // Try to fix
+        if (result.sessionId) {
+          const fixResult = await this.workerFix(result.sessionId, verification.reason ?? 'Unknown', task);
+          if (fixResult.costUsd > 0) await this.costTracker.addCost(task.id, fixResult.costUsd);
+
+          const reVerify = await this.hardVerify(opts.baselineErrors, opts.startCommit, this.config.projectPath);
+          if (!reVerify.passed) {
+            log.warn(`Subtask ${i + 1} re-verification failed: ${reVerify.reason}`);
+            // Mark subtask failed, abort remaining
+            const failedSubtasks = (task.subtasks ?? []).map((s, idx) =>
+              idx === i ? { ...s, status: 'failed' as const, result: reVerify.reason } : s,
+            );
+            await this.taskStore.updateTask(task.id, { subtasks: failedSubtasks });
+            return { success: false };
+          }
+        } else {
+          const failedSubtasks = (task.subtasks ?? []).map((s, idx) =>
+            idx === i ? { ...s, status: 'failed' as const, result: verification.reason } : s,
+          );
+          await this.taskStore.updateTask(task.id, { subtasks: failedSubtasks });
+          return { success: false };
+        }
+      }
+
+      // Mark subtask done
+      const doneSubtasks = (task.subtasks ?? []).map((s, idx) =>
+        idx === i ? { ...s, status: 'done' as const } : s,
+      );
+      await this.taskStore.updateTask(task.id, { subtasks: doneSubtasks });
+      // Re-read task for updated subtask state
+      task = (await this.taskStore.getTask(task.id))!;
+    }
+
+    return { success: true };
   }
 
   private async workerFix(sessionId: string, errors: string, task: Task): Promise<SessionResult> {
