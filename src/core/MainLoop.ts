@@ -4,6 +4,7 @@ import type { CodexBridge } from '../bridges/CodexBridge.js';
 import type { TaskStore } from '../memory/TaskStore.js';
 import type { CostTracker } from '../utils/cost.js';
 import { ClaudeCodeSession, type SessionResult } from '../bridges/ClaudeCodeSession.js';
+import type { SdkExtras } from '../bridges/buildSdkOptions.js';
 import type { Task, SubTaskRecord } from '../memory/types.js';
 import type { MergedReviewResult, LoopState, StatusSnapshot } from './types.js';
 import type { ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
@@ -66,8 +67,8 @@ export class MainLoop {
   private stoppedPromise: Promise<void> | null = null;
   private stoppedResolve: (() => void) | null = null;
   private tasksCompleted = 0;
-  private brainSession = new ClaudeCodeSession();
-  private workerSession = new ClaudeCodeSession();
+  private brainSession!: ClaudeCodeSession;
+  private workerSession!: ClaudeCodeSession;
   private discoveredModules: string[] = [];
   private moduleIndex = 0;
   private personaLoader: PersonaLoader;
@@ -79,11 +80,14 @@ export class MainLoop {
     private taskStore: TaskStore,
     private costTracker: CostTracker,
     private eventBus: CycleEventBus = CycleEventBus.noop(),
+    private sdkExtras?: SdkExtras,
   ) {
     const hash = createHash('md5').update(config.projectPath).digest('hex').slice(0, BRANCH_ID_LENGTH);
     const lockDir = join(homedir(), '.db-coder');
     this.lockFile = join(lockDir, `${hash}.lock`);
     this.personaLoader = new PersonaLoader(taskStore, join(config.projectPath, 'personas'));
+    this.brainSession = new ClaudeCodeSession(sdkExtras);
+    this.workerSession = new ClaudeCodeSession(sdkExtras);
   }
 
   private makeEvent(phase: CyclePhase, timing: CycleTiming, data: Record<string, unknown> = {}): CycleEvent {

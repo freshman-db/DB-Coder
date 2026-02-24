@@ -23,6 +23,9 @@ import { validateConfigForStartup } from './startup/configValidation.js';
 import { wireGracefulShutdown } from './startup/gracefulShutdown.js';
 import { checkAndRecoverErrors } from './startup/errorRecovery.js';
 import { TASK_DESC_MAX_LENGTH } from './types/constants.js';
+import { discoverPlugins } from './bridges/pluginDiscovery.js';
+import { buildHooks } from './bridges/hooks.js';
+import type { SdkExtras } from './bridges/buildSdkOptions.js';
 
 const program = new Command()
   .name('db-coder')
@@ -88,7 +91,16 @@ program
       }),
     });
 
-    const mainLoop = new MainLoop(config, taskQueue, codexBridge, taskStore, costTracker, eventBus);
+    // Discover plugins and build hooks for SDK sessions
+    const plugins = discoverPlugins();
+    const hooks = buildHooks({
+      onToolResult: (name, _input, _response) => {
+        log.debug(`Tool used: ${name}`);
+      },
+    });
+    const sdkExtras: SdkExtras = { plugins, hooks };
+
+    const mainLoop = new MainLoop(config, taskQueue, codexBridge, taskStore, costTracker, eventBus, sdkExtras);
     const patrolManager = new PatrolManager(mainLoop, taskStore, projectPath);
     const planChat = new PlanChatManager(taskStore, config);
 
