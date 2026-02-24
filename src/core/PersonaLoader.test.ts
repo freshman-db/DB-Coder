@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSeedFile, SKILL_MAP } from './PersonaLoader.js';
+import { parseSeedFile, SKILL_MAP, GLOBAL_WORKER_RULES } from './PersonaLoader.js';
 
 describe('parseSeedFile', () => {
   it('should parse frontmatter and content from persona seed file', () => {
@@ -40,6 +40,42 @@ Content here.`;
     assert.deepEqual(result.taskTypes, []);
     assert.deepEqual(result.focusAreas, []);
   });
+
+  it('should parse Critical Actions and Anti-Patterns sections into content', () => {
+    const raw = `---
+name: enhanced-persona
+role: Engineer
+taskTypes: [feature]
+focusAreas: [quality]
+---
+
+## Identity
+An enhanced persona.
+
+## Critical Actions
+
+### ALWAYS
+- Always do X
+
+### NEVER
+- Never do Y
+
+## Anti-Patterns
+- NEVER pattern Z
+
+## Quality Gates
+
+### Correctness
+- Gate 1`;
+
+    const result = parseSeedFile(raw);
+    assert.ok(result.content.includes('## Critical Actions'), 'Content should include Critical Actions');
+    assert.ok(result.content.includes('### ALWAYS'), 'Content should include ALWAYS subsection');
+    assert.ok(result.content.includes('### NEVER'), 'Content should include NEVER subsection');
+    assert.ok(result.content.includes('## Anti-Patterns'), 'Content should include Anti-Patterns');
+    assert.ok(result.content.includes('NEVER pattern Z'), 'Content should include specific anti-pattern');
+    assert.ok(result.content.includes('### Correctness'), 'Content should include Quality Gates subcategories');
+  });
 });
 
 describe('SKILL_MAP', () => {
@@ -54,5 +90,21 @@ describe('SKILL_MAP', () => {
       const hasVerification = skills.some(s => s.includes('verification'));
       assert.ok(hasVerification, `All task types should include a verification skill`);
     }
+  });
+});
+
+describe('GLOBAL_WORKER_RULES', () => {
+  it('should contain essential rule categories', () => {
+    assert.ok(GLOBAL_WORKER_RULES.includes('SCOPE'), 'Should include SCOPE rule');
+    assert.ok(GLOBAL_WORKER_RULES.includes('HALT'), 'Should include HALT rule');
+    assert.ok(GLOBAL_WORKER_RULES.includes('GIT REALITY'), 'Should include GIT REALITY rule');
+    assert.ok(GLOBAL_WORKER_RULES.includes('NO SILENT FAILURES'), 'Should include NO SILENT FAILURES rule');
+    assert.ok(GLOBAL_WORKER_RULES.includes('TYPE SAFETY'), 'Should include TYPE SAFETY rule');
+    assert.ok(GLOBAL_WORKER_RULES.includes('VERIFY'), 'Should include VERIFY rule');
+  });
+
+  it('should be a non-empty string', () => {
+    assert.ok(typeof GLOBAL_WORKER_RULES === 'string');
+    assert.ok(GLOBAL_WORKER_RULES.length > 100, 'Rules should have substantial content');
   });
 });

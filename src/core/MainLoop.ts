@@ -409,21 +409,36 @@ export class MainLoop {
         });
         this.eventBus.emit(this.makeEvent('verify', 'after', { verification: singleVerify, startCommit }));
 
-        // Fix attempt if verification failed
-        if (!singleVerify.passed && workerResult.sessionId) {
-          log.warn(`Hard verification failed: ${singleVerify.reason}`);
-          const fixResult = await this.workerFix(workerResult.sessionId, singleVerify.reason ?? 'Unknown error', task);
+        // HALT retry loop: fix up to maxRetries times
+        const maxRetries = this.config.values.autonomy.maxRetries;
+        let fixAttempts = 0;
+        let currentSessionId = workerResult.sessionId;
+
+        while (!singleVerify.passed && currentSessionId && fixAttempts < maxRetries) {
+          fixAttempts++;
+          log.warn(`Hard verification failed (attempt ${fixAttempts}/${maxRetries}): ${singleVerify.reason}`);
+          const fixResult = await this.workerFix(currentSessionId, singleVerify.reason ?? 'Unknown error', task);
           if (fixResult.costUsd > 0) await this.costTracker.addCost(task.id, fixResult.costUsd);
+          currentSessionId = fixResult.sessionId ?? currentSessionId;
 
           const changedFilesForCommit = await getModifiedAndAddedFiles(projectPath).catch(() => []);
           await commitAll('db-coder: fix verification issues', projectPath, changedFilesForCommit).catch(() => {});
           const reVerify = await this.hardVerify(baselineErrors, startCommit, projectPath);
-          if (!reVerify.passed) {
-            log.warn(`Re-verification still failed: ${reVerify.reason}`);
-          }
           singleVerify.passed = reVerify.passed;
           singleVerify.reason = reVerify.reason;
           this.eventBus.emit(this.makeEvent('fix', 'after', { verification: singleVerify }));
+        }
+
+        if (!singleVerify.passed && fixAttempts >= maxRetries) {
+          log.warn(`HALT after ${fixAttempts} fix attempts: ${singleVerify.reason}`);
+          if (brainOpts?.persona) {
+            await this.taskStore.addLog({
+              task_id: task.id, phase: 'halt-learning', agent: 'system',
+              input_summary: `persona=${brainOpts.persona}`,
+              output_summary: `HALT triggered: ${singleVerify.reason} (after ${fixAttempts} attempts)`,
+              cost_usd: 0, duration_ms: 0,
+            });
+          }
         }
 
         workerPassed = singleVerify.passed;
@@ -451,7 +466,41 @@ export class MainLoop {
         if (changedFiles.length > 0) {
           const reviewStart = Date.now();
           const codexReview = await this.codex.review(
-            `Review these changed files for bugs, security issues, and code quality:\n${changedFiles.join('\n')}`,
+            `You are an adversarial code reviewer. Presume issues exist — find them.
+
+## Changed Files
+${changedFiles.join('\n')}
+
+## Review Focus Areas
+
+### 1. Bugs & Logic Errors
+- Off-by-one errors, null dereference, race conditions
+- Missing await on async calls, unhandled promise rejections
+- Incorrect boolean logic, missing break/return statements
+
+### 2. Security
+- Unvalidated input, injection vectors (SQL, command, XSS)
+- Sensitive data in logs, hardcoded credentials
+- Missing authentication/authorization checks
+
+### 3. Error Handling
+- Catch blocks that swallow errors silently
+- Missing error propagation in async chains
+- Default return values hiding failures
+
+### 4. Type Safety
+- New \`any\` types introduced
+- Unsafe type assertions (as unknown as T)
+- Missing null checks on optional values
+
+### 5. Scope Creep
+- Changes unrelated to the stated purpose
+- "While I'm here" improvements mixed with the main change
+
+## Rules
+- Find 3-10 specific issues with file names and descriptions.
+- If fewer than 3 issues found, explain why the code quality is exceptional.
+- Be concrete — cite specific code patterns, not vague concerns.`,
             projectPath,
           );
           if (codexReview.cost_usd > 0) await this.costTracker.addCost(task.id, codexReview.cost_usd);
@@ -805,29 +854,41 @@ Respond with EXACTLY this JSON (no markdown):
         duration_ms: result.durationMs,
       });
 
-      // Per-subtask hard verify
+      // Per-subtask hard verify with HALT retry loop
       const verification = await this.hardVerify(opts.baselineErrors, opts.startCommit, this.config.projectPath);
       if (!verification.passed) {
-        log.warn(`Subtask ${i + 1} verification failed: ${verification.reason}`);
+        const maxRetries = this.config.values.autonomy.maxRetries;
+        let fixAttempts = 0;
+        let currentSessionId = result.sessionId;
+        let lastVerification = verification;
 
-        // Try to fix
-        if (result.sessionId) {
-          const fixResult = await this.workerFix(result.sessionId, verification.reason ?? 'Unknown', task);
+        while (!lastVerification.passed && currentSessionId && fixAttempts < maxRetries) {
+          fixAttempts++;
+          log.warn(`Subtask ${i + 1} verification failed (attempt ${fixAttempts}/${maxRetries}): ${lastVerification.reason}`);
+          const fixResult = await this.workerFix(currentSessionId, lastVerification.reason ?? 'Unknown', task);
           if (fixResult.costUsd > 0) await this.costTracker.addCost(task.id, fixResult.costUsd);
+          currentSessionId = fixResult.sessionId ?? currentSessionId;
 
-          const reVerify = await this.hardVerify(opts.baselineErrors, opts.startCommit, this.config.projectPath);
-          if (!reVerify.passed) {
-            log.warn(`Subtask ${i + 1} re-verification failed: ${reVerify.reason}`);
-            // Mark subtask failed, abort remaining
-            const failedSubtasks = (task.subtasks ?? []).map((s, idx) =>
-              idx === i ? { ...s, status: 'failed' as const, result: reVerify.reason } : s,
-            );
-            await this.taskStore.updateTask(task.id, { subtasks: failedSubtasks });
-            return { success: false };
+          lastVerification = await this.hardVerify(opts.baselineErrors, opts.startCommit, this.config.projectPath);
+        }
+
+        if (!lastVerification.passed) {
+          const haltMsg = currentSessionId
+            ? `HALT after ${fixAttempts} fix attempts: ${lastVerification.reason}`
+            : `Verification failed, no session to fix: ${lastVerification.reason}`;
+          log.warn(`Subtask ${i + 1}: ${haltMsg}`);
+
+          if (opts.persona) {
+            await this.taskStore.addLog({
+              task_id: task.id, phase: 'halt-learning', agent: 'system',
+              input_summary: `persona=${opts.persona}, subtask=${i + 1}`,
+              output_summary: `HALT triggered: ${lastVerification.reason} (after ${fixAttempts} attempts)`,
+              cost_usd: 0, duration_ms: 0,
+            });
           }
-        } else {
+
           const failedSubtasks = (task.subtasks ?? []).map((s, idx) =>
-            idx === i ? { ...s, status: 'failed' as const, result: verification.reason } : s,
+            idx === i ? { ...s, status: 'failed' as const, result: lastVerification.reason } : s,
           );
           await this.taskStore.updateTask(task.id, { subtasks: failedSubtasks });
           return { success: false };
@@ -901,7 +962,8 @@ Respond with EXACTLY this JSON (no markdown):
     const diff = await getDiffSince(startCommit, projectPath).catch(() => '(diff unavailable)');
     const subtaskList = (task.subtasks ?? []).map(s => `- ${s.description}`).join('\n');
 
-    const prompt = `You are reviewing code changes for spec compliance. DO NOT trust commit messages — only examine the actual code.
+    const prompt = `You are an adversarial code reviewer. Presume issues exist — your job is to find them before you can pass.
+DO NOT trust commit messages — only examine the actual diff.
 
 ## Original Task
 ${task.task_description}
@@ -911,11 +973,33 @@ ${subtaskList ? `## Subtasks\n${subtaskList}\n` : ''}## Git Diff
 ${diff.slice(0, 15000)}
 \`\`\`
 
-## Review Instructions
-1. Does the implementation fully cover the task requirements?
-2. Are there any missing requirements that were not implemented?
-3. Are there any changes that go beyond the scope (extra work not requested)?
-4. Any concerns about the implementation approach?
+## Review Checklist (check ALL categories)
+
+### 1. Spec Compliance
+- Does the diff fully implement every requirement in the task?
+- Are there requirements mentioned but not implemented?
+
+### 2. Scope Discipline
+- Does the diff contain changes NOT requested by the task?
+- Are there "while I'm here" cleanups, refactors, or improvements?
+
+### 3. Correctness
+- Are there logic errors, off-by-one, or missing edge cases?
+- Are error paths handled explicitly (no catch-ignore)?
+
+### 4. Safety
+- Any new \`any\` types, unvalidated input, or injection vectors?
+- Are there catch blocks that swallow errors silently?
+
+### 5. Git Reality
+- Does the actual diff match what the task asked for?
+- Are there files changed that have no relation to the task?
+- Do commit messages accurately describe the changes?
+
+## Rules
+- Find 3-10 specific issues. Be concrete — cite file names and line context.
+- If you find fewer than 3 issues AND pass, you MUST explain why this code is exceptional.
+- "Looks good" without specific analysis is NOT acceptable.
 
 Respond with EXACTLY this JSON (no markdown, no extra text):
 {"passed": true/false, "missing": ["..."], "extra": ["..."], "concerns": ["..."]}`;
@@ -958,17 +1042,35 @@ Respond with EXACTLY this JSON (no markdown, no extra text):
     projectPath: string,
     personaName?: string,
   ): Promise<void> {
+    // Build persona context for evolution
+    const personaData = personaName ? await this.taskStore.getPersona(personaName) : null;
+    const personaContext = personaData ? `
+## Current Persona: ${personaData.name}
+Role: ${personaData.role}
+Usage: ${personaData.usage_count} tasks, ${Math.round((personaData.success_rate ?? 0) * 100)}% success
+Content:
+${personaData.content}
+
+If this task revealed a pattern (recurring failure, new anti-pattern, rule that should be added/removed),
+you may update the persona content. Use this format to propose changes:
+
+PERSONA_UPDATE:
+[new full content for the persona, or "NO_CHANGE" if no update needed]
+END_PERSONA_UPDATE
+` : '';
+
     const prompt = `Reflect on this completed task:
 
 Task: ${task.task_description}
 Outcome: ${outcome}
 Verification: ${verification.passed ? 'PASSED' : `FAILED — ${verification.reason}`}
-
+${personaContext}
 1. What went well? What could be improved?
 2. If there are lessons learned, update CLAUDE.md "踩过的坑" section.
 3. Use claude-mem to save important experiences for future reference.
 4. If you notice patterns (recurring issues, good practices), add them to CLAUDE.md.
 5. Use superpowers:requesting-code-review to review the code changes if the task was merged.
+${personaData ? '6. If the persona needs updating based on this experience, include a PERSONA_UPDATE block.' : ''}
 
 Keep CLAUDE.md concise — only add genuinely useful rules.`;
 
@@ -993,6 +1095,24 @@ Keep CLAUDE.md concise — only add genuinely useful rules.`;
       cost_usd: result.costUsd,
       duration_ms: result.durationMs,
     });
+
+    // Parse and apply persona evolution
+    if (personaName && personaData) {
+      const updateMatch = result.text.match(/PERSONA_UPDATE:\s*\n([\s\S]*?)\nEND_PERSONA_UPDATE/);
+      if (updateMatch) {
+        const newContent = updateMatch[1].trim();
+        if (newContent && newContent !== 'NO_CHANGE') {
+          await this.taskStore.updatePersonaContent(personaName, newContent);
+          log.info(`Persona ${personaName} evolved via brainReflect`);
+          await this.taskStore.addLog({
+            task_id: task.id, phase: 'persona-evolution', agent: 'brain',
+            input_summary: `Persona ${personaName} updated`,
+            output_summary: newContent.slice(0, SUMMARY_PREVIEW_LEN),
+            cost_usd: 0, duration_ms: 0,
+          });
+        }
+      }
+    }
 
     // Update persona usage stats
     if (personaName) {

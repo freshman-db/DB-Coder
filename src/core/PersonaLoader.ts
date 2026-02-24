@@ -24,6 +24,17 @@ export const SKILL_MAP: Record<string, string[]> = {
   docs: ['superpowers:verification-before-completion'],
 };
 
+/** Hard rules injected into every worker prompt regardless of persona */
+export const GLOBAL_WORKER_RULES = `## GLOBAL RULES (non-negotiable)
+- SCOPE: Only implement what the task description asks. No extra improvements, cleanups, or refactors.
+- HALT: If you fail the same verification 3 times in a row, STOP and report what's blocking you.
+- GIT REALITY: Your commits must match your claimed changes. Do not commit unrelated files.
+- NO SILENT FAILURES: Never catch-ignore errors. Every catch must log, rethrow, or return an explicit error.
+- TYPE SAFETY: Do not introduce \`any\` types. Use precise types or \`unknown\` with type guards.
+- VERIFY: Run tsc and tests before your final commit. Do not commit code that doesn't compile.
+- ONE CONCERN: Each commit addresses one logical change. Do not bundle unrelated changes.
+- IMPORTS: Import existing types — do not re-derive or duplicate type definitions.`;
+
 const DEFAULT_PERSONA_CONTENT = `## Identity
 You are a general-purpose coding worker. Execute the task precisely.
 
@@ -139,6 +150,8 @@ ${opts.taskDescription}
 
 Read CLAUDE.md for project context and environment rules.
 Do NOT modify CLAUDE.md — only the brain does that.
+
+${GLOBAL_WORKER_RULES}
 
 ## Skills to use
 ${skills.map(s => `- ${s}`).join('\n')}
