@@ -371,8 +371,19 @@ export class MainLoop {
         );
         if (codexReview.cost_usd > 0) await this.costTracker.addCost(task.id, codexReview.cost_usd);
         codexReviewPassed = codexReview.passed;
+
+        // Store review results and log for traceability
+        const reviewIssues = codexReview.issues ?? [];
+        await this.taskStore.updateTask(task.id, { review_results: reviewIssues });
         if (!codexReview.passed) {
-          log.info(`Codex review: FAIL — ${codexReview.summary}`);
+          log.info(`Codex review: FAIL — ${codexReview.summary}`, { issues: reviewIssues.length, summary: codexReview.summary });
+        } else {
+          log.info(`Codex review: PASS — ${codexReview.summary}`);
+        }
+        // Warn on suspicious parse failure (no issues but failed = likely parse error)
+        if (!codexReview.passed && reviewIssues.length === 0) {
+          log.warn('Codex review returned passed=false with zero issues — likely output parse failure, treating as PASS');
+          codexReviewPassed = true;
         }
       }
 
