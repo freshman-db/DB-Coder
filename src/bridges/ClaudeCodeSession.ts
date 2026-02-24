@@ -1,13 +1,18 @@
-import { query, type Query, type SDKMessage, type Options } from '@anthropic-ai/claude-agent-sdk';
-import { log } from '../utils/logger.js';
-import { buildSdkOptions, type SdkExtras } from './buildSdkOptions.js';
-import { collectResult } from './sdkMessageCollector.js';
+import {
+  query,
+  type Query,
+  type SDKMessage,
+  type Options,
+} from "@anthropic-ai/claude-agent-sdk";
+import { log } from "../utils/logger.js";
+import { buildSdkOptions, type SdkExtras } from "./buildSdkOptions.js";
+import { collectResult } from "./sdkMessageCollector.js";
 
 // --- Types (public interface unchanged) ---
 
 export interface SessionOptions {
   /** Permission mode */
-  permissionMode: 'bypassPermissions' | 'acceptEdits';
+  permissionMode: "bypassPermissions" | "acceptEdits";
   /** Max USD budget for this session */
   maxBudget?: number;
   /** Resume a previous session by ID */
@@ -89,7 +94,11 @@ export class ClaudeCodeSession {
    */
   async run(prompt: string, opts: SessionOptions): Promise<SessionResult> {
     const start = Date.now();
-    const { options, timeoutMs } = buildSdkOptions(prompt, opts, this.sdkExtras);
+    const { options, timeoutMs } = buildSdkOptions(
+      prompt,
+      opts,
+      this.sdkExtras,
+    );
 
     // Set up timeout via AbortController
     const ac = options.abortController ?? new AbortController();
@@ -103,7 +112,9 @@ export class ClaudeCodeSession {
     if (timeoutMs) {
       timer = setTimeout(() => {
         timedOut = true;
-        log.warn('ClaudeCodeSession: timeout, aborting query', { timeout: timeoutMs });
+        log.warn("ClaudeCodeSession: timeout, aborting query", {
+          timeout: timeoutMs,
+        });
         ac.abort();
       }, timeoutMs);
     }
@@ -131,59 +142,61 @@ export class ClaudeCodeSession {
 
       return {
         ...result,
-        durationMs: result.durationMs || (Date.now() - start),
+        durationMs: result.durationMs || Date.now() - start,
       };
     } catch (err: unknown) {
       if (timer) clearTimeout(timer);
 
       const errMsg = err instanceof Error ? err.message : String(err);
-      const isAbort = err instanceof Error && err.name === 'AbortError';
+      const isAbort = err instanceof Error && err.name === "AbortError";
 
       // Distinguish manual kill() from timeout
       if (this.killed) {
-        return {
-          text: '',
-          costUsd: 0,
-          sessionId: '',
-          exitCode: -2,
-          numTurns: 0,
-          durationMs: Date.now() - start,
-          isError: true,
-          errors: ['Session aborted by kill()'],
-          usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
-        };
+        return this.makeErrorResult(
+          -2,
+          ["Session aborted by kill()"],
+          Date.now() - start,
+        );
       }
 
       if (timedOut || isAbort) {
-        return {
-          text: '',
-          costUsd: 0,
-          sessionId: '',
-          exitCode: -1,
-          numTurns: 0,
-          durationMs: Date.now() - start,
-          isError: true,
-          errors: [`Session timed out after ${timeoutMs}ms`],
-          usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
-        };
+        return this.makeErrorResult(
+          -1,
+          [`Session timed out after ${timeoutMs}ms`],
+          Date.now() - start,
+        );
       }
 
-      log.error('ClaudeCodeSession: query failed', { error: errMsg });
-      return {
-        text: '',
-        costUsd: 0,
-        sessionId: '',
-        exitCode: 1,
-        numTurns: 0,
-        durationMs: Date.now() - start,
-        isError: true,
-        errors: [errMsg],
-        usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
-      };
+      log.error("ClaudeCodeSession: query failed", { error: errMsg });
+      return this.makeErrorResult(1, [errMsg], Date.now() - start);
     } finally {
       this.activeQuery = null;
       this.abortController = null;
     }
+  }
+
+  /** Build an error SessionResult with zeroed-out fields. */
+  private makeErrorResult(
+    exitCode: number,
+    errors: string[],
+    durationMs: number,
+  ): SessionResult {
+    return {
+      text: "",
+      costUsd: 0,
+      sessionId: "",
+      exitCode,
+      numTurns: 0,
+      durationMs,
+      isError: true,
+      errors,
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+      },
+    };
   }
 
   /** Abort the running query (manual kill, distinct from timeout) */
