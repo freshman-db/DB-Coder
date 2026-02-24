@@ -11,7 +11,6 @@ import {
 import type { SdkExtras } from "../bridges/buildSdkOptions.js";
 import type { Task, SubTaskRecord } from "../memory/types.js";
 import type {
-  MergedReviewResult,
   LoopState,
   StatusSnapshot,
   CycleStep,
@@ -21,7 +20,6 @@ import type {
   TaskType,
 } from "./types.js";
 import { CYCLE_PIPELINE } from "./types.js";
-import type { ReviewResult, ReviewIssue } from "../bridges/CodingAgent.js";
 import {
   createBranch,
   switchBranch,
@@ -40,7 +38,6 @@ import {
 } from "../utils/git.js";
 import { log } from "../utils/logger.js";
 import { truncate, extractJsonFromText, isRecord } from "../utils/parse.js";
-import { wordJaccard } from "../utils/similarity.js";
 import {
   SUMMARY_PREVIEW_LEN,
   TASK_DESC_MAX_LENGTH,
@@ -2320,100 +2317,6 @@ Rules:
 
 // --- Exported utilities (used by tests and routes) ---
 
-export function mergeReviews(
-  claude: ReviewResult,
-  codex: ReviewResult,
-): MergedReviewResult {
-  const mustFix: ReviewIssue[] = [];
-  const shouldFix: ReviewIssue[] = [];
-
-  for (const ci of claude.issues) {
-    const match = codex.issues.find((xi) => {
-      const fileMatch = !!(xi.file && ci.file && xi.file === ci.file);
-      const descSim = wordJaccard(xi.description, ci.description);
-      return fileMatch && descSim > 0.4;
-    });
-    if (match) {
-      mustFix.push({
-        ...ci,
-        severity: higherSeverity(ci.severity, match.severity),
-      });
-    } else {
-      shouldFix.push(ci);
-    }
-  }
-
-  for (const xi of codex.issues) {
-    const alreadyMerged = mustFix.some(
-      (m) =>
-        wordJaccard(m.description, xi.description) > 0.4 &&
-        (m.file && xi.file ? m.file === xi.file : true),
-    );
-    if (!alreadyMerged) shouldFix.push(xi);
-  }
-
-  const claudeRawFail = !claude.passed && claude.issues.length === 0;
-  const codexRawFail = !codex.passed && codex.issues.length === 0;
-  if (claudeRawFail)
-    shouldFix.push({
-      description:
-        "Claude reviewer explicitly failed without structured issues",
-      severity: "medium",
-      source: "claude",
-    });
-  if (codexRawFail)
-    shouldFix.push({
-      description: "Codex reviewer explicitly failed without structured issues",
-      severity: "medium",
-      source: "codex",
-    });
-
-  const effectiveConfidence = (i: ReviewIssue) => i.confidence ?? 1.0;
-  const hasCriticalMustFix = mustFix.some(
-    (i) =>
-      (i.severity === "critical" || i.severity === "high") &&
-      effectiveConfidence(i) >= 0.8,
-  );
-  const hasRawFail = claudeRawFail || codexRawFail;
-  const passed = !hasRawFail && (mustFix.length === 0 || !hasCriticalMustFix);
-
-  return {
-    passed,
-    mustFix,
-    shouldFix,
-    summary: `Claude: ${claude.summary}\nCodex: ${codex.summary}\nMust fix: ${mustFix.length}, Should fix: ${shouldFix.length}`,
-  };
-}
-
-export function extractIssueCategories(issues: ReviewIssue[]): string[] {
-  const CATEGORY_PATTERNS: Record<string, RegExp> = {
-    "type-error": /type\s*(error|mismatch|incompatible)/i,
-    "null-safety": /null|undefined|optional/i,
-    "error-handling": /error\s*handl|try.catch|exception/i,
-    security: /security|injection|xss|csrf|sanitiz/i,
-    performance: /performance|slow|memory\s*leak|O\(n/i,
-    "code-style": /style|format|naming|convention|lint/i,
-    "logic-error": /logic|incorrect|wrong|bug/i,
-    "missing-test": /test|coverage|assert/i,
-    import: /import|require|module|dependency/i,
-    "api-design": /api|interface|contract|signature/i,
-  };
-
-  const categories = new Set<string>();
-  for (const issue of issues) {
-    const text = `${issue.description} ${issue.suggestion ?? ""}`;
-    let matched = false;
-    for (const [cat, pattern] of Object.entries(CATEGORY_PATTERNS)) {
-      if (pattern.test(text)) {
-        categories.add(cat);
-        matched = true;
-      }
-    }
-    if (!matched) categories.add(`severity-${issue.severity}`);
-  }
-  return [...categories];
-}
-
 export async function countTscErrors(cwd: string): Promise<number> {
   if (!countTscErrorsDeps.existsSync(join(cwd, "tsconfig.json"))) return 0;
   try {
@@ -2431,14 +2334,6 @@ export async function countTscErrors(cwd: string): Promise<number> {
     });
     return -1;
   }
-}
-
-function higherSeverity(
-  a: ReviewIssue["severity"],
-  b: ReviewIssue["severity"],
-): ReviewIssue["severity"] {
-  const order = { critical: 0, high: 1, medium: 2, low: 3 };
-  return order[a] <= order[b] ? a : b;
 }
 
 function sleep(ms: number): Promise<void> {

@@ -15,24 +15,26 @@
   └── Web UI + API (SPA :18800)
 ```
 
-核心循环: `brainDecide() → workerExecute() → hardVerify() → codexReview() → brainReflect() → mergeBranch() → [deepChainReview] → [claudeMdMaintenance]`
+核心循环: `brainDecide() → workerExecute() → hardVerify() → specReview() → codexReview() → brainReflect() → mergeBranch() → [deepChainReview] → [claudeMdMaintenance]`
 
 ## 当前状态
 
 - [x] 核心循环 (MainLoop v2, brain+worker 模式)
-- [x] ClaudeCodeSession (Agent SDK query() API 封装)
-- [x] Agent SDK 回迁 (v0.2.52 query API + hooks + plugins + 复杂度分级)
+- [x] ClaudeCodeSession (Agent SDK query() 封装, ~226行)
+- [x] Agent SDK (v0.2.52 query API + hooks + plugins + 复杂度分级 S/M/L/XL)
 - [x] 巡逻模式 (自动循环, PatrolManager 管理启停)
 - [x] Web UI (SPA, 巡逻控制 + 任务列表)
 - [x] 费用追踪 (daily_costs 表 + CostTracker)
 - [x] Git 分支管理 (自动创建/合并/清理/孤儿分支清理)
 - [x] 硬验证 (tsc 错误计数对比基线)
-- [x] Codex 双重审查 (交叉验证 mustFix/shouldFix, 置信度过滤 ≥0.8)
+- [x] 三阶段审查 (hardVerify → specReview(Brain) → codexReview(Codex))
 - [x] 自修改重启 (safeBuild + exit code 75)
 - [x] 计划对话 (PlanChatManager + ClaudeCodeSession)
-- [x] 始终进化模式 (10 维度 + 模块轮转扫描 + 三层防御)
+- [x] 始终进化模式 (大脑反思驱动, CLAUDE.md + claude-mem)
 - [x] CLAUDE.md 自动维护 (brainReflect + 周期性 claudeMdMaintenance 每 15 任务)
 - [x] 深度链路审查 (每 5 个任务触发, 可编辑 CLAUDE.md)
+- [x] CycleEventBus (guards + observers 事件驱动架构)
+- [x] Persona 专业化 (PersonaLoader + personas 表 + 统计)
 
 ## 环境
 
@@ -47,7 +49,9 @@
 ```sql
 tasks: id(uuid), project_path, task_description, phase, priority(0-3),
        plan(jsonb), subtasks(jsonb), review_results(jsonb), iteration,
-       total_cost_usd, git_branch, start_commit, status, created_at
+       total_cost_usd, git_branch, start_commit, depends_on(uuid[]),
+       evaluation_score(jsonb), evaluation_reasoning, status,
+       created_at, updated_at
 
 task_logs: id(serial), task_id(fk), phase, agent, input_summary,
            output_summary, cost_usd, duration_ms, created_at
@@ -57,34 +61,41 @@ daily_costs: date(pk), total_cost_usd, task_count
 plan_drafts: id(serial), project_path, plan(jsonb), status,
              chat_session_id, chat_status, created_at
 
-plan_chat_messages: id(serial), plan_draft_id(fk), role, content,
+plan_chat_messages: id(serial), session_id, role, content,
                     metadata(jsonb), created_at
+
+service_state: (project_path, key)(pk), value, updated_at
+
+personas: id(serial), name(unique), role, content, task_types(text[]),
+          focus_areas(text[]), usage_count, success_rate, created_at
 ```
 
-停用表 (不删除, 停止写入): adjustments, memories, scan_modules, scan_results,
+停用表 (不删除, 停止写入): adjustments, scan_modules, scan_results,
 evaluation_events, review_events, goal_progress, prompt_versions, config_proposals
 
 ## 功能链路 (深度审查用)
 
 ### 自主循环
 入口: `MainLoop.runCycle()`
-路径: brainDecide → createTask → workerExecute(分支) → hardVerify → codexReview → brainReflect → mergeBranch
+路径: brainDecide → createTask → workerExecute(分支) → hardVerify → specReview(Brain) → codexReview(Codex) → brainReflect → mergeBranch
 关注: 错误向上冒泡, 验证失败阻止合并, 费用追踪完整
+已知缺陷: merge 失败丢弃有效工作 (无 rebase 重试); catch/finally 中 switchBranch 在 dirty state 下静默失败
 
 ### 任务执行
 入口: `workerExecute(task)`
 路径: ClaudeCodeSession.run(prompt) → Agent SDK query() → 编码 → git commit → 返回 SessionResult
 关注: timeout 处理, 成本追踪, sessionId 用于 workerFix 续传, complexity 分级控制资源 (S/M/L/XL)
+已知缺陷: workerExecute 返回后不检查 isError; workerFix 的 sessionId="" 导致重试循环提前退出
 
 ### 硬验证
 入口: `hardVerify(baselineErrors, startCommit, projectPath)`
 路径: countTscErrors (对比基线) → getDiffStats (检查是否有实际变更)
 关注: 基线错误数必须可靠, tsc 失败返回 -1 时不阻止合并
+已知缺陷: getDiffStats 结果仅用于 warn, 未用于 pass/fail (空 diff 检查未实现); baselineErrors 在 runCycle call site 不验证 <0, 崩溃 baseline 导致验证自动 pass
 
-### 审查合并
-入口: `mergeReviews(claude, codex)`
-路径: 文件+描述匹配 → 交集提升为 mustFix → 只有 confidence≥0.8 的 critical/high mustFix 阻止通过
-导出: `mergeReviews()`, `extractIssueCategories()`, `countTscErrors()` (可测试纯函数)
+### 审查合并 (已删除)
+`mergeReviews()`, `extractIssueCategories()`, `higherSeverity()` 已删除 — 死代码, 从未在 runCycle 中调用, 且有多个已知 bug。
+`countTscErrors()` 保留 (被 hardVerify 使用)。当前流水线用 specReview (Brain) + codexReview (Codex) 独立审查。
 
 ## 设计原则
 
@@ -100,9 +111,8 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 
 - 嵌套运行 Claude: 必须清除 CLAUDECODE 等环境变量, 否则子进程拒绝启动
 - postgres JSONB: 用 `sql.json()` 不要 `JSON.stringify()` + `::jsonb`
-- evaluateTaskValue 失败默认 pass: 验证失败必须阻止合并, 绝不默认 pass
-- 222 条 adjustments 全部 active: 数值化进化评分不工作, 改用自然语言规则
-- 三套记忆系统互不通信: 统一为 CLAUDE.md + claude-mem
+- 验证失败绝不默认 pass: 验证逻辑必须在异常时阻止合并
+- 数值化进化评分不工作: 改用自然语言规则 (CLAUDE.md + claude-mem)
 - Agent SDK permissionMode: 非交互场景必须用 `bypassPermissions`
 - 1431 行 prompt 模板限制 Claude 能力: 删除所有模板, 让 Claude 自主推理
 - patrol lock 自死锁: acquireLock/releaseLock 必须在 start() 的 finally 中
@@ -120,3 +130,37 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 - SDK is_error 与 errors 字段独立: subtype=success 但 is_error=true 时 errors 可能为空, 需要合成诊断信息
 - Codex 输出是 Markdown 不是 JSON: tryParseReview 必须有 Markdown 回退解析, 否则丢失审查发现
 - Codex token 定价要跟踪模型实际价格: output 价格差异最大 (曾经低估 43%), 导致费用追踪不准
+- Worker 格式污染是头号任务杀手: 引号 '→" 和对象重排版导致 diff 膨胀。persona 文字警告无效 (10+ 条规则仍被忽略), 需 hardVerify diff 信号比检测 (逻辑变更行/总行 < 30% 应 fail)。bugfix-debugger persona 20% 成功率的主因
+- 格式污染二阶效应: diff 膨胀超 specReview 15000 字符截断后, Brain 看不到核心变更误判 "未实现"。git diff -w 对引号替换无效。治标: truncateDiffSmart() [待合并]; 治本: diff 信号比检测
+- 流水线中断后任务状态残留: specReview 后若 codexReview 阶段异常或服务重启, 任务永远停在 active/executing, 不会被自动恢复或标记失败。需要 cycle 级 try/catch 保证任务最终状态一致
+- CLI 命令错误处理不一致: 8/9 旧命令无 try/catch (错误自然冒泡), 新增命令全部 try/catch 并吞掉错误。应统一: 要么全部加 try/catch, 要么让 commander 的全局 error handler 处理
+- hardVerify 空 diff 检查未实现: CLAUDE.md 记录了"空 git diff 应自动失败"但 hardVerify 只 warn >15 files, 不检查 files_changed===0。getDiffStats 结果未用于 pass/fail 判定 [已修复 9258ac2, 因格式污染致 specReview 误杀, 未合并]
+- Merge 冲突丢弃有效工作: mergeBranch 抛异常时被外层 catch 标 failed + cleanupTaskBranch 删除分支, 成功编码的工作永久丢失。应先尝试 rebase 重试, 失败再人工介入
+- Worker 超时后 dirty git state: session 超时/崩溃时工作目录可能有未提交文件, catch/finally 中 switchBranch .catch(()=>{}) 静默失败, 后续循环在错误分支上运行。需要在 switchBranch 前 git reset --hard
+- workerExecute 不检查 isError: session 返回 isError=true 的结果直接传给 hardVerify, 浪费验证+审查资源。应在 workerExecute 返回后检查 isError 并提前 fail [已修复 6fd4106, 待合并]
+- Fix 重试循环因 sessionId="" 提前退出: makeErrorResult 返回 sessionId="" (空字符串), ?? 操作符不区分 "" 和 null, currentSessionId 变为 "" (falsy), while 循环条件 `currentSessionId &&` 立即退出, 浪费剩余重试预算 [已修复 6fd4106, 待合并]
+- commitAll .catch(()=>{}) 导致验证在旧代码上运行: fix 阶段的 commit 失败被静默忽略, 后续 hardVerify 验证的是 commit 前的旧状态, 产生误导性结果 [已修复 6fd4106, 待合并]
+- MainLoop 无测试 harness: ~2400 行核心编排逻辑完全没有测试基础设施, 每次 bugfix 都因 specReview 要求集成测试而失败。需要先建立最小 mock 层 (ClaudeCodeSession/TaskStore/CostTracker 的 stub), 才能对 MainLoop 进行可测试的 bugfix
+- CycleEventBus emit() vs emitAndWait(): emit() 是 fire-and-forget, guard 必须用 emitAndWait() + 检查 Error[]。EmptyDiffGuard [已修复 85bf68f, 待合并], before:decide [已修复 ff2c8d7, 待合并]
+- ConcurrencyGuard 仅覆盖 brainDecide 路径: guard 在 runCycle else 分支内 (line 465), queue-pickup 路径 (lines 413-462) 完全绕过 guard, 两个实例同时拾取 queued 任务不会被阻止。若要保护完整 cycle, guard 应放在 line 413 之前
+- startCommit 空字符串回退误导 diff 计算: getHeadCommit 失败返回 "", 传给 getDiffStats/specReview 时 git diff "" HEAD 行为不可预测。应 fail-fast 而非静默降级 [已修复 d3dd899, 因测试文件格式污染导致 specReview 误杀, 未合并]
+- mergeReviews 去重逻辑反转 [已删除: 死代码已移除]
+- baselineErrors=-1 时 hardVerify 直接 pass: countTscErrors 在 runCycle 开头获取 baseline 但不检查 <0, 传给 hardVerify 后 `baselineErrors >= 0 && currentErrors > baselineErrors` 短路跳过比较, 最终返回 passed:true。tsc 崩溃不应导致验证自动通过 [已修复 9258ac2, 因格式污染致 specReview 误杀, 未合并]
+- specReview diff 截断无标记: diff.slice(0, 15000) 后 brain 看到截断的 diff 但不知道被截断, 可能在部分信息上做出"全部实现"的错误判断。应追加 "[... truncated]" 标记 [已修复 90bd756, 因 Codex 误杀预存问题未合并]
+- specReview diff 排序导致核心变更被截断: git diff 按字母序排文件, .test.ts 常排在 .ts 前面, 测试文件的格式噪音占满 15000 字符后核心源码变更完全不可见。应按 .ts → .test.ts 排序, 或为每个文件分配配额
+- CostTracker.sessionCost 纯内存态: 进程崩溃后 sessionCost 归零, 与 DB daily_costs 不一致。getSessionCost() 报告的值仅反映当前进程生命周期, 不可用于跨重启的预算连续性判断
+- mergeReviews Jaccard 阈值 0.4 偏低 [已删除: 死代码已移除]
+- makeErrorResult 返回 sessionId="" 而非 null: 语义不清 — 调用方无法区分"无 session (不可恢复)" 和 "有 session 但出错 (可恢复)"。应返回 null 表示不可恢复, 非空字符串表示可恢复
+- Codex 审查对小修复系统性误杀: 只传 changedFiles 不传 diff, 2 行修复在大文件中被找出无关预存问题标 FAIL。应传 diff 上下文, 小 diff 降低问题数量要求
+- Codex 审查对有意删除也误杀: prompt 缺少 task description, 无法区分"意外删除"和"有意清理"
+- 删除模块时必须 grep 文档目录确认无残留引用
+- mergeReviews 是死代码 [已删除: 死代码已移除]
+- getCurrentBranch .catch(() => "main") 静默回退: 失败时 originalBranch 默认 "main" 可能错误, 应 fail-fast
+- Queue-pickup 路径在分支创建前标记 "active": 崩溃窗口导致任务无 git_branch 但 status=active
+- after:execute subtask 路径硬编码零成本: guard/observer 看不到真实资源消耗
+- countTscErrors 超时不返回 -1: tsc 超时返回 0 (非 -1), 被误解为编译成功 [已修复 a19ca93, 但因测试文件格式污染导致 specReview 误杀, 未合并]
+- brainReflect 在任务分支上执行: 反思阶段可 Edit CLAUDE.md, 但运行在任务分支上。任务被 reject 时 cleanupTaskBranch 删除分支, 反思学到的 CLAUDE.md 修改随分支永久丢失。应在 merge/reject 判断之后、对应分支上执行, 或反思产出独立提交到 main
+- mergeBranch 成功后 deleteBranch 失败标任务 failed: merge → delete → 异常被外层 catch 标 failed, 但代码已合并到 main。应对 deleteBranch 单独 catch, 合并成功即为成功
+- specReview parseSpecResult 用 JSON.parse 而非 extractJsonFromText: brain 返回 "Here's the review:\n{...}" 时解析失败触发完整重试, 浪费 ~$0.5-2。应先尝试 extractJsonFromText 提取嵌入的 JSON
+- subtask 路径 workerExecute 也不检查 isError: executeSubtasks 中 workerExecute 返回后仅检查 costUsd>0, 不检查 isError, 失败的 session 继续进入 per-subtask hardVerify
+- deepChainReview/claudeMdMaintenance 费用绕过 CostTracker: 直接调用 taskStore.addDailyCost() 不经过 CostTracker.addCost(), sessionCost 累计偏低, getSessionCost() 不反映全部开销。影响: 仅日志/监控不准, 不影响 DB 预算检查
