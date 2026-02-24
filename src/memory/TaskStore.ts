@@ -203,8 +203,8 @@ CREATE TABLE IF NOT EXISTS personas (
   focus_areas TEXT[] DEFAULT '{}',
   usage_count INTEGER DEFAULT 0,
   success_rate REAL DEFAULT 0,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `;
 
@@ -717,7 +717,7 @@ export class TaskStore {
 
   async upsertPersona(p: { name: string; role: string; content: string; task_types: string[]; focus_areas: string[] }): Promise<Persona> {
     const sql = this.getSql();
-    const rows = await sql<Persona[]>`
+    const [row] = await sql<Persona[]>`
       INSERT INTO personas (name, role, content, task_types, focus_areas)
       VALUES (${p.name}, ${p.role}, ${p.content}, ${p.task_types}, ${p.focus_areas})
       ON CONFLICT (name) DO UPDATE SET
@@ -727,7 +727,7 @@ export class TaskStore {
         focus_areas = EXCLUDED.focus_areas,
         updated_at = NOW()
       RETURNING *`;
-    return rows[0];
+    return row;
   }
 
   async updatePersonaStats(name: string, success: boolean): Promise<void> {
@@ -735,7 +735,10 @@ export class TaskStore {
     await sql`
       UPDATE personas SET
         usage_count = usage_count + 1,
-        success_rate = (success_rate * usage_count + ${success ? 1 : 0}) / (usage_count + 1),
+        success_rate = CASE
+          WHEN usage_count = 0 THEN ${success ? 1.0 : 0.0}
+          ELSE (success_rate * usage_count + ${success ? 1 : 0})::real / (usage_count + 1)
+        END,
         updated_at = NOW()
       WHERE name = ${name}`;
   }
