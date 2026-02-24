@@ -490,7 +490,7 @@ export class MainLoop {
       // 10. Brain reflects and learns
       this.setState('reflecting');
       const outcome = shouldMerge ? 'success' : 'failed';
-      await this.brainReflect(task, outcome, verification, projectPath);
+      await this.brainReflect(task, outcome, verification, projectPath, brainOpts?.persona);
       this.eventBus.emit(this.makeEvent('reflect', 'after'));
 
       // 11. Merge or cleanup
@@ -956,6 +956,7 @@ Respond with EXACTLY this JSON (no markdown, no extra text):
     outcome: string,
     verification: { passed: boolean; reason?: string },
     projectPath: string,
+    personaName?: string,
   ): Promise<void> {
     const prompt = `Reflect on this completed task:
 
@@ -992,6 +993,13 @@ Keep CLAUDE.md concise — only add genuinely useful rules.`;
       cost_usd: result.costUsd,
       duration_ms: result.durationMs,
     });
+
+    // Update persona usage stats
+    if (personaName) {
+      await this.taskStore.updatePersonaStats(personaName, outcome === 'success').catch(err =>
+        log.warn(`Failed to update persona stats for ${personaName}:`, err),
+      );
+    }
   }
 
   // --- Deep chain review (periodic) ---
