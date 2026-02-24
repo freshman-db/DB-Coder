@@ -144,10 +144,12 @@ test('followLogs passes AbortSignal to fetch and aborts cleanly', async () => {
     init?: RequestInit,
   ): Promise<Response> => {
     receivedSignal = init?.signal ?? undefined;
-    // Return a stream that never closes — the abort signal should cancel it
     const stream = new ReadableStream<Uint8Array>({
-      start() {
-        // deliberately left open
+      start(controller) {
+        // Simulate real fetch: abort signal errors the stream
+        init?.signal?.addEventListener('abort', () => {
+          controller.error(new DOMException('The operation was aborted.', 'AbortError'));
+        });
       },
     });
     return Promise.resolve(new Response(stream, { status: 200 }));
