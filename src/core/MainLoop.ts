@@ -1695,6 +1695,14 @@ Respond with EXACTLY this JSON (no markdown):
             await this.costTracker.addCost(task.id, fixResult.costUsd);
           currentSessionId = fixResult.sessionId ?? currentSessionId;
 
+          const changedFilesForCommit = await getModifiedAndAddedFiles(
+            this.config.projectPath,
+          ).catch(() => []);
+          await commitAll(
+            "db-coder: fix verification issues",
+            this.config.projectPath,
+            changedFilesForCommit,
+          ).catch(() => {});
           lastVerification = await this.hardVerify(
             opts.baselineErrors,
             opts.startCommit,
