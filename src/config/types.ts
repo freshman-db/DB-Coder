@@ -22,6 +22,8 @@ export interface CodexConfig {
   model: string;
   sandbox: 'workspace-write' | 'workspace-read' | 'full-auto';
   tokenPricing?: TokenPricing;
+  reviewTimeout?: number; // seconds, default 1800 (30min)
+  planTimeout?: number;   // seconds, default 900 (15min)
 }
 
 export interface AutonomyConfig {

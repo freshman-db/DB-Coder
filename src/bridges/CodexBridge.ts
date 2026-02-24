@@ -159,7 +159,7 @@ export class CodexBridge implements CodingAgent {
       cwd,
       {
         systemPrompt: (options?.systemPrompt ?? '') + '\nIMPORTANT: This is analysis only. Do NOT modify any files. Only read and analyze.',
-        timeout: 300_000,
+        timeout: (this.config.planTimeout ?? 900) * 1000,
         sandboxOverride: 'workspace-read',
       },
     );
@@ -172,7 +172,7 @@ export class CodexBridge implements CodingAgent {
       // Reviews are read-only — enforce workspace-read regardless of config
       const args = ['exec', ...this.sandboxArgs('workspace-read'), '--json', prompt];
       const { output, exitCode, events, stderr } = await this.invokeCodex(args, cwd, {
-        timeout: 600_000,
+        timeout: (this.config.reviewTimeout ?? 1800) * 1000,
         outFilePrefix: 'codex-review',
       });
 
