@@ -128,7 +128,7 @@ export function buildArgs(prompt: string, opts: SessionOptions): string[] {
   }
 
   if (opts.jsonSchema) {
-    args.push('--json', JSON.stringify(opts.jsonSchema));
+    args.push('--json-schema', JSON.stringify(opts.jsonSchema));
   }
 
   return args;

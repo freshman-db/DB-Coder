@@ -141,11 +141,11 @@ describe('ClaudeCodeSession', () => {
       assert.strictEqual(args[idx + 1], 'Be concise');
     });
 
-    it('jsonSchema adds --json without duplicate --output-format', () => {
+    it('jsonSchema adds --json-schema without duplicate --output-format', () => {
       const schema = { type: 'object', properties: { x: { type: 'number' } } };
       const args = buildArgs('task', { ...base, jsonSchema: schema });
       // --json flag present with serialized schema
-      const jsonIdx = args.indexOf('--json');
+      const jsonIdx = args.indexOf('--json-schema');
       assert.notStrictEqual(jsonIdx, -1);
       assert.strictEqual(args[jsonIdx + 1], JSON.stringify(schema));
       // --output-format appears exactly once (no duplicate)
@@ -175,7 +175,7 @@ describe('ClaudeCodeSession', () => {
       assert.ok(args.includes('--allowedTools'));
       assert.ok(args.includes('--disallowedTools'));
       assert.ok(args.includes('--append-system-prompt'));
-      assert.ok(args.includes('--json'));
+      assert.ok(args.includes('--json-schema'));
       // Still only one --output-format
       const ofCount = args.filter(a => a === '--output-format').length;
       assert.strictEqual(ofCount, 1);

@@ -652,16 +652,28 @@ Rules for persona/taskType:
 - taskType: categorize the task (feature, bugfix, refactoring, test, security, performance, frontend, code-quality, docs)
 - subtasks: ONLY for complex tasks that need 2+ independent steps. Most tasks should NOT have subtasks. Each subtask must be independently completable and verifiable.`;
 
-    const result = await this.brainThink(prompt);
-    log.info(`Brain decide raw: cost=$${result.costUsd.toFixed(4)}, exit=${result.exitCode}, isError=${result.isError}, turns=${result.numTurns}, text="${truncate(result.text, 200)}"`);
+    const brainDecideSchema = {
+      type: 'object',
+      properties: {
+        task: { type: 'string' },
+        priority: { type: 'number' },
+        persona: { type: 'string' },
+        taskType: { type: 'string' },
+        subtasks: { type: 'array', items: { type: 'object', properties: { description: { type: 'string' }, order: { type: 'number' } }, required: ['description'] } },
+        reasoning: { type: 'string' },
+      },
+      required: ['task'],
+    };
+
+    const result = await this.brainThink(prompt, { jsonSchema: brainDecideSchema });
+    log.info(`Brain decide raw: cost=$${result.costUsd.toFixed(4)}, exit=${result.exitCode}, isError=${result.isError}, turns=${result.numTurns}, json=${result.json ? 'yes' : 'no'}, text="${truncate(result.text, 200)}"`);
     if (result.isError || result.exitCode !== 0) {
       log.warn(`Brain session errors: ${result.errors.join('; ')}`);
     }
-    const parsed = extractJsonFromText(
-      result.text,
-      (v) => isRecord(v) && typeof (v as Record<string, unknown>).task === 'string',
-    );
-    if (isRecord(parsed) && typeof parsed.task === 'string') {
+
+    // Primary: structured output from --json-schema
+    const parsed = isRecord(result.json) ? result.json : null;
+    if (parsed && typeof parsed.task === 'string') {
       return {
         taskDescription: parsed.task,
         priority: typeof parsed.priority === 'number' ? parsed.priority : 2,
@@ -671,10 +683,28 @@ Rules for persona/taskType:
         costUsd: result.costUsd,
       };
     }
-    // Fallback: no valid JSON found — use raw text if substantive
+
+    // Fallback: try extracting JSON from text (in case structured output fails)
+    const textParsed = extractJsonFromText(
+      result.text,
+      (v) => isRecord(v) && typeof (v as Record<string, unknown>).task === 'string',
+    );
+    if (isRecord(textParsed) && typeof textParsed.task === 'string') {
+      log.warn('brainDecide: structured output empty, fell back to text extraction');
+      return {
+        taskDescription: textParsed.task,
+        priority: typeof textParsed.priority === 'number' ? textParsed.priority : 2,
+        persona: typeof textParsed.persona === 'string' ? textParsed.persona : undefined,
+        taskType: typeof textParsed.taskType === 'string' ? textParsed.taskType : undefined,
+        subtasks: Array.isArray(textParsed.subtasks) ? textParsed.subtasks : undefined,
+        costUsd: result.costUsd,
+      };
+    }
+
+    // Last resort: raw text as task description
     const rawText = result.text.trim();
     if (rawText.length > 20) {
-      log.warn('brainDecide: no valid JSON found in brain output, using raw text as task description');
+      log.warn('brainDecide: no valid JSON found in any output, using raw text as task description');
       return { taskDescription: rawText.slice(0, 500), costUsd: result.costUsd };
     }
     return { taskDescription: null, costUsd: result.costUsd };
@@ -739,22 +769,46 @@ Be SPECIFIC: name the exact file and function. Do not be vague.
 Respond with EXACTLY this JSON (no markdown):
 {"task": "specific description", "priority": 2, "reasoning": "why"}`;
 
-    const result = await this.brainThink(prompt);
-    log.info(`Brain directive raw: cost=$${result.costUsd.toFixed(4)}, exit=${result.exitCode}, turns=${result.numTurns}, text="${truncate(result.text, 200)}"`);
-    const parsed = extractJsonFromText(
-      result.text,
-      (v) => isRecord(v) && typeof (v as Record<string, unknown>).task === 'string',
-    );
-    if (isRecord(parsed) && typeof parsed.task === 'string') {
+    const directiveSchema = {
+      type: 'object',
+      properties: {
+        task: { type: 'string' },
+        priority: { type: 'number' },
+        reasoning: { type: 'string' },
+      },
+      required: ['task'],
+    };
+
+    const result = await this.brainThink(prompt, { jsonSchema: directiveSchema });
+    log.info(`Brain directive raw: cost=$${result.costUsd.toFixed(4)}, exit=${result.exitCode}, turns=${result.numTurns}, json=${result.json ? 'yes' : 'no'}, text="${truncate(result.text, 200)}"`);
+
+    // Primary: structured output
+    const parsed = isRecord(result.json) ? result.json : null;
+    if (parsed && typeof parsed.task === 'string') {
       return {
         taskDescription: parsed.task,
         priority: typeof parsed.priority === 'number' ? parsed.priority : 2,
         costUsd: result.costUsd,
       };
     }
+
+    // Fallback: text extraction
+    const textParsed = extractJsonFromText(
+      result.text,
+      (v) => isRecord(v) && typeof (v as Record<string, unknown>).task === 'string',
+    );
+    if (isRecord(textParsed) && typeof textParsed.task === 'string') {
+      log.warn('brainDecideDirective: structured output empty, fell back to text extraction');
+      return {
+        taskDescription: textParsed.task,
+        priority: typeof textParsed.priority === 'number' ? textParsed.priority : 2,
+        costUsd: result.costUsd,
+      };
+    }
+
     const rawText = result.text.trim();
     if (rawText.length > 20) {
-      log.warn('brainDecideDirective: no valid JSON found in brain output, using raw text');
+      log.warn('brainDecideDirective: no valid JSON found in any output, using raw text');
       return { taskDescription: rawText.slice(0, 500), costUsd: result.costUsd };
     }
     return { taskDescription: null, costUsd: result.costUsd };
@@ -785,7 +839,7 @@ Respond with EXACTLY this JSON (no markdown):
     return mod;
   }
 
-  private async brainThink(prompt: string): Promise<SessionResult> {
+  private async brainThink(prompt: string, opts?: { jsonSchema?: object }): Promise<SessionResult> {
     return this.brainSession.run(prompt, {
       permissionMode: 'bypassPermissions',
       maxTurns: 20,
@@ -794,6 +848,7 @@ Respond with EXACTLY this JSON (no markdown):
       model: this.config.values.brain.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
       disallowedTools: ['Edit', 'Write', 'NotebookEdit'],
       appendSystemPrompt: 'You are the brain of an autonomous coding agent. Read CLAUDE.md for context. Do not modify files — only analyze and decide.',
+      jsonSchema: opts?.jsonSchema,
     });
   }
 
