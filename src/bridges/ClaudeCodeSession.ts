@@ -1,10 +1,12 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { query, type Query, type SDKMessage, type Options } from '@anthropic-ai/claude-agent-sdk';
 import { log } from '../utils/logger.js';
+import { buildSdkOptions, type SdkExtras } from './buildSdkOptions.js';
+import { collectResult } from './sdkMessageCollector.js';
 
-// --- Types ---
+// --- Types (public interface unchanged) ---
 
 export interface SessionOptions {
-  /** Permission mode for the Claude Code CLI */
+  /** Permission mode */
   permissionMode: 'bypassPermissions' | 'acceptEdits';
   /** Max USD budget for this session */
   maxBudget?: number;
@@ -26,8 +28,8 @@ export interface SessionOptions {
   maxTurns?: number;
   /** Callback for streaming text deltas */
   onText?: (text: string) => void;
-  /** Callback for each raw stream-json event */
-  onEvent?: (event: StreamEvent) => void;
+  /** Callback for each SDK message event */
+  onEvent?: (event: SDKMessage) => void;
   /** Model to use (default: claude-sonnet-4-6) */
   model?: string;
 }
@@ -41,7 +43,7 @@ export interface SessionResult {
   costUsd: number;
   /** Session ID for resuming */
   sessionId: string;
-  /** Process exit code */
+  /** Process exit code (0=success, 1=error, -1=timeout, -2=killed) */
   exitCode: number;
   /** Number of agentic turns taken */
   numTurns: number;
@@ -62,287 +64,135 @@ export interface TokenUsage {
   cacheCreationInputTokens: number;
 }
 
-/** Raw stream-json event from Claude Code CLI */
-export interface StreamEvent {
-  type: string;
-  subtype?: string;
-  session_id?: string;
-  [key: string]: unknown;
-}
+// Re-export SDKMessage as StreamEvent for backward compat
+export type StreamEvent = SDKMessage;
 
-// Env vars to clear to prevent nested Claude Code conflicts
-const CLAUDE_ENV_VARS = [
-  'CLAUDECODE', 'CLAUDE_CODE_SESSION', 'CLAUDE_CODE_ENTRYPOINT',
-  'CLAUDE_CODE_PACKAGE_DIR', 'CLAUDE_DEV_HOST', 'CLAUDE_DEV_PORT',
-];
-
-function cleanEnv(): Record<string, string> {
-  const env = { ...process.env } as Record<string, string>;
-  for (const key of CLAUDE_ENV_VARS) {
-    delete env[key];
-  }
-  return env;
-}
-
-// --- Arg building (pure, exported for testing) ---
-
-export function buildArgs(prompt: string, opts: SessionOptions): string[] {
-  const args = [
-    '-p', prompt,
-    '--output-format', 'stream-json',
-    '--verbose',
-  ];
-
-  if (opts.permissionMode === 'bypassPermissions') {
-    args.push('--permission-mode', 'bypassPermissions');
-  } else {
-    args.push('--permission-mode', 'acceptEdits');
-  }
-
-  if (opts.resumeSessionId) {
-    args.push('--resume', opts.resumeSessionId);
-  }
-
-  if (opts.maxBudget !== undefined) {
-    args.push('--max-budget-usd', String(opts.maxBudget));
-  }
-
-  if (opts.maxTurns !== undefined) {
-    args.push('--max-turns', String(opts.maxTurns));
-  }
-
-  if (opts.model) {
-    args.push('--model', opts.model);
-  }
-
-  if (opts.allowedTools?.length) {
-    args.push('--allowedTools', opts.allowedTools.join(','));
-  }
-
-  if (opts.disallowedTools?.length) {
-    args.push('--disallowedTools', opts.disallowedTools.join(','));
-  }
-
-  if (opts.appendSystemPrompt) {
-    args.push('--append-system-prompt', opts.appendSystemPrompt);
-  }
-
-  if (opts.jsonSchema) {
-    args.push('--json', JSON.stringify(opts.jsonSchema));
-  }
-
-  return args;
-}
+// Type for the query function (allows injection for testing)
+export type QueryFn = typeof query;
 
 // --- Session ---
 
 export class ClaudeCodeSession {
-  private child: ChildProcess | null = null;
-  private spawnFn: typeof spawn;
+  private activeQuery: Query | null = null;
+  private abortController: AbortController | null = null;
+  private killed = false;
+  private sdkExtras: SdkExtras;
+  private queryFn: QueryFn;
 
-  constructor(spawnFn?: typeof spawn) {
-    this.spawnFn = spawnFn ?? spawn;
+  constructor(sdkExtras?: SdkExtras, queryFn?: QueryFn) {
+    this.sdkExtras = sdkExtras ?? {};
+    this.queryFn = queryFn ?? query;
   }
 
   /**
-   * Run a prompt in a new or resumed Claude Code CLI session.
-   *
-   * Spawns `claude -p --output-format stream-json` and parses the
-   * line-delimited JSON event stream. Returns when the process exits.
+   * Run a prompt using the Agent SDK query() API.
    */
   async run(prompt: string, opts: SessionOptions): Promise<SessionResult> {
     const start = Date.now();
-    const args = buildArgs(prompt, opts);
+    const { options, timeoutMs } = buildSdkOptions(prompt, opts, this.sdkExtras);
 
-    const env = cleanEnv();
-    // Ensure claude-mem uses a strong model
-    env.CLAUDE_MEM_MODEL = 'claude-opus-4-6';
+    // Set up timeout via AbortController
+    const ac = options.abortController ?? new AbortController();
+    options.abortController = ac;
+    this.abortController = ac;
+    this.killed = false;
 
-    return new Promise<SessionResult>((resolve, reject) => {
-      const child = this.spawnFn('claude', args, {
-        cwd: opts.cwd,
-        env,
-        stdio: ['pipe', 'pipe', 'pipe'],
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+
+    if (timeoutMs) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        log.warn('ClaudeCodeSession: timeout, aborting query', { timeout: timeoutMs });
+        ac.abort();
+      }, timeoutMs);
+    }
+
+    try {
+      const q = this.queryFn({ prompt, options });
+      this.activeQuery = q;
+
+      const result = await collectResult(q, {
+        onText: opts.onText,
+        onEvent: opts.onEvent,
       });
-      this.child = child;
 
-      let stderr = '';
-      let buffer = '';
-      let sessionId = '';
-      let costUsd = 0;
-      let numTurns = 0;
-      let isError = false;
-      let errors: string[] = [];
-      let resultText = '';
-      let structuredOutput: unknown = undefined;
-      const usage: TokenUsage = {
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadInputTokens: 0,
-        cacheCreationInputTokens: 0,
+      if (timer) clearTimeout(timer);
+
+      if (timedOut) {
+        return {
+          ...result,
+          exitCode: -1,
+          isError: true,
+          errors: [`Session timed out after ${timeoutMs}ms`],
+          durationMs: Date.now() - start,
+        };
+      }
+
+      return {
+        ...result,
+        durationMs: result.durationMs || (Date.now() - start),
       };
+    } catch (err: unknown) {
+      if (timer) clearTimeout(timer);
 
-      // Accumulate assistant text from complete assistant messages
-      const textParts: string[] = [];
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const isAbort = err instanceof Error && err.name === 'AbortError';
 
-      child.stdout?.on('data', (chunk: Buffer) => {
-        buffer += chunk.toString();
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-
-          let event: StreamEvent;
-          try {
-            event = JSON.parse(trimmed) as StreamEvent;
-          } catch {
-            log.debug('ClaudeCodeSession: skipping non-JSON line', { line: trimmed.slice(0, 100) });
-            continue;
-          }
-
-          // Capture session ID from any event
-          if (event.session_id && !sessionId) {
-            sessionId = event.session_id;
-          }
-
-          opts.onEvent?.(event);
-          this.processEvent(event, textParts, opts.onText);
-
-          // Handle result event (always the last event)
-          if (event.type === 'result') {
-            costUsd = asNumber(event.total_cost_usd) ?? 0;
-            numTurns = asNumber(event.num_turns) ?? 0;
-            isError = Boolean(event.is_error);
-            resultText = typeof event.result === 'string' ? event.result : '';
-            structuredOutput = event.structured_output ?? undefined;
-            if (Array.isArray(event.errors)) {
-              errors = event.errors.filter((e): e is string => typeof e === 'string');
-            }
-
-            // Extract usage
-            if (isRecord(event.usage)) {
-              usage.inputTokens = asNumber(event.usage.input_tokens) ?? 0;
-              usage.outputTokens = asNumber(event.usage.output_tokens) ?? 0;
-              usage.cacheReadInputTokens = asNumber(event.usage.cache_read_input_tokens) ?? 0;
-              usage.cacheCreationInputTokens = asNumber(event.usage.cache_creation_input_tokens) ?? 0;
-            }
-          }
-        }
-      });
-
-      child.stderr?.on('data', (chunk: Buffer) => {
-        stderr += chunk.toString();
-      });
-
-      // Timeout handling
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      let killed = false;
-      if (opts.timeout) {
-        timer = setTimeout(() => {
-          killed = true;
-          log.warn('ClaudeCodeSession: timeout, killing process', { timeout: opts.timeout });
-          child.kill('SIGTERM');
-        }, opts.timeout);
+      // Distinguish manual kill() from timeout
+      if (this.killed) {
+        return {
+          text: '',
+          costUsd: 0,
+          sessionId: '',
+          exitCode: -2,
+          numTurns: 0,
+          durationMs: Date.now() - start,
+          isError: true,
+          errors: ['Session aborted by kill()'],
+          usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+        };
       }
 
-      child.on('error', (err) => {
-        if (timer) clearTimeout(timer);
-        this.child = null;
-        reject(err);
-      });
+      if (timedOut || isAbort) {
+        return {
+          text: '',
+          costUsd: 0,
+          sessionId: '',
+          exitCode: -1,
+          numTurns: 0,
+          durationMs: Date.now() - start,
+          isError: true,
+          errors: [`Session timed out after ${timeoutMs}ms`],
+          usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+        };
+      }
 
-      child.on('close', (code) => {
-        if (timer) clearTimeout(timer);
-        this.child = null;
-
-        // Log diagnostics for non-zero exits with no result
-        if (code !== 0 && !resultText && textParts.length === 0) {
-          log.warn('ClaudeCodeSession: non-zero exit with no output', {
-            exitCode: code,
-            stderr: stderr.slice(0, 500),
-            bufferRemainder: buffer.slice(0, 500),
-          });
-        }
-
-        // Use result text if available, otherwise fall back to accumulated text
-        const text = resultText || textParts.join('');
-
-        if (killed) {
-          resolve({
-            text,
-            json: structuredOutput,
-            costUsd,
-            sessionId,
-            exitCode: -1,
-            numTurns,
-            durationMs: Date.now() - start,
-            isError: true,
-            errors: [`Session timed out after ${opts.timeout}ms`],
-            usage,
-          });
-        } else {
-          resolve({
-            text,
-            json: structuredOutput,
-            costUsd,
-            sessionId,
-            exitCode: code ?? 0,
-            numTurns,
-            durationMs: Date.now() - start,
-            isError,
-            errors: (isError || (code !== 0 && code !== null))
-              ? (errors.length > 0 ? errors : [stderr || `exit code ${code}`])
-              : [],
-            usage,
-          });
-        }
-      });
-
-      // Close stdin immediately (we use -p flag, not interactive mode)
-      child.stdin?.end();
-    });
+      log.error('ClaudeCodeSession: query failed', { error: errMsg });
+      return {
+        text: '',
+        costUsd: 0,
+        sessionId: '',
+        exitCode: 1,
+        numTurns: 0,
+        durationMs: Date.now() - start,
+        isError: true,
+        errors: [errMsg],
+        usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+      };
+    } finally {
+      this.activeQuery = null;
+      this.abortController = null;
+    }
   }
 
-  /** Kill the running session process */
+  /** Abort the running query (manual kill, distinct from timeout) */
   kill(): void {
-    if (this.child) {
-      this.child.kill('SIGTERM');
-      this.child = null;
+    this.killed = true;
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
     }
+    this.activeQuery = null;
   }
-
-  // --- Private ---
-
-  /**
-   * Process a stream event: extract assistant text from complete messages.
-   */
-  private processEvent(
-    event: StreamEvent,
-    textParts: string[],
-    onText?: (text: string) => void,
-  ): void {
-    if (event.type === 'assistant' && isRecord(event.message)) {
-      const content = event.message.content;
-      if (Array.isArray(content)) {
-        for (const block of content) {
-          if (isRecord(block) && block.type === 'text' && typeof block.text === 'string') {
-            textParts.push(block.text);
-            onText?.(block.text);
-          }
-        }
-      }
-    }
-  }
-}
-
-// --- Helpers ---
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function asNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
