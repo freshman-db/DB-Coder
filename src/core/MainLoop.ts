@@ -9,7 +9,7 @@ import type { MergedReviewResult, LoopState, StatusSnapshot } from './types.js';
 import type { ReviewResult, ReviewIssue } from '../bridges/CodingAgent.js';
 import { createBranch, switchBranch, commitAll, getHeadCommit, getCurrentBranch, branchExists, getChangedFilesSince, getModifiedAndAddedFiles, mergeBranch, deleteBranch, listBranches, forceDeleteBranch, getDiffStats, getDiffSince } from '../utils/git.js';
 import { log } from '../utils/logger.js';
-import { truncate } from '../utils/parse.js';
+import { truncate, extractJsonFromText, isRecord } from '../utils/parse.js';
 import { wordJaccard } from '../utils/similarity.js';
 import { SUMMARY_PREVIEW_LEN, TASK_DESC_MAX_LENGTH } from '../types/constants.js';
 import { readFileSync, existsSync, writeFileSync, mkdirSync, unlinkSync, readdirSync } from 'node:fs';
@@ -657,25 +657,27 @@ Rules for persona/taskType:
     if (result.isError || result.exitCode !== 0) {
       log.warn(`Brain session errors: ${result.errors.join('; ')}`);
     }
-    try {
-      const parsed = JSON.parse(result.text);
-      const taskDesc = parsed.task && typeof parsed.task === 'string' ? parsed.task : null;
+    const parsed = extractJsonFromText(
+      result.text,
+      (v) => isRecord(v) && typeof (v as Record<string, unknown>).task === 'string',
+    );
+    if (isRecord(parsed) && typeof parsed.task === 'string') {
       return {
-        taskDescription: taskDesc,
+        taskDescription: parsed.task,
         priority: typeof parsed.priority === 'number' ? parsed.priority : 2,
         persona: typeof parsed.persona === 'string' ? parsed.persona : undefined,
         taskType: typeof parsed.taskType === 'string' ? parsed.taskType : undefined,
         subtasks: Array.isArray(parsed.subtasks) ? parsed.subtasks : undefined,
         costUsd: result.costUsd,
       };
-    } catch {
-      // Unstructured text — use it as task description if it's substantive
-      const text = result.text.trim();
-      if (text.length > 20) {
-        return { taskDescription: text.slice(0, 500), costUsd: result.costUsd };
-      }
-      return { taskDescription: null, costUsd: result.costUsd };
     }
+    // Fallback: no valid JSON found — use raw text if substantive
+    const rawText = result.text.trim();
+    if (rawText.length > 20) {
+      log.warn('brainDecide: no valid JSON found in brain output, using raw text as task description');
+      return { taskDescription: rawText.slice(0, 500), costUsd: result.costUsd };
+    }
+    return { taskDescription: null, costUsd: result.costUsd };
   }
 
   /** Gather rich context for brain decision-making */
@@ -739,21 +741,23 @@ Respond with EXACTLY this JSON (no markdown):
 
     const result = await this.brainThink(prompt);
     log.info(`Brain directive raw: cost=$${result.costUsd.toFixed(4)}, exit=${result.exitCode}, turns=${result.numTurns}, text="${truncate(result.text, 200)}"`);
-    try {
-      const parsed = JSON.parse(result.text);
-      const taskDesc = parsed.task && typeof parsed.task === 'string' ? parsed.task : null;
+    const parsed = extractJsonFromText(
+      result.text,
+      (v) => isRecord(v) && typeof (v as Record<string, unknown>).task === 'string',
+    );
+    if (isRecord(parsed) && typeof parsed.task === 'string') {
       return {
-        taskDescription: taskDesc,
+        taskDescription: parsed.task,
         priority: typeof parsed.priority === 'number' ? parsed.priority : 2,
         costUsd: result.costUsd,
       };
-    } catch {
-      const text = result.text.trim();
-      if (text.length > 20) {
-        return { taskDescription: text.slice(0, 500), costUsd: result.costUsd };
-      }
-      return { taskDescription: null, costUsd: result.costUsd };
     }
+    const rawText = result.text.trim();
+    if (rawText.length > 20) {
+      log.warn('brainDecideDirective: no valid JSON found in brain output, using raw text');
+      return { taskDescription: rawText.slice(0, 500), costUsd: result.costUsd };
+    }
+    return { taskDescription: null, costUsd: result.costUsd };
   }
 
   /** Discover project modules by scanning src/ or root directory */
