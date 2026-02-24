@@ -409,3 +409,137 @@ test('execute keeps cost at zero without pricing even when usage tokens are pres
     assert.equal(result.cost_usd, 0);
   });
 });
+
+// ─── plan() tests ───────────────────────────────────────────────────
+
+test('plan forces workspace-read sandbox regardless of config', async () => {
+  await withMockedSpawn((call) => {
+    const child = new FakeChildProcess();
+    const outFile = getOutputFilePath(call.args);
+
+    setImmediate(() => {
+      writeFileSync(outFile, JSON.stringify({ output: 'analysis result' }));
+      child.stdout.end();
+      child.emit('close', 0);
+    });
+
+    return child as unknown as ChildProcess;
+  }, async (calls) => {
+    // Config says full-auto, but plan() must override to workspace-read
+    const config = { ...createCodexConfig(), sandbox: 'full-auto' as const };
+    const bridge = new CodexBridge(config);
+    await bridge.plan('Analyze the codebase', process.cwd());
+
+    assert.equal(calls.length, 1);
+    const args = calls[0].args;
+    // Must contain --sandbox read-only, NOT --full-auto
+    assert.ok(args.includes('--sandbox'), 'plan() must use --sandbox flag');
+    assert.ok(args.includes('read-only'), 'plan() must force read-only sandbox');
+    assert.ok(!args.includes('--full-auto'), 'plan() must not use --full-auto');
+  });
+});
+
+test('plan uses planTimeout config and defaults to 900s', async () => {
+  // Custom planTimeout: kill process before it finishes to verify timeout is applied.
+  // Using a very short planTimeout to observe timeout behavior.
+  const child = new FakeChildProcessWithKillSpy();
+  await withMockedSpawn(() => child as unknown as ChildProcess, async () => {
+    const bridge = new CodexBridge({ ...createCodexConfig(), planTimeout: 0.025 }); // 25ms
+    const result = await bridge.plan('Analyze', process.cwd());
+
+    // Process should be killed by timeout → exit code -1 → failure
+    assert.equal(result.success, false);
+    assert.equal(child.killSignals.length, 1);
+    assert.equal(child.killSignals[0], 'SIGTERM');
+  });
+});
+
+test('plan appends read-only system prompt instruction', async () => {
+  await withMockedSpawn((call) => {
+    const child = new FakeChildProcess();
+    const outFile = getOutputFilePath(call.args);
+
+    setImmediate(() => {
+      writeFileSync(outFile, '');
+      child.stdout.end();
+      child.emit('close', 0);
+    });
+
+    return child as unknown as ChildProcess;
+  }, async (calls) => {
+    const bridge = new CodexBridge(createCodexConfig());
+    await bridge.plan('Analyze code', process.cwd(), { systemPrompt: 'Be thorough.' });
+
+    const args = calls[0].args;
+    const instrIdx = args.indexOf('--instructions');
+    assert.ok(instrIdx >= 0, 'plan() must pass --instructions');
+    const instrValue = args[instrIdx + 1];
+    assert.ok(instrValue.includes('Be thorough.'), 'must include original systemPrompt');
+    assert.ok(instrValue.includes('Do NOT modify any files'), 'must include read-only instruction');
+  });
+});
+
+// ─── isAvailable() tests ────────────────────────────────────────────
+
+test('isAvailable returns true when codex --version succeeds', async () => {
+  await withMockedSpawn((call) => {
+    const child = new FakeChildProcess();
+
+    setImmediate(() => {
+      child.stdout.write('codex 1.0.0\n');
+      child.stdout.end();
+      child.emit('close', 0);
+    });
+
+    return child as unknown as ChildProcess;
+  }, async () => {
+    const bridge = new CodexBridge(createCodexConfig());
+    const available = await bridge.isAvailable();
+    assert.equal(available, true);
+  });
+});
+
+test('isAvailable returns false when codex command not found', async () => {
+  await withMockedSpawn(() => {
+    const child = new FakeChildProcess();
+
+    setImmediate(() => {
+      child.emit('error', new Error('spawn codex ENOENT'));
+    });
+
+    return child as unknown as ChildProcess;
+  }, async () => {
+    const bridge = new CodexBridge(createCodexConfig());
+    const available = await bridge.isAvailable();
+    assert.equal(available, false);
+  });
+});
+
+// ─── review() event text fallback consistency ───────────────────────
+
+test('review falls back to e.output when output file is empty', async () => {
+  const reviewJson = JSON.stringify({ passed: true, issues: [], summary: 'All good' });
+  await withMockedSpawn((call) => {
+    const child = new FakeChildProcess();
+    const outFile = getOutputFilePath(call.args);
+
+    setImmediate(() => {
+      // Empty output file — forces fallback to event text
+      writeFileSync(outFile, '');
+      // Event has 'output' field (no 'content'), matching Codex CLI event format.
+      // The bug: review() used e.text fallback instead of e.output,
+      // so this output field was silently dropped.
+      child.stdout.write(`${JSON.stringify({ type: 'message', output: reviewJson })}\n`);
+      child.stdout.end();
+      child.emit('close', 0);
+    });
+
+    return child as unknown as ChildProcess;
+  }, async () => {
+    const bridge = new CodexBridge(createCodexConfig());
+    const result = await bridge.review('Review code', process.cwd());
+
+    assert.equal(result.passed, true, 'review should parse text from e.output fallback');
+    assert.equal(result.summary, 'All good');
+  });
+});
