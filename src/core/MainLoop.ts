@@ -490,6 +490,9 @@ export class MainLoop {
   private async brainDecide(projectPath: string): Promise<{
     taskDescription: string | null;
     priority?: number;
+    persona?: string;
+    taskType?: string;
+    subtasks?: Array<{ description: string; order: number }>;
     costUsd: number;
   }> {
     // Budget gate: if daily budget exhausted, don't spend on brain call
@@ -530,7 +533,12 @@ ${context}
 - Be specific: name the file, function, or module to change. Vague tasks waste worker time.
 
 Respond with EXACTLY this JSON (no markdown, no extra text):
-{"task": "specific description of what to do", "priority": 0-3, "reasoning": "why"}`;
+{"task": "specific description", "priority": 0-3, "persona": "persona-name", "taskType": "feature|bugfix|refactoring|test|security|performance|frontend|code-quality|docs", "subtasks": [{"description": "subtask 1", "order": 1}], "reasoning": "why"}
+
+Rules for persona/taskType:
+- persona: choose from available personas (feature-builder, refactoring-expert, bugfix-debugger, test-engineer, security-auditor, performance-optimizer, frontend-specialist)
+- taskType: categorize the task (feature, bugfix, refactoring, test, security, performance, frontend, code-quality, docs)
+- subtasks: ONLY for complex tasks that need 2+ independent steps. Most tasks should NOT have subtasks. Each subtask must be independently completable and verifiable.`;
 
     const result = await this.brainThink(prompt);
     log.info(`Brain decide raw: cost=$${result.costUsd.toFixed(4)}, exit=${result.exitCode}, isError=${result.isError}, turns=${result.numTurns}, text="${truncate(result.text, 200)}"`);
@@ -543,6 +551,9 @@ Respond with EXACTLY this JSON (no markdown, no extra text):
       return {
         taskDescription: taskDesc,
         priority: typeof parsed.priority === 'number' ? parsed.priority : 2,
+        persona: typeof parsed.persona === 'string' ? parsed.persona : undefined,
+        taskType: typeof parsed.taskType === 'string' ? parsed.taskType : undefined,
+        subtasks: Array.isArray(parsed.subtasks) ? parsed.subtasks : undefined,
         costUsd: result.costUsd,
       };
     } catch {
