@@ -1817,9 +1817,9 @@ Respond with EXACTLY this JSON (no markdown):
     extra: string[];
     concerns: string[];
   }> {
-    const diff = await getDiffSince(startCommit, projectPath).catch(
-      () => "(diff unavailable)",
-    );
+    const diff = await getDiffSince(startCommit, projectPath, {
+      ignoreWhitespace: true,
+    }).catch(() => "(diff unavailable)");
     const subtaskList = (task.subtasks ?? [])
       .map((s) => `- ${s.description}`)
       .join("\n");

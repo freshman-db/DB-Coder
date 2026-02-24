@@ -187,8 +187,13 @@ export async function getDiffStats(
   };
 }
 
-export async function getDiffSince(fromCommit: string, cwd: string): Promise<string> {
-  const r = await git(['diff', fromCommit, 'HEAD'], cwd);
+export async function getDiffSince(
+  fromCommit: string,
+  cwd: string,
+  opts?: { ignoreWhitespace?: boolean },
+): Promise<string> {
+  const args = ['diff', ...(opts?.ignoreWhitespace ? ['-w'] : []), fromCommit, 'HEAD'];
+  const r = await git(args, cwd);
   return r.stdout;
 }
 
