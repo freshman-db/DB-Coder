@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { log } from '../utils/logger.js';
+import { asNumber, isRecord } from '../utils/parse.js';
+import type { JsonlEvent } from '../utils/process.js';
 
 // --- Types ---
 
@@ -63,11 +65,9 @@ export interface TokenUsage {
 }
 
 /** Raw stream-json event from Claude Code CLI */
-export interface StreamEvent {
-  type: string;
+export interface StreamEvent extends JsonlEvent {
   subtype?: string;
   session_id?: string;
-  [key: string]: unknown;
 }
 
 // Env vars to clear to prevent nested Claude Code conflicts
@@ -335,14 +335,4 @@ export class ClaudeCodeSession {
       }
     }
   }
-}
-
-// --- Helpers ---
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function asNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
