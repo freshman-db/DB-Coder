@@ -1,22 +1,31 @@
-import assert from 'node:assert/strict';
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import test from 'node:test';
+import assert from "node:assert/strict";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import test from "node:test";
 
-import type { Config } from '../config/Config.js';
-import type { MainLoop } from '../core/MainLoop.js';
-import type { PatrolManager } from '../core/ModeManager.js';
-import type { GlobalMemory } from '../memory/GlobalMemory.js';
-import type { TaskStore } from '../memory/TaskStore.js';
-import type { OperationalMetrics } from '../memory/types.js';
-import type { CostTracker } from '../utils/cost.js';
-import { log } from '../utils/logger.js';
-import { createMockRequest, createMockResponse, getRequestListener } from './__test-helpers.js';
-import type { MockResponseState } from './__test-helpers.js';
-import { createSseStream, emitSseEvent, HttpError, parseRouteId } from './routes.js';
-import { Server } from './Server.js';
+import type { Config } from "../config/Config.js";
+import type { MainLoop } from "../core/MainLoop.js";
+import type { PatrolManager } from "../core/ModeManager.js";
+import type { GlobalMemory } from "../memory/GlobalMemory.js";
+import type { TaskStore } from "../memory/TaskStore.js";
+import type { OperationalMetrics } from "../memory/types.js";
+import type { CostTracker } from "../utils/cost.js";
+import { log } from "../utils/logger.js";
+import {
+  createMockRequest,
+  createMockResponse,
+  getRequestListener,
+} from "./__test-helpers.js";
+import type { MockResponseState } from "./__test-helpers.js";
+import {
+  createSseStream,
+  emitSseEvent,
+  HttpError,
+  parseRouteId,
+} from "./routes.js";
+import { Server } from "./Server.js";
 
 interface RequestOptions {
-  method: 'GET' | 'POST';
+  method: "GET" | "POST";
   url: string;
   token?: string;
   authorization?: string;
@@ -36,15 +45,23 @@ interface ServerFixture {
   token: string;
 }
 
-function createServerFixture(options: ServerFixtureOptions = {}): ServerFixture {
-  const token = options.apiToken ?? 'test-token';
+function createServerFixture(
+  options: ServerFixtureOptions = {},
+): ServerFixture {
+  const token = options.apiToken ?? "test-token";
 
   const loop = {
-    getState: () => 'idle',
+    getState: () => "idle",
     getCurrentTaskId: () => null,
     isPaused: () => false,
     isRunning: () => false,
     addStatusListener: () => () => {},
+    getStatusSnapshot: () => ({
+      state: "idle",
+      currentTaskId: null,
+      patrolling: false,
+      paused: false,
+    }),
     pause: () => {},
     resume: () => {},
     triggerScan: async () => {},
@@ -52,8 +69,13 @@ function createServerFixture(options: ServerFixtureOptions = {}): ServerFixture 
   } as unknown as MainLoop;
 
   const taskStore = {
-    createTask: async () => ({ id: 'task-1' }),
-    listTasksPaged: async () => ({ tasks: [], total: 0, page: 1, pageSize: 20 }),
+    createTask: async () => ({ id: "task-1" }),
+    listTasksPaged: async () => ({
+      tasks: [],
+      total: 0,
+      page: 1,
+      pageSize: 20,
+    }),
     getTask: async () => null,
     ...options.taskStore,
   } as unknown as TaskStore;
@@ -71,10 +93,10 @@ function createServerFixture(options: ServerFixtureOptions = {}): ServerFixture 
   } as unknown as PatrolManager;
 
   const config = {
-    projectPath: '/workspace/project',
+    projectPath: "/workspace/project",
     values: {
       apiToken: token,
-      server: { host: '127.0.0.1', port: 18890 },
+      server: { host: "127.0.0.1", port: 18890 },
       brain: { scanInterval: 30 },
     },
   } as unknown as Config;
@@ -82,12 +104,23 @@ function createServerFixture(options: ServerFixtureOptions = {}): ServerFixture 
   const globalMemory = {} as GlobalMemory;
 
   return {
-    server: new Server(config, loop, taskStore, globalMemory, costTracker, undefined, undefined, modeManager),
+    server: new Server(
+      config,
+      loop,
+      taskStore,
+      globalMemory,
+      costTracker,
+      undefined,
+      modeManager,
+    ),
     token,
   };
 }
 
-async function dispatch(server: Server, options: RequestOptions): Promise<MockResponseState> {
+async function dispatch(
+  server: Server,
+  options: RequestOptions,
+): Promise<MockResponseState> {
   const listener = getRequestListener(server);
   const { response, state } = createMockResponse();
   await listener(createMockRequest(options), response);
@@ -98,13 +131,13 @@ function parseJson<T>(state: MockResponseState): T {
   return JSON.parse(state.body) as T;
 }
 
-test('parseRouteId returns parsed number for a valid id parameter', () => {
-  assert.equal(parseRouteId({ id: '42' }), 42);
+test("parseRouteId returns parsed number for a valid id parameter", () => {
+  assert.equal(parseRouteId({ id: "42" }), 42);
 });
 
-test('parseRouteId throws HttpError with status 400 for a non-numeric id', () => {
+test("parseRouteId throws HttpError with status 400 for a non-numeric id", () => {
   assert.throws(
-    () => parseRouteId({ id: 'abc' }),
+    () => parseRouteId({ id: "abc" }),
     (error: unknown) => {
       assert.equal(error instanceof HttpError, true);
       assert.equal((error as HttpError).statusCode, 400);
@@ -113,41 +146,41 @@ test('parseRouteId throws HttpError with status 400 for a non-numeric id', () =>
   );
 });
 
-test('parseRouteId includes custom label in HttpError message when id is missing', () => {
+test("parseRouteId includes custom label in HttpError message when id is missing", () => {
   assert.throws(
-    () => parseRouteId({}, 'id', 'plan ID'),
+    () => parseRouteId({}, "id", "plan ID"),
     (error: unknown) => {
       assert.equal(error instanceof HttpError, true);
       assert.equal((error as HttpError).statusCode, 400);
-      assert.equal((error as HttpError).message.includes('plan ID'), true);
+      assert.equal((error as HttpError).message.includes("plan ID"), true);
       return true;
     },
   );
 });
 
-test('GET /api/tasks returns paginated task list JSON', async () => {
+test("GET /api/tasks returns paginated task list JSON", async () => {
   let listArgs:
     | {
-      projectPath: string;
-      page: number | undefined;
-      pageSize: number | undefined;
-      status: unknown;
-    }
+        projectPath: string;
+        page: number | undefined;
+        pageSize: number | undefined;
+        status: unknown;
+      }
     | undefined;
 
   const expected = {
     tasks: [
       {
-        id: 'task-1',
-        task_description: 'Write routes integration tests',
+        id: "task-1",
+        task_description: "Write routes integration tests",
         priority: 1,
-        status: 'queued',
+        status: "queued",
       },
     ],
     total: 1,
     page: 2,
     pageSize: 10,
-  } as unknown as Awaited<ReturnType<TaskStore['listTasksPaged']>>;
+  } as unknown as Awaited<ReturnType<TaskStore["listTasksPaged"]>>;
 
   const { server, token } = createServerFixture({
     taskStore: {
@@ -159,36 +192,36 @@ test('GET /api/tasks returns paginated task list JSON', async () => {
   });
 
   const state = await dispatch(server, {
-    method: 'GET',
-    url: '/api/tasks?page=2&pageSize=10&status=queued,active',
+    method: "GET",
+    url: "/api/tasks?page=2&pageSize=10&status=queued,active",
     token,
   });
 
   assert.equal(state.statusCode, 200);
   assert.deepEqual(parseJson<typeof expected>(state), expected);
   assert.deepEqual(listArgs, {
-    projectPath: '/workspace/project',
+    projectPath: "/workspace/project",
     page: 2,
     pageSize: 10,
-    status: ['queued', 'active'],
+    status: ["queued", "active"],
   });
 });
 
-test('POST /api/tasks with valid body creates task and returns 201', async () => {
+test("POST /api/tasks with valid body creates task and returns 201", async () => {
   let createArgs:
     | {
-      projectPath: string;
-      description: string;
-      priority: number | undefined;
-    }
+        projectPath: string;
+        description: string;
+        priority: number | undefined;
+      }
     | undefined;
 
   const createdTask = {
-    id: 'task-99',
-    task_description: 'Ship API coverage',
+    id: "task-99",
+    task_description: "Ship API coverage",
     priority: 1,
-    status: 'queued',
-  } as unknown as Awaited<ReturnType<TaskStore['createTask']>>;
+    status: "queued",
+  } as unknown as Awaited<ReturnType<TaskStore["createTask"]>>;
 
   const { server, token } = createServerFixture({
     taskStore: {
@@ -200,11 +233,11 @@ test('POST /api/tasks with valid body creates task and returns 201', async () =>
   });
 
   const state = await dispatch(server, {
-    method: 'POST',
-    url: '/api/tasks',
+    method: "POST",
+    url: "/api/tasks",
     token,
     body: {
-      description: '  Ship API coverage  ',
+      description: "  Ship API coverage  ",
       priority: 1,
     },
   });
@@ -212,52 +245,52 @@ test('POST /api/tasks with valid body creates task and returns 201', async () =>
   assert.equal(state.statusCode, 201);
   assert.deepEqual(parseJson<typeof createdTask>(state), createdTask);
   assert.deepEqual(createArgs, {
-    projectPath: '/workspace/project',
-    description: 'Ship API coverage',
+    projectPath: "/workspace/project",
+    description: "Ship API coverage",
     priority: 1,
   });
 });
 
-test('POST /api/tasks with invalid body returns 400', async () => {
+test("POST /api/tasks with invalid body returns 400", async () => {
   let createCalls = 0;
 
   const { server, token } = createServerFixture({
     taskStore: {
       createTask: async () => {
         createCalls += 1;
-        return {} as Awaited<ReturnType<TaskStore['createTask']>>;
+        return {} as Awaited<ReturnType<TaskStore["createTask"]>>;
       },
     },
   });
 
   const state = await dispatch(server, {
-    method: 'POST',
-    url: '/api/tasks',
+    method: "POST",
+    url: "/api/tasks",
     token,
     body: {
-      description: '   ',
+      description: "   ",
     },
   });
 
   assert.equal(state.statusCode, 400);
   assert.deepEqual(parseJson<{ error: string }>(state), {
-    error: 'description is required and must be a non-empty string.',
+    error: "description is required and must be a non-empty string.",
   });
   assert.equal(createCalls, 0);
 });
 
-test('GET /api/plans/:id/messages parses plan ID and returns messages', async () => {
+test("GET /api/plans/:id/messages parses plan ID and returns messages", async () => {
   let requestedId: number | undefined;
   const expectedMessages = [
     {
       id: 1,
       session_id: 9,
-      role: 'user',
-      content: 'review this',
+      role: "user",
+      content: "review this",
       metadata: {},
-      created_at: '2026-02-22T00:00:00.000Z',
+      created_at: "2026-02-22T00:00:00.000Z",
     },
-  ] as unknown as Awaited<ReturnType<TaskStore['getChatMessages']>>;
+  ] as unknown as Awaited<ReturnType<TaskStore["getChatMessages"]>>;
 
   const { server, token } = createServerFixture({
     taskStore: {
@@ -269,8 +302,8 @@ test('GET /api/plans/:id/messages parses plan ID and returns messages', async ()
   });
 
   const state = await dispatch(server, {
-    method: 'GET',
-    url: '/api/plans/9/messages',
+    method: "GET",
+    url: "/api/plans/9/messages",
     token,
   });
 
@@ -279,22 +312,22 @@ test('GET /api/plans/:id/messages parses plan ID and returns messages', async ()
   assert.equal(requestedId, 9);
 });
 
-test('GET /api/plans/:id/messages returns 400 for invalid plan ID', async () => {
+test("GET /api/plans/:id/messages returns 400 for invalid plan ID", async () => {
   const { server, token } = createServerFixture();
 
   const state = await dispatch(server, {
-    method: 'GET',
-    url: '/api/plans/not-a-number/messages',
+    method: "GET",
+    url: "/api/plans/not-a-number/messages",
     token,
   });
 
   assert.equal(state.statusCode, 400);
   assert.deepEqual(parseJson<{ error: string }>(state), {
-    error: 'Invalid plan ID',
+    error: "Invalid plan ID",
   });
 });
 
-test('POST /api/patrol/start returns 200 and calls mode manager startPatrol', async () => {
+test("POST /api/patrol/start returns 200 and calls mode manager startPatrol", async () => {
   let startCalls = 0;
 
   const { server, token } = createServerFixture({
@@ -306,8 +339,8 @@ test('POST /api/patrol/start returns 200 and calls mode manager startPatrol', as
   });
 
   const state = await dispatch(server, {
-    method: 'POST',
-    url: '/api/patrol/start',
+    method: "POST",
+    url: "/api/patrol/start",
     token,
   });
 
@@ -319,7 +352,7 @@ test('POST /api/patrol/start returns 200 and calls mode manager startPatrol', as
   assert.equal(startCalls, 1);
 });
 
-test('POST /api/patrol/stop returns 200', async () => {
+test("POST /api/patrol/stop returns 200", async () => {
   let stopCalls = 0;
 
   const { server, token } = createServerFixture({
@@ -331,8 +364,8 @@ test('POST /api/patrol/stop returns 200', async () => {
   });
 
   const state = await dispatch(server, {
-    method: 'POST',
-    url: '/api/patrol/stop',
+    method: "POST",
+    url: "/api/patrol/stop",
     token,
   });
 
@@ -344,10 +377,10 @@ test('POST /api/patrol/stop returns 200', async () => {
   assert.equal(stopCalls, 1);
 });
 
-test('API requests without a valid Bearer token return 401', async () => {
+test("API requests without a valid Bearer token return 401", async () => {
   let listCalled = false;
   const { server } = createServerFixture({
-    apiToken: 'secret-token',
+    apiToken: "secret-token",
     taskStore: {
       listTasksPaged: async () => {
         listCalled = true;
@@ -357,44 +390,48 @@ test('API requests without a valid Bearer token return 401', async () => {
   });
 
   const missingToken = await dispatch(server, {
-    method: 'GET',
-    url: '/api/tasks',
+    method: "GET",
+    url: "/api/tasks",
   });
 
   assert.equal(missingToken.statusCode, 401);
-  assert.equal(missingToken.headers['www-authenticate'], 'Bearer');
+  assert.equal(missingToken.headers["www-authenticate"], "Bearer");
   assert.deepEqual(parseJson<{ error: string }>(missingToken), {
-    error: 'Unauthorized',
+    error: "Unauthorized",
   });
 
   const wrongToken = await dispatch(server, {
-    method: 'GET',
-    url: '/api/tasks',
-    token: 'wrong-token',
+    method: "GET",
+    url: "/api/tasks",
+    token: "wrong-token",
   });
 
   assert.equal(wrongToken.statusCode, 401);
   assert.deepEqual(parseJson<{ error: string }>(wrongToken), {
-    error: 'Unauthorized',
+    error: "Unauthorized",
   });
   assert.equal(listCalled, false);
 });
 
-test('GET /api/status returns health-style status fields', async () => {
+test("GET /api/status returns health-style status fields", async () => {
   let taskLookupId: string | null = null;
-  const dailyCosts = [{ date: '2026-02-22', total_cost_usd: 0.42, task_count: 1 }];
+  const dailyCosts = [
+    { date: "2026-02-22", total_cost_usd: 0.42, task_count: 1 },
+  ];
 
   const { server, token } = createServerFixture({
     loop: {
-      getState: () => 'planning',
-      getCurrentTaskId: () => 'task-42',
+      getState: () => "planning",
+      getCurrentTaskId: () => "task-42",
       isPaused: () => true,
       isRunning: () => true,
     },
     taskStore: {
       getTask: async (id) => {
         taskLookupId = id;
-        return { task_description: 'Review public API routes' } as Awaited<ReturnType<TaskStore['getTask']>>;
+        return { task_description: "Review public API routes" } as Awaited<
+          ReturnType<TaskStore["getTask"]>
+        >;
       },
     },
     costTracker: {
@@ -403,26 +440,26 @@ test('GET /api/status returns health-style status fields', async () => {
   });
 
   const state = await dispatch(server, {
-    method: 'GET',
-    url: '/api/status',
+    method: "GET",
+    url: "/api/status",
     token,
   });
 
   assert.equal(state.statusCode, 200);
-  assert.equal(taskLookupId, 'task-42');
+  assert.equal(taskLookupId, "task-42");
   assert.deepEqual(parseJson<Record<string, unknown>>(state), {
-    state: 'planning',
-    currentTaskId: 'task-42',
-    currentTaskTitle: 'Review public API routes',
+    state: "planning",
+    currentTaskId: "task-42",
+    currentTaskTitle: "Review public API routes",
     paused: true,
     patrolling: true,
     scanInterval: 30,
-    projectPath: '/workspace/project',
+    projectPath: "/workspace/project",
     dailyCosts,
   });
 });
 
-test('GET /api/metrics returns operational metrics and prefers loop projectPath when available', async () => {
+test("GET /api/metrics returns operational metrics and prefers loop projectPath when available", async () => {
   let requestedProjectPath: string | undefined;
   const expectedMetrics: OperationalMetrics = {
     cycleCount: 12,
@@ -440,7 +477,7 @@ test('GET /api/metrics returns operational metrics and prefers loop projectPath 
 
   const { server, token } = createServerFixture({
     loop: {
-      projectPath: '/workspace/loop-project',
+      projectPath: "/workspace/loop-project",
     } as Partial<MainLoop> & { projectPath: string },
     taskStore: {
       getOperationalMetrics: async (projectPath) => {
@@ -451,17 +488,17 @@ test('GET /api/metrics returns operational metrics and prefers loop projectPath 
   });
 
   const state = await dispatch(server, {
-    method: 'GET',
-    url: '/api/metrics',
+    method: "GET",
+    url: "/api/metrics",
     token,
   });
 
   assert.equal(state.statusCode, 200);
-  assert.equal(requestedProjectPath, '/workspace/loop-project');
+  assert.equal(requestedProjectPath, "/workspace/loop-project");
   assert.deepEqual(parseJson<OperationalMetrics>(state), expectedMetrics);
 });
 
-test('GET /api/metrics falls back to config projectPath and returns empty metric payload unchanged', async () => {
+test("GET /api/metrics falls back to config projectPath and returns empty metric payload unchanged", async () => {
   let requestedProjectPath: string | undefined;
   const emptyMetrics: OperationalMetrics = {
     cycleCount: 0,
@@ -483,17 +520,17 @@ test('GET /api/metrics falls back to config projectPath and returns empty metric
   });
 
   const state = await dispatch(server, {
-    method: 'GET',
-    url: '/api/metrics',
+    method: "GET",
+    url: "/api/metrics",
     token,
   });
 
   assert.equal(state.statusCode, 200);
-  assert.equal(requestedProjectPath, '/workspace/project');
+  assert.equal(requestedProjectPath, "/workspace/project");
   assert.deepEqual(parseJson<OperationalMetrics>(state), emptyMetrics);
 });
 
-test('GET /api/metrics returns the operational metrics response shape', async () => {
+test("GET /api/metrics returns the operational metrics response shape", async () => {
   const expectedMetrics: OperationalMetrics = {
     cycleCount: 2,
     avgCycleDurationMs: 3210,
@@ -515,8 +552,8 @@ test('GET /api/metrics returns the operational metrics response shape', async ()
   });
 
   const state = await dispatch(server, {
-    method: 'GET',
-    url: '/api/metrics',
+    method: "GET",
+    url: "/api/metrics",
     token,
   });
 
@@ -524,31 +561,31 @@ test('GET /api/metrics returns the operational metrics response shape', async ()
 
   assert.equal(state.statusCode, 200);
   assert.deepEqual(Object.keys(payload).sort(), [
-    'avgCycleDurationMs',
-    'cycleCount',
-    'dailyCostUsd',
-    'queueDepth',
-    'recentHealthScores',
-    'taskPassRate',
-    'tasksByStatus',
+    "avgCycleDurationMs",
+    "cycleCount",
+    "dailyCostUsd",
+    "queueDepth",
+    "recentHealthScores",
+    "taskPassRate",
+    "tasksByStatus",
   ]);
-  assert.equal(typeof payload.cycleCount, 'number');
-  assert.equal(typeof payload.avgCycleDurationMs, 'number');
-  assert.equal(typeof payload.taskPassRate, 'number');
-  assert.equal(typeof payload.dailyCostUsd, 'number');
-  assert.equal(typeof payload.queueDepth, 'number');
+  assert.equal(typeof payload.cycleCount, "number");
+  assert.equal(typeof payload.avgCycleDurationMs, "number");
+  assert.equal(typeof payload.taskPassRate, "number");
+  assert.equal(typeof payload.dailyCostUsd, "number");
+  assert.equal(typeof payload.queueDepth, "number");
   assert.equal(Array.isArray(payload.recentHealthScores), true);
-  assert.equal(typeof payload.tasksByStatus, 'object');
+  assert.equal(typeof payload.tasksByStatus, "object");
   assert.equal(Array.isArray(payload.tasksByStatus), false);
   for (const value of Object.values(payload.tasksByStatus)) {
-    assert.equal(typeof value, 'number');
+    assert.equal(typeof value, "number");
   }
 });
 
-test('GET /api/metrics requires auth and does not query metrics without a valid token', async () => {
+test("GET /api/metrics requires auth and does not query metrics without a valid token", async () => {
   let metricsCalls = 0;
   const { server } = createServerFixture({
-    apiToken: 'metrics-token',
+    apiToken: "metrics-token",
     taskStore: {
       getOperationalMetrics: async () => {
         metricsCalls += 1;
@@ -566,87 +603,87 @@ test('GET /api/metrics requires auth and does not query metrics without a valid 
   });
 
   const missingToken = await dispatch(server, {
-    method: 'GET',
-    url: '/api/metrics',
+    method: "GET",
+    url: "/api/metrics",
   });
 
   assert.equal(missingToken.statusCode, 401);
   assert.deepEqual(parseJson<{ error: string }>(missingToken), {
-    error: 'Unauthorized',
+    error: "Unauthorized",
   });
 
   const wrongToken = await dispatch(server, {
-    method: 'GET',
-    url: '/api/metrics',
-    token: 'wrong-token',
+    method: "GET",
+    url: "/api/metrics",
+    token: "wrong-token",
   });
 
   assert.equal(wrongToken.statusCode, 401);
   assert.deepEqual(parseJson<{ error: string }>(wrongToken), {
-    error: 'Unauthorized',
+    error: "Unauthorized",
   });
   assert.equal(metricsCalls, 0);
 });
 
-test('createSseStream writes SSE headers and event payloads', () => {
+test("createSseStream writes SSE headers and event payloads", () => {
   const req = createMockRequest({
-    method: 'GET',
-    url: '/api/logs',
-    token: 'token',
+    method: "GET",
+    url: "/api/logs",
+    token: "token",
   });
   const { response, state } = createMockResponse();
 
   const stream = createSseStream(req, response);
   assert.equal(state.statusCode, 200);
-  assert.equal(state.headers['content-type'], 'text/event-stream');
-  assert.equal(state.headers['cache-control'], 'no-cache');
-  assert.equal(state.headers.connection, 'keep-alive');
-  assert.equal(state.headers['access-control-allow-origin'], '*');
+  assert.equal(state.headers["content-type"], "text/event-stream");
+  assert.equal(state.headers["cache-control"], "no-cache");
+  assert.equal(state.headers.connection, "keep-alive");
+  assert.equal(state.headers["access-control-allow-origin"], "*");
 
-  const wroteEvent = stream.write('status', { ok: true });
+  const wroteEvent = stream.write("status", { ok: true });
   assert.equal(wroteEvent, true);
   assert.equal(state.body, 'event: status\ndata: {"ok":true}\n\n');
 
   stream.cleanup();
 });
 
-test('emitSseEvent broadcasts shutdown notifications to active streams', () => {
+test("emitSseEvent broadcasts shutdown notifications to active streams", () => {
   const req = createMockRequest({
-    method: 'GET',
-    url: '/api/logs',
-    token: 'token',
+    method: "GET",
+    url: "/api/logs",
+    token: "token",
   });
   const { response, state } = createMockResponse();
   const stream = createSseStream(req, response);
 
-  const recipients = emitSseEvent('shutdown', { reason: 'systemd-stop' });
+  const recipients = emitSseEvent("shutdown", { reason: "systemd-stop" });
   assert.equal(recipients >= 1, true);
-  assert.equal(state.body.includes('event: shutdown'), true);
+  assert.equal(state.body.includes("event: shutdown"), true);
   assert.equal(state.body.includes('data: {"reason":"systemd-stop"}'), true);
 
   stream.cleanup();
 });
 
-test('emitSseEvent falls back to message event when event name is blank', () => {
+test("emitSseEvent falls back to message event when event name is blank", () => {
   const req = createMockRequest({
-    method: 'GET',
-    url: '/api/logs',
-    token: 'token',
+    method: "GET",
+    url: "/api/logs",
+    token: "token",
   });
   const { response, state } = createMockResponse();
   const stream = createSseStream(req, response);
 
-  emitSseEvent('  ', { ok: true });
-  assert.equal(state.body.includes('event: message'), true);
+  emitSseEvent("  ", { ok: true });
+  assert.equal(state.body.includes("event: message"), true);
 
   stream.cleanup();
 });
 
-test('createSseStream writes heartbeat comments on interval ticks', () => {
+test("createSseStream writes heartbeat comments on interval ticks", () => {
   const req = createMockRequest({
-    method: 'GET',
-    url: '/api/logs',
-    token: 'token',
+    method: "GET",
+    url: "/api/logs",
+    token: "token",
   });
   const { response, state } = createMockResponse();
 
@@ -654,9 +691,14 @@ test('createSseStream writes heartbeat comments on interval ticks', () => {
   const originalClearInterval = globalThis.clearInterval;
   let heartbeatTick: (() => void) | undefined;
   let heartbeatDelayMs: number | undefined;
-  const timerHandle = { id: 'heartbeat-timer' } as unknown as ReturnType<typeof setInterval>;
+  const timerHandle = { id: "heartbeat-timer" } as unknown as ReturnType<
+    typeof setInterval
+  >;
 
-  globalThis.setInterval = ((callback: (...args: unknown[]) => void, delay?: number): ReturnType<typeof setInterval> => {
+  globalThis.setInterval = ((
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+  ): ReturnType<typeof setInterval> => {
     heartbeatDelayMs = delay;
     heartbeatTick = () => callback();
     return timerHandle;
@@ -666,10 +708,10 @@ test('createSseStream writes heartbeat comments on interval ticks', () => {
   try {
     const stream = createSseStream(req, response);
     assert.equal(heartbeatDelayMs, 15_000);
-    assert.equal(typeof heartbeatTick, 'function');
+    assert.equal(typeof heartbeatTick, "function");
 
     heartbeatTick?.();
-    assert.equal(state.body, ': heartbeat\n\n');
+    assert.equal(state.body, ": heartbeat\n\n");
 
     stream.cleanup();
   } finally {
@@ -678,11 +720,11 @@ test('createSseStream writes heartbeat comments on interval ticks', () => {
   }
 });
 
-test('createSseStream automatically closes stale connections after timeout', () => {
+test("createSseStream automatically closes stale connections after timeout", () => {
   const req = createMockRequest({
-    method: 'GET',
-    url: '/api/logs',
-    token: 'token',
+    method: "GET",
+    url: "/api/logs",
+    token: "token",
   });
   const { response } = createMockResponse();
 
@@ -690,29 +732,42 @@ test('createSseStream automatically closes stale connections after timeout', () 
   const originalClearInterval = globalThis.clearInterval;
   const originalSetTimeout = globalThis.setTimeout;
   const originalClearTimeout = globalThis.clearTimeout;
-  const heartbeatTimer = { id: 'heartbeat-timer' } as unknown as ReturnType<typeof setInterval>;
-  const timeoutTimer = { id: 'timeout-timer' } as unknown as ReturnType<typeof setTimeout>;
+  const heartbeatTimer = { id: "heartbeat-timer" } as unknown as ReturnType<
+    typeof setInterval
+  >;
+  const timeoutTimer = { id: "timeout-timer" } as unknown as ReturnType<
+    typeof setTimeout
+  >;
   let timeoutTick: (() => void) | undefined;
   let timeoutDelayMs: number | undefined;
   let clearIntervalCalls = 0;
   let clearTimeoutCalls = 0;
   let endCalls = 0;
 
-  globalThis.setInterval = ((callback: (...args: unknown[]) => void): ReturnType<typeof setInterval> => {
+  globalThis.setInterval = ((
+    callback: (...args: unknown[]) => void,
+  ): ReturnType<typeof setInterval> => {
     void callback;
     return heartbeatTimer;
   }) as typeof setInterval;
-  globalThis.clearInterval = ((timer: ReturnType<typeof setInterval> | undefined): void => {
+  globalThis.clearInterval = ((
+    timer: ReturnType<typeof setInterval> | undefined,
+  ): void => {
     if (timer === heartbeatTimer) {
       clearIntervalCalls += 1;
     }
   }) as typeof clearInterval;
-  globalThis.setTimeout = ((callback: (...args: unknown[]) => void, delay?: number): ReturnType<typeof setTimeout> => {
+  globalThis.setTimeout = ((
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+  ): ReturnType<typeof setTimeout> => {
     timeoutDelayMs = delay;
     timeoutTick = () => callback();
     return timeoutTimer;
   }) as typeof setTimeout;
-  globalThis.clearTimeout = ((timer: ReturnType<typeof setTimeout> | undefined): void => {
+  globalThis.clearTimeout = ((
+    timer: ReturnType<typeof setTimeout> | undefined,
+  ): void => {
     if (timer === timeoutTimer) {
       clearTimeoutCalls += 1;
     }
@@ -730,16 +785,16 @@ test('createSseStream automatically closes stale connections after timeout', () 
   try {
     const stream = createSseStream(req, response);
     assert.equal(timeoutDelayMs, 30 * 60 * 1_000);
-    assert.equal(typeof timeoutTick, 'function');
-    assert.equal(req.listenerCount('close'), 1);
+    assert.equal(typeof timeoutTick, "function");
+    assert.equal(req.listenerCount("close"), 1);
 
     timeoutTick?.();
 
     assert.equal(endCalls, 1);
     assert.equal(clearIntervalCalls, 1);
     assert.equal(clearTimeoutCalls, 1);
-    assert.equal(req.listenerCount('close'), 0);
-    assert.equal(stream.write('status', { ok: true }), false);
+    assert.equal(req.listenerCount("close"), 0);
+    assert.equal(stream.write("status", { ok: true }), false);
   } finally {
     globalThis.setInterval = originalSetInterval;
     globalThis.clearInterval = originalClearInterval;
@@ -748,24 +803,30 @@ test('createSseStream automatically closes stale connections after timeout', () 
   }
 });
 
-test('createSseStream cleanup prevents double-close and write after cleanup returns false', () => {
+test("createSseStream cleanup prevents double-close and write after cleanup returns false", () => {
   const req = createMockRequest({
-    method: 'GET',
-    url: '/api/logs',
-    token: 'token',
+    method: "GET",
+    url: "/api/logs",
+    token: "token",
   });
   const { response } = createMockResponse();
 
   const originalSetInterval = globalThis.setInterval;
   const originalClearInterval = globalThis.clearInterval;
-  const timerHandle = { id: 'cleanup-timer' } as unknown as ReturnType<typeof setInterval>;
+  const timerHandle = { id: "cleanup-timer" } as unknown as ReturnType<
+    typeof setInterval
+  >;
   let clearIntervalCalls = 0;
 
-  globalThis.setInterval = ((callback: (...args: unknown[]) => void): ReturnType<typeof setInterval> => {
+  globalThis.setInterval = ((
+    callback: (...args: unknown[]) => void,
+  ): ReturnType<typeof setInterval> => {
     void callback;
     return timerHandle;
   }) as typeof setInterval;
-  globalThis.clearInterval = ((timer: ReturnType<typeof setInterval> | undefined): void => {
+  globalThis.clearInterval = ((
+    timer: ReturnType<typeof setInterval> | undefined,
+  ): void => {
     if (timer === timerHandle) {
       clearIntervalCalls += 1;
     }
@@ -773,43 +834,43 @@ test('createSseStream cleanup prevents double-close and write after cleanup retu
 
   try {
     const stream = createSseStream(req, response);
-    assert.equal(req.listenerCount('close'), 1);
+    assert.equal(req.listenerCount("close"), 1);
 
     stream.cleanup();
     stream.cleanup();
-    req.emit('close');
-    req.emit('close');
+    req.emit("close");
+    req.emit("close");
 
-    assert.equal(req.listenerCount('close'), 0);
+    assert.equal(req.listenerCount("close"), 0);
     assert.equal(clearIntervalCalls, 1);
-    assert.equal(stream.write('status', { ok: false }), false);
+    assert.equal(stream.write("status", { ok: false }), false);
   } finally {
     globalThis.setInterval = originalSetInterval;
     globalThis.clearInterval = originalClearInterval;
   }
 });
 
-test('createSseStream keeps pre-serialized string payloads intact', () => {
+test("createSseStream keeps pre-serialized string payloads intact", () => {
   const req = createMockRequest({
-    method: 'GET',
-    url: '/api/logs',
-    token: 'token',
+    method: "GET",
+    url: "/api/logs",
+    token: "token",
   });
   const { response, state } = createMockResponse();
 
   const stream = createSseStream(req, response);
-  const wroteEvent = stream.write('status', '{"ok":true}');
+  const wroteEvent = stream.write("status", '{"ok":true}');
   assert.equal(wroteEvent, true);
   assert.equal(state.body, 'event: status\ndata: {"ok":true}\n\n');
 
   stream.cleanup();
 });
 
-test('createSseStream validates nullish request and response inputs', () => {
+test("createSseStream validates nullish request and response inputs", () => {
   const req = createMockRequest({
-    method: 'GET',
-    url: '/api/logs',
-    token: 'token',
+    method: "GET",
+    url: "/api/logs",
+    token: "token",
   });
   const { response } = createMockResponse();
 
@@ -823,12 +884,12 @@ test('createSseStream validates nullish request and response inputs', () => {
   );
 });
 
-test('GET /api/logs returns SSE headers', async () => {
+test("GET /api/logs returns SSE headers", async () => {
   const { server, token } = createServerFixture();
   const listener = getRequestListener(server);
   const req = createMockRequest({
-    method: 'GET',
-    url: '/api/logs',
+    method: "GET",
+    url: "/api/logs",
     token,
   });
   const { response, state } = createMockResponse();
@@ -836,22 +897,22 @@ test('GET /api/logs returns SSE headers', async () => {
   await listener(req, response);
 
   assert.equal(state.statusCode, 200);
-  assert.equal(state.headers['content-type'], 'text/event-stream');
-  assert.equal(state.headers['cache-control'], 'no-cache');
-  assert.equal(state.headers.connection, 'keep-alive');
+  assert.equal(state.headers["content-type"], "text/event-stream");
+  assert.equal(state.headers["cache-control"], "no-cache");
+  assert.equal(state.headers.connection, "keep-alive");
 
-  req.emit('close');
+  req.emit("close");
 });
 
-test('GET /api/logs enforces max SSE connections and releases slots on close', async () => {
+test("GET /api/logs enforces max SSE connections and releases slots on close", async () => {
   const { server, token } = createServerFixture();
   const listener = getRequestListener(server);
   const openRequests: IncomingMessage[] = [];
 
   for (let i = 0; i < 50; i += 1) {
     const req = createMockRequest({
-      method: 'GET',
-      url: '/api/logs',
+      method: "GET",
+      url: "/api/logs",
       token,
     });
     const { response, state } = createMockResponse();
@@ -861,44 +922,45 @@ test('GET /api/logs enforces max SSE connections and releases slots on close', a
   }
 
   const overflowReq = createMockRequest({
-    method: 'GET',
-    url: '/api/logs',
+    method: "GET",
+    url: "/api/logs",
     token,
   });
   const { response: overflowRes, state: overflowState } = createMockResponse();
   await listener(overflowReq, overflowRes);
   assert.equal(overflowState.statusCode, 503);
   assert.deepEqual(parseJson<{ error: string }>(overflowState), {
-    error: 'SSE connection limit exceeded. Please retry later.',
+    error: "SSE connection limit exceeded. Please retry later.",
   });
 
   const releasedReq = openRequests.shift();
-  releasedReq?.emit('close');
+  releasedReq?.emit("close");
 
   const replacementReq = createMockRequest({
-    method: 'GET',
-    url: '/api/logs',
+    method: "GET",
+    url: "/api/logs",
     token,
   });
-  const { response: replacementRes, state: replacementState } = createMockResponse();
+  const { response: replacementRes, state: replacementState } =
+    createMockResponse();
   await listener(replacementReq, replacementRes);
   assert.equal(replacementState.statusCode, 200);
 
   for (const req of openRequests) {
-    req.emit('close');
+    req.emit("close");
   }
-  replacementReq.emit('close');
+  replacementReq.emit("close");
 });
 
-test('SSE connection limits are tracked independently per endpoint', async () => {
+test("SSE connection limits are tracked independently per endpoint", async () => {
   const { server, token } = createServerFixture();
   const listener = getRequestListener(server);
   const logRequests: IncomingMessage[] = [];
 
   for (let i = 0; i < 50; i += 1) {
     const req = createMockRequest({
-      method: 'GET',
-      url: '/api/logs',
+      method: "GET",
+      url: "/api/logs",
       token,
     });
     const { response, state } = createMockResponse();
@@ -908,8 +970,8 @@ test('SSE connection limits are tracked independently per endpoint', async () =>
   }
 
   const statusReq = createMockRequest({
-    method: 'GET',
-    url: '/api/status/stream',
+    method: "GET",
+    url: "/api/status/stream",
     token,
   });
   const { response: statusRes, state: statusState } = createMockResponse();
@@ -917,12 +979,12 @@ test('SSE connection limits are tracked independently per endpoint', async () =>
   assert.equal(statusState.statusCode, 200);
 
   for (const req of logRequests) {
-    req.emit('close');
+    req.emit("close");
   }
-  statusReq.emit('close');
+  statusReq.emit("close");
 });
 
-test('GET /api/logs warns when active SSE connections exceed 80% of the limit', async () => {
+test("GET /api/logs warns when active SSE connections exceed 80% of the limit", async () => {
   const { server, token } = createServerFixture();
   const listener = getRequestListener(server);
   const openRequests: IncomingMessage[] = [];
@@ -936,8 +998,8 @@ test('GET /api/logs warns when active SSE connections exceed 80% of the limit', 
   try {
     for (let i = 0; i < 41; i += 1) {
       const req = createMockRequest({
-        method: 'GET',
-        url: '/api/logs',
+        method: "GET",
+        url: "/api/logs",
         token,
       });
       const { response, state } = createMockResponse();
@@ -946,22 +1008,25 @@ test('GET /api/logs warns when active SSE connections exceed 80% of the limit', 
       openRequests.push(req);
     }
 
-    const warning = warningCalls.find(call => call.message === 'SSE connection count is nearing endpoint limit.');
+    const warning = warningCalls.find(
+      (call) =>
+        call.message === "SSE connection count is nearing endpoint limit.",
+    );
     assert.ok(warning);
     assert.deepEqual(warning.data, {
-      endpoint: '/api/logs',
+      endpoint: "/api/logs",
       activeConnections: 41,
       connectionLimit: 50,
     });
   } finally {
     log.warn = originalWarn;
     for (const req of openRequests) {
-      req.emit('close');
+      req.emit("close");
     }
   }
 });
 
-test('GET /api/status/stream returns SSE headers and cleans up status listeners', async () => {
+test("GET /api/status/stream returns SSE headers and cleans up status listeners", async () => {
   let removeCalls = 0;
   let statusListenerAttached = false;
 
@@ -977,8 +1042,8 @@ test('GET /api/status/stream returns SSE headers and cleans up status listeners'
   });
   const listener = getRequestListener(server);
   const req = createMockRequest({
-    method: 'GET',
-    url: '/api/status/stream',
+    method: "GET",
+    url: "/api/status/stream",
     token,
   });
   const { response, state } = createMockResponse();
@@ -986,58 +1051,58 @@ test('GET /api/status/stream returns SSE headers and cleans up status listeners'
   await listener(req, response);
 
   assert.equal(state.statusCode, 200);
-  assert.equal(state.headers['content-type'], 'text/event-stream');
-  assert.equal(state.headers['cache-control'], 'no-cache');
-  assert.equal(state.headers.connection, 'keep-alive');
+  assert.equal(state.headers["content-type"], "text/event-stream");
+  assert.equal(state.headers["cache-control"], "no-cache");
+  assert.equal(state.headers.connection, "keep-alive");
   assert.equal(statusListenerAttached, true);
   assert.match(state.body, /event: status/);
 
-  req.emit('close');
+  req.emit("close");
   assert.equal(removeCalls, 1);
 });
 
-test('GET /api/plans/:id/stream returns 503 when planChat not injected', async () => {
+test("GET /api/plans/:id/stream returns 503 when planChat not injected", async () => {
   const { server, token } = createServerFixture();
 
   const state = await dispatch(server, {
-    method: 'GET',
-    url: '/api/plans/42/stream',
+    method: "GET",
+    url: "/api/plans/42/stream",
     token,
   });
 
   assert.equal(state.statusCode, 503);
   assert.deepEqual(parseJson<{ error: string }>(state), {
-    error: 'Plan chat not available',
+    error: "Plan chat not available",
   });
 });
 
-test('POST /api/plans/chat returns 503 when planChat not injected', async () => {
+test("POST /api/plans/chat returns 503 when planChat not injected", async () => {
   const { server, token } = createServerFixture();
 
   const state = await dispatch(server, {
-    method: 'POST',
-    url: '/api/plans/chat',
+    method: "POST",
+    url: "/api/plans/chat",
     token,
   });
 
   assert.equal(state.statusCode, 503);
   assert.deepEqual(parseJson<{ error: string }>(state), {
-    error: 'Plan chat not available',
+    error: "Plan chat not available",
   });
 });
 
-test('POST /api/plans/:id/message returns 503 when planChat not injected', async () => {
+test("POST /api/plans/:id/message returns 503 when planChat not injected", async () => {
   const { server, token } = createServerFixture();
 
   const state = await dispatch(server, {
-    method: 'POST',
-    url: '/api/plans/7/message',
+    method: "POST",
+    url: "/api/plans/7/message",
     token,
-    body: { message: 'Run dependency audit' },
+    body: { message: "Run dependency audit" },
   });
 
   assert.equal(state.statusCode, 503);
   assert.deepEqual(parseJson<{ error: string }>(state), {
-    error: 'Plan chat not available',
+    error: "Plan chat not available",
   });
 });

@@ -1,17 +1,32 @@
-import { createWriteStream, mkdirSync, existsSync, type WriteStream } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
+import {
+  createWriteStream,
+  mkdirSync,
+  existsSync,
+  type WriteStream,
+} from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 
-type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+type LogLevel = "debug" | "info" | "warn" | "error";
 
-const LEVEL_PRIORITY: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
-const LEVEL_COLORS: Record<LogLevel, string> = {
-  debug: '\x1b[90m', info: '\x1b[36m', warn: '\x1b[33m', error: '\x1b[31m',
+const LEVEL_PRIORITY: Record<LogLevel, number> = {
+  debug: 0,
+  info: 1,
+  warn: 2,
+  error: 3,
 };
-const RESET = '\x1b[0m';
+const LEVEL_COLORS: Record<LogLevel, string> = {
+  debug: "\x1b[90m",
+  info: "\x1b[36m",
+  warn: "\x1b[33m",
+  error: "\x1b[31m",
+};
+const RESET = "\x1b[0m";
 
 /** Maximum entries held in the backpressure buffer before dropping */
 const DEFAULT_MAX_BUFFER_SIZE = 1000;
+/** Maximum recent log entries kept in memory for instant replay on SSE connect */
+const RECENT_ENTRIES_CAPACITY = 200;
 
 type LogListener = (entry: LogEntry) => void;
 
@@ -30,7 +45,7 @@ export interface LogEntry {
 }
 
 export class Logger {
-  private minLevel: LogLevel = 'info';
+  private minLevel: LogLevel = "info";
   private readonly logDir: string;
   private readonly logFile: string;
   private readonly logStream: WriteStream;
@@ -43,6 +58,9 @@ export class Logger {
     sigterm: () => void;
   };
 
+  /* Recent entries ring buffer for instant SSE replay */
+  private recentEntries: LogEntry[] = [];
+
   /* Backpressure state */
   private writeBuffer: string[] = [];
   private draining = false;
@@ -50,14 +68,17 @@ export class Logger {
   private droppedCount = 0;
 
   constructor(options: LoggerOptions = {}) {
-    this.logDir = options.logDir ?? join(homedir(), '.db-coder', 'logs');
+    this.logDir = options.logDir ?? join(homedir(), ".db-coder", "logs");
     this.maxBufferSize = options.maxBufferSize ?? DEFAULT_MAX_BUFFER_SIZE;
     if (!existsSync(this.logDir)) mkdirSync(this.logDir, { recursive: true });
     const date = new Date().toISOString().slice(0, 10);
     this.logFile = join(this.logDir, `${date}.log`);
-    this.logStream = createWriteStream(this.logFile, { flags: 'a', encoding: 'utf-8' });
-    this.logStream.on('error', (err) => {
-      this.writeInternalError('Log stream error', err);
+    this.logStream = createWriteStream(this.logFile, {
+      flags: "a",
+      encoding: "utf-8",
+    });
+    this.logStream.on("error", (err) => {
+      this.writeInternalError("Log stream error", err);
     });
 
     if (options.registerExitHandlers !== false) {
@@ -72,8 +93,13 @@ export class Logger {
   addListener(listener: LogListener): () => void {
     this.listeners.push(listener);
     return () => {
-      this.listeners = this.listeners.filter(l => l !== listener);
+      this.listeners = this.listeners.filter((l) => l !== listener);
     };
+  }
+
+  getRecentEntries(limit = RECENT_ENTRIES_CAPACITY): LogEntry[] {
+    const n = Math.min(limit, this.recentEntries.length);
+    return this.recentEntries.slice(-n);
   }
 
   private shouldLog(level: LogLevel): boolean {
@@ -89,7 +115,7 @@ export class Logger {
 
   private writeFile(entry: LogEntry): void {
     if (this.shuttingDown) return;
-    const line = JSON.stringify(entry) + '\n';
+    const line = JSON.stringify(entry) + "\n";
 
     if (this.draining) {
       this.enqueueLine(line);
@@ -100,10 +126,10 @@ export class Logger {
       const ok = this.logStream.write(line);
       if (!ok) {
         this.draining = true;
-        this.logStream.once('drain', () => this.onDrain());
+        this.logStream.once("drain", () => this.onDrain());
       }
     } catch (err) {
-      this.writeInternalError('Failed to queue log entry for file write', err);
+      this.writeInternalError("Failed to queue log entry for file write", err);
     }
   }
 
@@ -123,11 +149,12 @@ export class Logger {
     if (this.droppedCount > 0) {
       const dropped = this.droppedCount;
       this.droppedCount = 0;
-      const warnLine = JSON.stringify({
-        timestamp: new Date().toISOString(),
-        level: 'warn',
-        message: `Logger dropped ${dropped} entries due to backpressure`,
-      }) + '\n';
+      const warnLine =
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "warn",
+          message: `Logger dropped ${dropped} entries due to backpressure`,
+        }) + "\n";
       this.writeBuffer.unshift(warnLine);
     }
 
@@ -145,7 +172,7 @@ export class Logger {
         const ok = this.logStream.write(line);
         if (!ok) {
           this.draining = true;
-          this.logStream.once('drain', () => this.onDrain());
+          this.logStream.once("drain", () => this.onDrain());
           return;
         }
       } catch {
@@ -155,10 +182,10 @@ export class Logger {
   }
 
   private writeInternalError(message: string, err: unknown): void {
-    if (!this.shouldLog('debug')) return;
+    if (!this.shouldLog("debug")) return;
     this.writeConsole({
       timestamp: new Date().toISOString(),
-      level: 'debug',
+      level: "debug",
       message,
       data: err,
     });
@@ -178,16 +205,16 @@ export class Logger {
     };
 
     this.processHandlers = { beforeExit, sigint: onSignal, sigterm: onSignal };
-    process.once('beforeExit', beforeExit);
-    process.once('SIGINT', onSignal);
-    process.once('SIGTERM', onSignal);
+    process.once("beforeExit", beforeExit);
+    process.once("SIGINT", onSignal);
+    process.once("SIGTERM", onSignal);
   }
 
   private unregisterExitHandlers(): void {
     if (!this.processHandlers) return;
-    process.off('beforeExit', this.processHandlers.beforeExit);
-    process.off('SIGINT', this.processHandlers.sigint);
-    process.off('SIGTERM', this.processHandlers.sigterm);
+    process.off("beforeExit", this.processHandlers.beforeExit);
+    process.off("SIGINT", this.processHandlers.sigint);
+    process.off("SIGTERM", this.processHandlers.sigterm);
     this.processHandlers = undefined;
   }
 
@@ -207,7 +234,11 @@ export class Logger {
     // we are about to end the stream, which will flush the OS buffer).
     while (this.writeBuffer.length > 0) {
       const line = this.writeBuffer.shift()!;
-      try { this.logStream.write(line); } catch { break; }
+      try {
+        this.logStream.write(line);
+      } catch {
+        break;
+      }
     }
 
     this.flushPromise = new Promise((resolve) => {
@@ -218,7 +249,7 @@ export class Logger {
         resolve();
       };
 
-      this.logStream.once('error', finish);
+      this.logStream.once("error", finish);
       this.logStream.end(finish);
     });
     await this.flushPromise;
@@ -244,6 +275,12 @@ export class Logger {
       data,
     };
 
+    // Ring buffer for instant SSE replay
+    this.recentEntries.push(entry);
+    if (this.recentEntries.length > RECENT_ENTRIES_CAPACITY) {
+      this.recentEntries.shift();
+    }
+
     // Terminal output
     this.writeConsole(entry);
 
@@ -255,15 +292,23 @@ export class Logger {
       try {
         listener(entry);
       } catch (err) {
-        this.writeInternalError('Log listener callback failed', err);
+        this.writeInternalError("Log listener callback failed", err);
       }
     }
   }
 
-  debug(msg: string, data?: unknown): void { this.emit('debug', msg, data); }
-  info(msg: string, data?: unknown): void { this.emit('info', msg, data); }
-  warn(msg: string, data?: unknown): void { this.emit('warn', msg, data); }
-  error(msg: string, data?: unknown): void { this.emit('error', msg, data); }
+  debug(msg: string, data?: unknown): void {
+    this.emit("debug", msg, data);
+  }
+  info(msg: string, data?: unknown): void {
+    this.emit("info", msg, data);
+  }
+  warn(msg: string, data?: unknown): void {
+    this.emit("warn", msg, data);
+  }
+  error(msg: string, data?: unknown): void {
+    this.emit("error", msg, data);
+  }
 }
 
 export const log = new Logger();

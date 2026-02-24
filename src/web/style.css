@@ -863,6 +863,166 @@ textarea.form-input { resize: vertical; }
   .plugin-grid { grid-template-columns: 1fr; }
 }
 
+/* ---- Cycle Timeline ---- */
+.cycle-timeline {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 12px 0 4px;
+  overflow-x: auto;
+}
+
+.timeline-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 56px;
+  gap: 6px;
+}
+
+.step-indicator {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--border-color);
+  border: 2px solid var(--border-color);
+  transition: all 0.3s ease;
+  flex-shrink: 0;
+}
+
+.step-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.step-duration {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.step-connector {
+  width: 24px;
+  height: 2px;
+  background: var(--border-color);
+  flex-shrink: 0;
+  margin: 0 2px;
+  margin-bottom: 28px;
+  transition: background 0.3s ease;
+}
+
+.step-connector.done {
+  background: var(--accent-green);
+}
+
+/* Step states */
+.timeline-step.pending .step-indicator {
+  background: var(--border-color);
+  border-color: var(--border-color);
+}
+
+.timeline-step.active .step-indicator {
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 8px var(--accent-blue);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.timeline-step.active .step-label {
+  color: var(--accent-blue);
+  font-weight: 600;
+}
+
+.timeline-step.done .step-indicator {
+  background: var(--accent-green);
+  border-color: var(--accent-green);
+}
+
+.timeline-step.done .step-label {
+  color: var(--accent-green);
+}
+
+.timeline-step.failed .step-indicator {
+  background: var(--accent-red);
+  border-color: var(--accent-red);
+}
+
+.timeline-step.failed .step-label {
+  color: var(--accent-red);
+}
+
+.timeline-step.skipped .step-indicator {
+  background: transparent;
+  border-color: var(--border-color);
+  opacity: 0.5;
+}
+
+.timeline-step.skipped .step-label {
+  opacity: 0.5;
+}
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 4px var(--accent-blue); }
+  50% { box-shadow: 0 0 12px var(--accent-blue); }
+}
+
+/* ---- Activity Summary ---- */
+.activity-entry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-light);
+  font-size: 13px;
+}
+
+.activity-entry:last-child {
+  border-bottom: none;
+}
+
+.activity-icon {
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.activity-icon.red { color: var(--accent-red); }
+.activity-icon.green { color: var(--accent-green); }
+.activity-icon.blue { color: var(--accent-blue); }
+
+.activity-text {
+  flex: 1;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-time {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  flex-shrink: 0;
+}
+
+/* ---- Responsive timeline ---- */
+@media (max-width: 768px) {
+  .cycle-timeline {
+    gap: 0;
+    justify-content: flex-start;
+  }
+
+  .timeline-step {
+    min-width: 44px;
+  }
+
+  .step-connector {
+    width: 16px;
+  }
+}
+
 /* ---- 聊天界面 ---- */
 .chat-container {
   display: flex;
