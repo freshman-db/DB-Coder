@@ -172,6 +172,7 @@ export class CodexBridge implements CodingAgent {
       // Reviews are read-only — enforce workspace-read regardless of config
       const args = ['exec', ...this.sandboxArgs('workspace-read'), '--json', prompt];
       const { output, exitCode, events, stderr } = await this.invokeCodex(args, cwd, {
+        timeout: 600_000,
         outFilePrefix: 'codex-review',
       });
 

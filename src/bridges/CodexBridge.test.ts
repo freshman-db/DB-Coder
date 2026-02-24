@@ -256,6 +256,19 @@ test('review parses valid review JSON and tags issues as codex-sourced', async (
   });
 });
 
+test('review kills codex process on timeout', async () => {
+  const child = new FakeChildProcessWithKillSpy();
+
+  await withMockedSpawn(() => child as unknown as ChildProcess, async () => {
+    const bridge = new CodexBridge(createCodexConfig());
+    const result = await bridge.review('Review the code', process.cwd());
+
+    assert.equal(result.passed, false);
+    assert.equal(child.killSignals.length, 1);
+    assert.equal(child.killSignals[0], 'SIGTERM');
+  });
+});
+
 test('execute extracts structured total cost from direct and usage fields', async () => {
   await withMockedSpawn((call) => {
     const child = new FakeChildProcess();

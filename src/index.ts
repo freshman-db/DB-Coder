@@ -175,13 +175,13 @@ program
   .command('queue')
   .description('Show task queue')
   .action(async () => {
-    const tasks = await getClient().listTasks() as Array<{ id: string; priority: number; status: string; task_description: string }>;
-    if (!Array.isArray(tasks) || tasks.length === 0) {
+    const { tasks } = await getClient().listTasks();
+    if (tasks.length === 0) {
       console.log('No tasks.');
       return;
     }
     for (const t of tasks) {
-      const statusIcon = { queued: '⏳', active: '🔄', done: '✅', failed: '❌', blocked: '🚫', skipped: '⏭️' }[t.status] ?? '?';
+      const statusIcon: string = { queued: '⏳', active: '🔄', done: '✅', failed: '❌', blocked: '🚫', skipped: '⏭️', pending_review: '👀' }[t.status] ?? '?';
       console.log(`${statusIcon} [P${t.priority}] ${truncate(t.task_description, TASK_DESC_MAX_LENGTH)}  (${t.id.slice(0, 8)})`);
     }
   });
@@ -236,8 +236,8 @@ program
   .command('blocked')
   .description('Show blocked tasks')
   .action(async () => {
-    const tasks = await getClient().listTasks() as Array<{ id: string; priority: number; status: string; task_description: string }>;
-    const blocked = (Array.isArray(tasks) ? tasks : []).filter(t => t.status === 'blocked');
+    const { tasks } = await getClient().listTasks();
+    const blocked = tasks.filter(t => t.status === 'blocked');
     if (blocked.length === 0) {
       console.log('No blocked tasks.');
       return;

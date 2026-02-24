@@ -1,4 +1,42 @@
 import { log } from '../utils/logger.js';
+import type { OperationalMetrics, Task, TaskLog } from '../memory/types.js';
+
+// --- Typed response interfaces matching routes.ts ---
+
+export interface DailyCost {
+  date: string;
+  total_cost_usd: number;
+  task_count: number;
+}
+
+export interface StatusResponse {
+  state: string;
+  currentTaskId: string | null;
+  currentTaskTitle: string | null;
+  paused: boolean;
+  patrolling: boolean;
+  scanInterval: number;
+  projectPath: string;
+  dailyCosts: DailyCost[];
+}
+
+export interface ListTasksResponse {
+  tasks: Task[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface GetTaskResponse extends Task {
+  logs: TaskLog[];
+}
+
+export interface CostResponse {
+  costs: DailyCost[];
+  sessionCost: number;
+}
+
+export type MetricsResponse = OperationalMetrics;
 
 export class Client {
   private baseUrl: string;
@@ -9,53 +47,70 @@ export class Client {
     this.apiToken = apiToken;
   }
 
-  async status(): Promise<unknown> {
+  async status(): Promise<StatusResponse> {
     return this.get('/api/status');
   }
 
-  async addTask(description: string, priority = 2): Promise<unknown> {
+  async addTask(description: string, priority = 2): Promise<Task> {
     return this.post('/api/tasks', { description, priority });
   }
 
-  async listTasks(): Promise<unknown> {
+  async listTasks(): Promise<ListTasksResponse> {
     return this.get('/api/tasks');
   }
 
-  async getTask(id: string): Promise<unknown> {
+  async getTask(id: string): Promise<GetTaskResponse> {
     return this.get(`/api/tasks/${id}`);
   }
 
-  async deleteTask(id: string): Promise<unknown> {
+  async deleteTask(id: string): Promise<{ ok: boolean }> {
     return this.del(`/api/tasks/${id}`);
   }
 
-  async pause(): Promise<unknown> {
+  async pendingReviewTasks(): Promise<Task[]> {
+    return this.get('/api/tasks/pending-review');
+  }
+
+  async approveTask(id: string): Promise<{ ok: boolean; status: string }> {
+    return this.post(`/api/tasks/${id}/approve`);
+  }
+
+  async skipTask(id: string): Promise<{ ok: boolean; status: string }> {
+    return this.post(`/api/tasks/${id}/skip`);
+  }
+
+  async pause(): Promise<{ paused: boolean }> {
     return this.post('/api/control/pause');
   }
 
-  async resume(): Promise<unknown> {
+  async resume(): Promise<{ paused: boolean }> {
     return this.post('/api/control/resume');
   }
 
-  async triggerScan(depth = 'normal'): Promise<unknown> {
+  async triggerScan(depth = 'normal'): Promise<{ triggered: boolean; depth: string }> {
     return this.post('/api/control/scan', { depth });
   }
 
-  async searchMemory(query: string): Promise<unknown> {
-    return this.get(`/api/memory?q=${encodeURIComponent(query)}`);
-  }
-
-  async addMemory(category: string, title: string, content: string, tags: string[] = []): Promise<unknown> {
-    return this.post('/api/memory', { category, title, content, tags });
-  }
-
-  async getCost(): Promise<unknown> {
+  async getCost(): Promise<CostResponse> {
     return this.get('/api/cost');
   }
 
-  async followLogs(onEntry: (entry: unknown) => void): Promise<void> {
+  async metrics(): Promise<MetricsResponse> {
+    return this.get('/api/metrics');
+  }
+
+  async patrolStart(): Promise<{ ok: boolean; patrolling: boolean }> {
+    return this.post('/api/patrol/start');
+  }
+
+  async patrolStop(): Promise<{ ok: boolean; patrolling: boolean }> {
+    return this.post('/api/patrol/stop');
+  }
+
+  async followLogs(onEntry: (entry: unknown) => void, signal?: AbortSignal): Promise<void> {
     const res = await fetch(`${this.baseUrl}/api/logs?follow=true`, {
       headers: this.getAuthHeaders(),
+      signal,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     const reader = res.body?.getReader();
@@ -64,37 +119,41 @@ export class Client {
     const decoder = new TextDecoder();
     let buffer = '';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
 
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
 
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const entry = JSON.parse(line.slice(6));
-            onEntry(entry);
-          } catch (err) {
-            log.debug('Failed to parse SSE log entry', { error: err, line });
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const entry = JSON.parse(line.slice(6));
+              onEntry(entry);
+            } catch (err) {
+              log.debug('Failed to parse SSE log entry', { error: err, line });
+            }
           }
         }
       }
+    } finally {
+      reader.releaseLock();
     }
   }
 
-  private async get(path: string): Promise<unknown> {
+  private async get<T = unknown>(path: string): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       headers: this.getAuthHeaders(),
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-    return res.json();
+    return res.json() as Promise<T>;
   }
 
-  private async post(path: string, body?: unknown): Promise<unknown> {
+  private async post<T = unknown>(path: string, body?: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
       headers: { ...this.getAuthHeaders(), 'Content-Type': 'application/json' },
@@ -102,17 +161,17 @@ export class Client {
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-    return res.json();
+    return res.json() as Promise<T>;
   }
 
-  private async del(path: string): Promise<unknown> {
+  private async del<T = unknown>(path: string): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       method: 'DELETE',
       headers: this.getAuthHeaders(),
       signal: AbortSignal.timeout(10000),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-    return res.json();
+    return res.json() as Promise<T>;
   }
 
   private getAuthHeaders(): Record<string, string> {
