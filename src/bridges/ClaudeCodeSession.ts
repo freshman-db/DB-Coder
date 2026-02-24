@@ -138,6 +138,11 @@ export function buildArgs(prompt: string, opts: SessionOptions): string[] {
 
 export class ClaudeCodeSession {
   private child: ChildProcess | null = null;
+  private spawnFn: typeof spawn;
+
+  constructor(spawnFn?: typeof spawn) {
+    this.spawnFn = spawnFn ?? spawn;
+  }
 
   /**
    * Run a prompt in a new or resumed Claude Code CLI session.
@@ -154,7 +159,7 @@ export class ClaudeCodeSession {
     env.CLAUDE_MEM_MODEL = 'claude-opus-4-6';
 
     return new Promise<SessionResult>((resolve, reject) => {
-      const child = spawn('claude', args, {
+      const child = this.spawnFn('claude', args, {
         cwd: opts.cwd,
         env,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -233,8 +238,10 @@ export class ClaudeCodeSession {
 
       // Timeout handling
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let killed = false;
       if (opts.timeout) {
         timer = setTimeout(() => {
+          killed = true;
           log.warn('ClaudeCodeSession: timeout, killing process', { timeout: opts.timeout });
           child.kill('SIGTERM');
         }, opts.timeout);
@@ -262,20 +269,35 @@ export class ClaudeCodeSession {
         // Use result text if available, otherwise fall back to accumulated text
         const text = resultText || textParts.join('');
 
-        resolve({
-          text,
-          json: structuredOutput,
-          costUsd,
-          sessionId,
-          exitCode: code ?? 0,
-          numTurns,
-          durationMs: Date.now() - start,
-          isError,
-          errors: (isError || (code !== 0 && code !== null))
-            ? (errors.length > 0 ? errors : [stderr || `exit code ${code}`])
-            : [],
-          usage,
-        });
+        if (killed) {
+          resolve({
+            text,
+            json: structuredOutput,
+            costUsd,
+            sessionId,
+            exitCode: -1,
+            numTurns,
+            durationMs: Date.now() - start,
+            isError: true,
+            errors: [`Session timed out after ${opts.timeout}ms`],
+            usage,
+          });
+        } else {
+          resolve({
+            text,
+            json: structuredOutput,
+            costUsd,
+            sessionId,
+            exitCode: code ?? 0,
+            numTurns,
+            durationMs: Date.now() - start,
+            isError,
+            errors: (isError || (code !== 0 && code !== null))
+              ? (errors.length > 0 ? errors : [stderr || `exit code ${code}`])
+              : [],
+            usage,
+          });
+        }
       });
 
       // Close stdin immediately (we use -p flag, not interactive mode)
