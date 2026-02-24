@@ -238,50 +238,62 @@ export class MainLoop {
   async runCycle(): Promise<boolean> {
     const projectPath = this.config.projectPath;
 
-    // 1. Brain decides what to do
+    // 0. Drain queued tasks first — skip brain entirely if work is waiting
     this.setState('scanning');
-    this.eventBus.emit(this.makeEvent('decide', 'before'));
-    let decision = await this.brainDecide(projectPath);
-    if (decision.costUsd > 0) await this.taskStore.addDailyCost(decision.costUsd);
+    const queued = await this.taskQueue.getNext(projectPath);
+    let task: Task;
 
-    // Layer 2: directive fallback if brain returned null
-    if (!decision.taskDescription) {
-      log.warn('Brain returned no task — retrying with directive prompt');
-      const directive = await this.brainDecideDirective(projectPath);
-      if (directive.costUsd > 0) await this.taskStore.addDailyCost(directive.costUsd);
-      if (directive.taskDescription) {
-        decision = directive;
+    if (queued) {
+      task = queued;
+      await this.taskStore.updateTask(task.id, { status: 'active', phase: 'executing' });
+      this.setCurrentTaskId(task.id);
+      log.info(`Queue pickup: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`);
+      this.eventBus.emit(this.makeEvent('decide', 'after', { taskDescription: task.task_description }));
+    } else {
+      // 1. Brain decides what to do
+      this.eventBus.emit(this.makeEvent('decide', 'before'));
+      let decision = await this.brainDecide(projectPath);
+      if (decision.costUsd > 0) await this.taskStore.addDailyCost(decision.costUsd);
+
+      // Layer 2: directive fallback if brain returned null
+      if (!decision.taskDescription) {
+        log.warn('Brain returned no task — retrying with directive prompt');
+        const directive = await this.brainDecideDirective(projectPath);
+        if (directive.costUsd > 0) await this.taskStore.addDailyCost(directive.costUsd);
+        if (directive.taskDescription) {
+          decision = directive;
+        }
       }
-    }
 
-    // Layer 3: if still null, short sleep will retry (handled by start())
-    if (!decision.taskDescription) {
-      log.warn('Brain: no task after directive retry. Short sleep then retry.');
-      this.setState('idle');
-      return false;
-    }
+      // Layer 3: if still null, short sleep will retry (handled by start())
+      if (!decision.taskDescription) {
+        log.warn('Brain: no task after directive retry. Short sleep then retry.');
+        this.setState('idle');
+        return false;
+      }
 
-    // Dedup check: avoid creating duplicate or recently-failed tasks
-    const similar = await this.taskStore.findSimilarTask(projectPath, decision.taskDescription);
-    if (similar && (similar.status === 'queued' || similar.status === 'active' || similar.status === 'done')) {
-      log.info(`Dedup: skipping task similar to [${similar.status}] "${truncate(similar.task_description, 80)}"`);
-      this.setState('idle');
-      return false;
-    }
-    if (await this.taskStore.hasRecentlyFailedSimilar(projectPath, decision.taskDescription)) {
-      log.info(`Cooldown: skipping task similar to recently failed one: "${truncate(decision.taskDescription, 80)}"`);
-      this.setState('idle');
-      return false;
-    }
+      // Dedup check: avoid creating duplicate or recently-failed tasks
+      const similar = await this.taskStore.findSimilarTask(projectPath, decision.taskDescription);
+      if (similar && (similar.status === 'queued' || similar.status === 'active' || similar.status === 'done')) {
+        log.info(`Dedup: skipping task similar to [${similar.status}] "${truncate(similar.task_description, 80)}"`);
+        this.setState('idle');
+        return false;
+      }
+      if (await this.taskStore.hasRecentlyFailedSimilar(projectPath, decision.taskDescription)) {
+        log.info(`Cooldown: skipping task similar to recently failed one: "${truncate(decision.taskDescription, 80)}"`);
+        this.setState('idle');
+        return false;
+      }
 
-    this.eventBus.emit(this.makeEvent('decide', 'after', { taskDescription: decision.taskDescription }));
+      this.eventBus.emit(this.makeEvent('decide', 'after', { taskDescription: decision.taskDescription }));
 
-    // 2. Create task record
-    this.setState('planning');
-    const task = await this.taskStore.createTask(projectPath, decision.taskDescription, decision.priority ?? 2);
-    this.setCurrentTaskId(task.id);
-    log.info(`Task: ${truncate(decision.taskDescription, TASK_DESC_MAX_LENGTH)}`);
-    this.eventBus.emit(this.makeEvent('create-task', 'after', { taskId: task.id, taskDescription: decision.taskDescription }));
+      // 2. Create task record
+      this.setState('planning');
+      task = await this.taskStore.createTask(projectPath, decision.taskDescription, decision.priority ?? 2);
+      this.setCurrentTaskId(task.id);
+      log.info(`Task: ${truncate(decision.taskDescription, TASK_DESC_MAX_LENGTH)}`);
+      this.eventBus.emit(this.makeEvent('create-task', 'after', { taskId: task.id, taskDescription: decision.taskDescription }));
+    }
 
     // 3. Budget check
     if (await this.checkBudgetOrAbort(task.id)) {
@@ -331,7 +343,7 @@ export class MainLoop {
         task_id: task.id,
         phase: 'execute',
         agent: 'claude-code',
-        input_summary: truncate(decision.taskDescription, SUMMARY_PREVIEW_LEN),
+        input_summary: truncate(task.task_description, SUMMARY_PREVIEW_LEN),
         output_summary: workerResult.text.slice(0, SUMMARY_PREVIEW_LEN),
         cost_usd: workerResult.costUsd,
         duration_ms: workerResult.durationMs,
