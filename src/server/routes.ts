@@ -585,6 +585,22 @@ route('POST', '/api/plans/:id/execute', async (_req, res, ctx, params) => {
   json(res, { ok: true, created });
 });
 
+// --- Persona routes ---
+
+route('GET', '/api/personas', async (_req, res, ctx) => {
+  const personas = await ctx.taskStore.listPersonas();
+  json(res, personas);
+});
+
+route('PUT', '/api/personas/:name', async (req, res, ctx, params) => {
+  const body = await readBody(req) as Record<string, unknown>;
+  if (!body.content || typeof body.content !== 'string') {
+    throw new HttpError(400, 'content is required');
+  }
+  await ctx.taskStore.updatePersonaContent(params.name, body.content);
+  json(res, { ok: true });
+});
+
 // --- Route matching ---
 export async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: RouteContext): Promise<boolean> {
   const url = new URL(req.url ?? '', `http://${req.headers.host}`);
@@ -593,7 +609,7 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse, c
 
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (method === 'OPTIONS') { res.writeHead(204).end(); return true; }
 
