@@ -73,10 +73,10 @@ const COMPLEXITY_CONFIG: Record<
   string,
   { maxTurns: number; maxBudget: number; timeout: number }
 > = {
-  S: { maxTurns: 30, maxBudget: 2.0, timeout: 600_000 }, // 10 min
-  M: { maxTurns: 60, maxBudget: 4.0, timeout: 1_200_000 }, // 20 min
-  L: { maxTurns: 100, maxBudget: 6.0, timeout: 2_400_000 }, // 40 min
-  XL: { maxTurns: 160, maxBudget: 10.0, timeout: 3_600_000 }, // 60 min
+  S: { maxTurns: 100, maxBudget: 5.0, timeout: 600_000 }, // 10 min
+  M: { maxTurns: 200, maxBudget: 10.0, timeout: 1_200_000 }, // 20 min
+  L: { maxTurns: 200, maxBudget: 15.0, timeout: 2_400_000 }, // 40 min
+  XL: { maxTurns: 200, maxBudget: 20.0, timeout: 3_600_000 }, // 60 min
 };
 
 type RunProcessFn = (
@@ -1147,7 +1147,9 @@ Write your analysis as a natural language report.`;
       `Brain phase1 (explore): cost=$${phase1Result.costUsd.toFixed(4)}, turns=${phase1Result.numTurns}, text=${phase1Result.text.length}chars`,
     );
     if (phase1Result.isError || phase1Result.exitCode !== 0) {
-      log.warn(`Brain phase1 errors: ${phase1Result.errors.join("; ")}`);
+      log.warn(
+        `Brain phase1 errors (exitCode=${phase1Result.exitCode}, isError=${phase1Result.isError}): ${phase1Result.errors.join("; ")}`,
+      );
     }
 
     const analysisReport = phase1Result.text.slice(0, 12000);
@@ -1555,7 +1557,7 @@ Respond with EXACTLY this JSON (no markdown):
   ): Promise<SessionResult> {
     return this.brainSession.run(prompt, {
       permissionMode: "bypassPermissions",
-      maxTurns: 20,
+      maxTurns: 200,
       cwd: this.config.projectPath,
       timeout: 300_000,
       model:
@@ -1755,10 +1757,10 @@ Respond with EXACTLY this JSON (no markdown):
       `The previous changes failed verification:\n${errors}\n\nFix these issues. The original task was: ${task.task_description}\n\nUse superpowers:systematic-debugging to investigate the root cause.\nFollow all 4 phases: investigate → analyze → hypothesize → implement.\nDo NOT guess or "try changing X". Find the actual root cause first.`,
       {
         permissionMode: "bypassPermissions",
-        maxTurns: 15,
-        maxBudget: this.config.values.claude.maxTaskBudget / 2,
+        maxTurns: 100,
+        maxBudget: this.config.values.claude.maxTaskBudget,
         cwd: this.config.projectPath,
-        timeout: 120_000,
+        timeout: 600_000,
         resumeSessionId: sessionId,
         model:
           this.config.values.claude.model === "opus"
@@ -1981,9 +1983,9 @@ Keep CLAUDE.md concise — only add genuinely useful rules.`;
 
     const result = await this.brainSession.run(prompt, {
       permissionMode: "bypassPermissions",
-      maxTurns: 10,
+      maxTurns: 50,
       cwd: projectPath,
-      timeout: 120_000,
+      timeout: 300_000,
       model:
         this.config.values.brain.model === "opus"
           ? "claude-opus-4-6"

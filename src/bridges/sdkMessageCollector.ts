@@ -95,6 +95,15 @@ export async function collectResult(
 
   // Map subtype to exitCode: success → 0, any error variant → 1
   const exitCode = resultMsg.subtype === "success" ? 0 : 1;
+  const isError = resultMsg.is_error ?? false;
+
+  // SDK can set is_error=true even on subtype="success" (e.g. tool call failed
+  // mid-session but session recovered). Ensure errors is never empty when isError is true.
+  if (isError && errors.length === 0) {
+    errors = [
+      `SDK reported is_error=true (subtype=${resultMsg.subtype}, exitCode=${exitCode})`,
+    ];
+  }
 
   return {
     text: resultText || textParts.join(""),
@@ -104,7 +113,7 @@ export async function collectResult(
     exitCode,
     numTurns: resultMsg.num_turns ?? 0,
     durationMs: resultMsg.duration_ms ?? 0,
-    isError: resultMsg.is_error ?? false,
+    isError,
     errors,
     usage,
   };

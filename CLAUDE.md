@@ -116,3 +116,4 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 - SDK bypassPermissions 必须同时设置 allowDangerouslySkipPermissions: true
 - SDK systemPrompt preset 'claude_code' 获得完整工具链: 不要自定义系统 prompt
 - SDK kill() vs timeout: exitCode -2 = manual kill, -1 = timeout, 用 killed 布尔标志区分
+- 流式行解析 buffer flush: split('\n') + buffer 模式最后一行可能没有 trailing newline, close handler 必须 flush 剩余 buffer
