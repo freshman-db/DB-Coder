@@ -169,6 +169,15 @@ function persistApiToken(
   chmodSync(path, 0o600);
 }
 
+const MODEL_MAP: Record<string, string> = {
+  opus: "claude-opus-4-6",
+  sonnet: "claude-sonnet-4-6",
+};
+
+export function resolveModelId(shortName: string): string {
+  return MODEL_MAP[shortName] ?? MODEL_MAP.sonnet;
+}
+
 export class Config {
   readonly values: DbCoderConfig;
   readonly projectPath: string;

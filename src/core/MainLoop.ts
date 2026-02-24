@@ -1,3 +1,4 @@
+import { resolveModelId } from "../config/Config.js";
 import type { Config } from "../config/Config.js";
 import type { TaskQueue } from "./TaskQueue.js";
 import type { CodexBridge } from "../bridges/CodexBridge.js";
@@ -1560,10 +1561,7 @@ Respond with EXACTLY this JSON (no markdown):
       maxTurns: 200,
       cwd: this.config.projectPath,
       timeout: 300_000,
-      model:
-        this.config.values.brain.model === "opus"
-          ? "claude-opus-4-6"
-          : "claude-sonnet-4-6",
+      model: resolveModelId(this.config.values.brain.model),
       disallowedTools: ["Edit", "Write", "NotebookEdit"],
       appendSystemPrompt:
         "You are the brain of an autonomous coding agent. Read CLAUDE.md for context. Do not modify files — only analyze and decide.",
@@ -1609,10 +1607,7 @@ Respond with EXACTLY this JSON (no markdown):
       ),
       cwd: this.config.projectPath,
       timeout: cConfig.timeout,
-      model:
-        this.config.values.claude.model === "opus"
-          ? "claude-opus-4-6"
-          : "claude-sonnet-4-6",
+      model: resolveModelId(this.config.values.claude.model),
       appendSystemPrompt: systemPrompt,
     });
   }
@@ -1770,10 +1765,7 @@ Respond with EXACTLY this JSON (no markdown):
         cwd: this.config.projectPath,
         timeout: 600_000,
         resumeSessionId: sessionId,
-        model:
-          this.config.values.claude.model === "opus"
-            ? "claude-opus-4-6"
-            : "claude-sonnet-4-6",
+        model: resolveModelId(this.config.values.claude.model),
       },
     );
   }
@@ -1994,10 +1986,7 @@ Keep CLAUDE.md concise — only add genuinely useful rules.`;
       maxTurns: 50,
       cwd: projectPath,
       timeout: 300_000,
-      model:
-        this.config.values.brain.model === "opus"
-          ? "claude-opus-4-6"
-          : "claude-sonnet-4-6",
+      model: resolveModelId(this.config.values.brain.model),
       appendSystemPrompt:
         "You are reflecting on a task. You CAN edit CLAUDE.md and use claude-mem. Do not modify source code.",
       allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
@@ -2068,10 +2057,7 @@ Update CLAUDE.md if you discover new patterns or pitfalls.`,
         maxTurns: 50,
         cwd: projectPath,
         timeout: 3_600_000,
-        model:
-          this.config.values.brain.model === "opus"
-            ? "claude-opus-4-6"
-            : "claude-sonnet-4-6",
+        model: resolveModelId(this.config.values.brain.model),
         allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
         appendSystemPrompt:
           "You are performing a deep code review. You CAN edit CLAUDE.md to add new patterns or pitfalls. Do not modify source code.",
@@ -2109,10 +2095,7 @@ Rules:
         maxTurns: 50,
         cwd: projectPath,
         timeout: 3_600_000,
-        model:
-          this.config.values.brain.model === "opus"
-            ? "claude-opus-4-6"
-            : "claude-sonnet-4-6",
+        model: resolveModelId(this.config.values.brain.model),
         allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
         appendSystemPrompt:
           "You are maintaining CLAUDE.md. You CAN edit CLAUDE.md. Do not modify source code.",
