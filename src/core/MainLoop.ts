@@ -19,6 +19,7 @@ import { createHash } from 'node:crypto';
 import { safeBuild } from '../utils/safeBuild.js';
 import { CycleEventBus } from './CycleEventBus.js';
 import type { CycleEvent, CyclePhase, CycleTiming } from './CycleEvents.js';
+import { PersonaLoader } from './PersonaLoader.js';
 
 const PAUSE_INTERVAL_MS = 5000;
 const ERROR_RECOVERY_MS = 30_000;
@@ -69,6 +70,7 @@ export class MainLoop {
   private workerSession = new ClaudeCodeSession();
   private discoveredModules: string[] = [];
   private moduleIndex = 0;
+  private personaLoader: PersonaLoader;
 
   constructor(
     private config: Config,
@@ -81,6 +83,7 @@ export class MainLoop {
     const hash = createHash('md5').update(config.projectPath).digest('hex').slice(0, BRANCH_ID_LENGTH);
     const lockDir = join(homedir(), '.db-coder');
     this.lockFile = join(lockDir, `${hash}.lock`);
+    this.personaLoader = new PersonaLoader(taskStore, join(config.projectPath, 'personas'));
   }
 
   private makeEvent(phase: CyclePhase, timing: CycleTiming, data: Record<string, unknown> = {}): CycleEvent {
@@ -177,6 +180,14 @@ export class MainLoop {
       log.warn(`Failed to cleanup orphaned branches: ${err}`);
     }
 
+    // Seed personas from files
+    try {
+      const seeded = await this.personaLoader.seedFromFiles();
+      if (seeded > 0) log.info(`Seeded ${seeded} persona(s) from files`);
+    } catch (err) {
+      log.warn(`Failed to seed personas: ${err}`);
+    }
+
     try {
       while (this.running) {
         if (this.paused) {
@@ -242,6 +253,7 @@ export class MainLoop {
     this.setState('scanning');
     const queued = await this.taskQueue.getNext(projectPath);
     let task: Task;
+    let personaOpts: { persona?: string; taskType?: string } | undefined;
 
     if (queued) {
       task = queued;
@@ -293,6 +305,20 @@ export class MainLoop {
       this.setCurrentTaskId(task.id);
       log.info(`Task: ${truncate(decision.taskDescription, TASK_DESC_MAX_LENGTH)}`);
       this.eventBus.emit(this.makeEvent('create-task', 'after', { taskId: task.id, taskDescription: decision.taskDescription }));
+
+      // Store subtasks metadata from brain decision
+      if (decision.subtasks && decision.subtasks.length > 0) {
+        await this.taskStore.updateTask(task.id, {
+          subtasks: decision.subtasks.map((st, i) => ({
+            id: String(i + 1),
+            description: st.description,
+            executor: 'claude' as const,
+            status: 'pending' as const,
+          })),
+        });
+      }
+
+      personaOpts = { persona: decision.persona, taskType: decision.taskType };
     }
 
     // 3. Budget check
@@ -336,7 +362,7 @@ export class MainLoop {
         this.setState('idle');
         return false;
       }
-      const workerResult = await this.workerExecute(task);
+      const workerResult = await this.workerExecute(task, personaOpts);
       if (workerResult.costUsd > 0) await this.costTracker.addCost(task.id, workerResult.costUsd);
 
       await this.taskStore.addLog({
@@ -683,19 +709,17 @@ Respond with EXACTLY this JSON (no markdown):
 
   // --- Worker session ---
 
-  private async workerExecute(task: Task): Promise<SessionResult> {
-    const prompt = `Execute this coding task:
-
-${task.task_description}
-
-Read CLAUDE.md for project context and environment rules.
-Do NOT modify CLAUDE.md — only the brain does that.
-
-## Process
-1. Use superpowers:test-driven-development — write a failing test first, verify it fails, then implement.
-2. After making changes, run the test suite to verify.
-3. Use superpowers:verification-before-completion before claiming done — show evidence, not assumptions.
-4. Commit with a descriptive message.`;
+  private async workerExecute(task: Task, opts?: {
+    persona?: string;
+    taskType?: string;
+    subtaskDescription?: string;
+  }): Promise<SessionResult> {
+    const description = opts?.subtaskDescription ?? task.task_description;
+    const { prompt, systemPrompt } = await this.personaLoader.buildWorkerPrompt({
+      taskDescription: description,
+      personaName: opts?.persona,
+      taskType: opts?.taskType,
+    });
 
     return this.workerSession.run(prompt, {
       permissionMode: 'bypassPermissions',
@@ -704,7 +728,7 @@ Do NOT modify CLAUDE.md — only the brain does that.
       cwd: this.config.projectPath,
       timeout: this.config.values.autonomy.subtaskTimeout * 1000,
       model: this.config.values.claude.model === 'opus' ? 'claude-opus-4-6' : 'claude-sonnet-4-6',
-      appendSystemPrompt: 'You are a coding worker. Execute the task precisely. Read CLAUDE.md for project context. You have access to superpowers skills — use them when instructed.',
+      appendSystemPrompt: systemPrompt,
     });
   }
 
