@@ -864,13 +864,24 @@ export class MainLoop {
         ).catch(() => []);
         if (changedFiles.length > 0) {
           const reviewStart = Date.now();
+          const reviewDiff = await getDiffSince(startCommit, projectPath, {
+            ignoreWhitespace: true,
+          }).catch(() => "(diff unavailable)");
           const codexReview = await this.codex.review(
-            `You are an adversarial code reviewer. Presume issues exist — find them.
+            `You are an adversarial code reviewer. Review ONLY the changes in this diff.
+
+## Task
+${task.task_description}
 
 ## Changed Files
 ${changedFiles.join("\n")}
 
-## Review Focus Areas
+## Git Diff
+\`\`\`diff
+${reviewDiff}
+\`\`\`
+
+## Review Focus Areas (apply ONLY to the diff above, not pre-existing code)
 
 ### 1. Bugs & Logic Errors
 - Off-by-one errors, null dereference, race conditions
@@ -897,9 +908,14 @@ ${changedFiles.join("\n")}
 - "While I'm here" improvements mixed with the main change
 
 ## Rules
+- ONLY report issues introduced or worsened by THIS diff in the "issues" array.
+- If you notice pre-existing bugs/issues in touched files (NOT introduced by this diff), list them separately in "preExistingIssues".
 - Find 3-10 specific issues with file names and descriptions.
 - If fewer than 3 issues found, explain why the code quality is exceptional.
-- Be concrete — cite specific code patterns, not vague concerns.`,
+- Be concrete — cite specific code patterns, not vague concerns.
+
+## Output Format (JSON)
+{"passed": true/false, "issues": [...], "preExistingIssues": [{"description": "...", "file": "...", "severity": "high|medium|low"}], "summary": "..."}`,
             projectPath,
           );
           if (codexReview.cost_usd > 0)
@@ -940,6 +956,23 @@ ${changedFiles.join("\n")}
             cost_usd: codexReview.cost_usd,
             duration_ms: Date.now() - reviewStart,
           });
+
+          // Queue pre-existing issues as new tasks
+          const preExisting = codexReview.preExistingIssues ?? [];
+          for (const issue of preExisting) {
+            const desc = issue.file
+              ? `fix: ${issue.description} (${issue.file})`
+              : `fix: ${issue.description}`;
+            const isDuplicate = await this.taskStore.hasRecentlyFailedSimilar(
+              projectPath,
+              desc,
+              48,
+            );
+            if (!isDuplicate) {
+              await this.taskStore.createTask(projectPath, desc, 3);
+              log.info(`Queued pre-existing issue: ${desc.slice(0, 100)}`);
+            }
+          }
         }
       }
 
@@ -1839,7 +1872,7 @@ ${task.task_description}
 ${acSection}
 ${subtaskList ? `## Subtasks\n${subtaskList}\n` : ""}## Git Diff
 \`\`\`diff
-${diff.slice(0, 15000)}
+${diff}
 \`\`\`
 
 ## Review Checklist (check ALL categories)
@@ -1889,7 +1922,11 @@ Respond with EXACTLY this JSON (no markdown, no extra text):
     });
 
     const parseSpecResult = (text: string) => {
-      const parsed = JSON.parse(text);
+      const parsed = extractJsonFromText(
+        text,
+        (v) => isRecord(v) && Object.prototype.hasOwnProperty.call(v, "passed"),
+      );
+      if (!isRecord(parsed)) return null;
       const res = {
         passed: parsed.passed === true,
         missing: Array.isArray(parsed.missing) ? parsed.missing : [],
@@ -1910,27 +1947,25 @@ Respond with EXACTLY this JSON (no markdown, no extra text):
       return res;
     };
 
-    try {
-      return parseSpecResult(result.text);
-    } catch {
-      // BMAD: parse failure is suspicious — retry once then FAIL
-      log.warn("Spec review returned unparseable JSON, retrying once");
-      const retry = await this.brainThink(prompt);
-      if (retry.costUsd > 0 && task.id) {
-        await this.costTracker.addCost(task.id, retry.costUsd);
-      }
-      try {
-        return parseSpecResult(retry.text);
-      } catch {
-        log.warn("Spec review retry also unparseable — treating as FAIL");
-        return {
-          passed: false,
-          missing: ["spec review parse failure"],
-          extra: [],
-          concerns: [],
-        };
-      }
+    const firstResult = parseSpecResult(result.text);
+    if (firstResult) return firstResult;
+
+    // extractJsonFromText couldn't find valid JSON — retry once then FAIL
+    log.warn("Spec review returned unparseable JSON, retrying once");
+    const retry = await this.brainThink(prompt);
+    if (retry.costUsd > 0 && task.id) {
+      await this.costTracker.addCost(task.id, retry.costUsd);
     }
+    const retryResult = parseSpecResult(retry.text);
+    if (retryResult) return retryResult;
+
+    log.warn("Spec review retry also unparseable — treating as FAIL");
+    return {
+      passed: false,
+      missing: ["spec review parse failure"],
+      extra: [],
+      concerns: [],
+    };
   }
 
   // --- Brain reflection ---

@@ -77,9 +77,9 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 
 ### 自主循环
 入口: `MainLoop.runCycle()`
-路径: brainDecide → createTask → workerExecute(分支) → hardVerify → specReview(Brain) → codexReview(Codex) → brainReflect → mergeBranch
+路径: [queue-pickup | brainDecide → createTask] → workerExecute(分支) → hardVerify → [workerFix 重试] → specReview(Brain) → codexReview(Codex) → brainReflect → [merge | cleanup] → [deepChainReview 每5任务] → [claudeMdMaintenance 每15任务]
 关注: 错误向上冒泡, 验证失败阻止合并, 费用追踪完整
-已知缺陷: merge 失败丢弃有效工作 (无 rebase 重试); catch/finally 中 switchBranch 在 dirty state 下静默失败
+已知缺陷: merge 失败丢弃有效工作 (无 rebase 重试); brainReflect 在 merge 前运行 (失败丢弃已验证代码); 成功路径 switch/merge/delete 无独立异常隔离; catch/finally 中 switchBranch 在 dirty state 下静默失败
 
 ### 任务执行
 入口: `workerExecute(task)`
@@ -92,6 +92,18 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 路径: countTscErrors (对比基线) → getDiffStats (检查是否有实际变更)
 关注: 基线错误数必须可靠, tsc 失败返回 -1 时不阻止合并
 已知缺陷: getDiffStats 结果仅用于 warn, 未用于 pass/fail (空 diff 检查未实现); baselineErrors 在 runCycle call site 不验证 <0, 崩溃 baseline 导致验证自动 pass
+
+### 规格审查
+入口: `specReview(task, startCommit, projectPath, workInstructions?)`
+路径: getDiffSince(startCommit) → 构建 prompt (含 diff + task + subtasks + acceptanceCriteria) → brainThink → JSON.parse → 返回 {passed, missing, extra, concerns}
+关注: diff 截断 (15000 字符) 无标记, JSON 解析失败重试一次后 FAIL, startCommit="" 时 diff 不可用但仍执行
+已知缺陷: parseSpecResult 用 JSON.parse 而非 extractJsonFromText; diff.slice(0,15000) 无截断标记; startCommit="" 时浪费全部审查费用
+
+### 反思
+入口: `brainReflect(task, outcome, verification, projectPath, personaName?)`
+路径: brainSession.run(反思 prompt, allowedTools=[Edit,Write...]) → 解析 PERSONA_UPDATE 块 → 更新 persona 统计
+关注: 运行在任务分支上, 可编辑 CLAUDE.md 和 persona, 失败会导致整个任务 failed
+已知缺陷: 在任务分支上执行导致 reject 时丢失编辑; 成功时未提交编辑泄漏到 main; 在 merge 前运行, 失败阻止已验证任务合并
 
 ### 审查合并 (已删除)
 `mergeReviews()`, `extractIssueCategories()`, `higherSeverity()` 已删除 — 死代码, 从未在 runCycle 中调用, 且有多个已知 bug。
@@ -164,3 +176,9 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 - specReview parseSpecResult 用 JSON.parse 而非 extractJsonFromText: brain 返回 "Here's the review:\n{...}" 时解析失败触发完整重试, 浪费 ~$0.5-2。应先尝试 extractJsonFromText 提取嵌入的 JSON
 - subtask 路径 workerExecute 也不检查 isError: executeSubtasks 中 workerExecute 返回后仅检查 costUsd>0, 不检查 isError, 失败的 session 继续进入 per-subtask hardVerify
 - deepChainReview/claudeMdMaintenance 费用绕过 CostTracker: 直接调用 taskStore.addDailyCost() 不经过 CostTracker.addCost(), sessionCost 累计偏低, getSessionCost() 不反映全部开销。影响: 仅日志/监控不准, 不影响 DB 预算检查
+- brainReflect 失败导致已验证任务丢失: brainReflect 在外层 try/catch 内 (line 960)。session 超时/崩溃时 catch 标 failed + 删除分支, 但任务已通过 hardVerify+specReview+codexReview。反思是非关键学习步骤, 不应阻止合并。应把 brainReflect 包在独立 try/catch 或移到 merge 之后
+- brainReflect 未提交编辑泄漏到 main: 成功路径上, brainReflect 编辑 CLAUDE.md 但不保证 commit。switchBranch(originalBranch) 时 git 携带未提交变更到 main (因 CLAUDE.md 在两分支上相同)。后续 cycle 在 dirty 工作目录运行, 累积未提交变更。若 CLAUDE.md 在分支间有差异, switchBranch 直接报错进 catch, 已验证代码丢失
+- 成功路径 merge 序列无独立异常隔离: switchBranch → mergeBranch → deleteBranch 三步共享外层 catch。switchBranch 失败 (如 brainReflect 导致 dirty state) → 代码未 merge 但被 cleanup 删除 → 已通过全部审查的代码永久丢失。应对三步各自 try/catch, 按实际成功程度设置状态
+- specReview 在 startCommit="" 时浪费费用: getHeadCommit 失败 → startCommit="" → getDiffSince 失败 → specReview 收到 "(diff unavailable)" → Brain 仍执行完整审查 (~$0.5-2) 但基于无用数据。应在 startCommit 为空时跳过 specReview
+- sessionCost 系统性低估: 除已知的 deepChainReview/claudeMdMaintenance 外, brainDecide/brainDecideDirective/triggerScan/triggerIdentifyModules/triggerModuleScan (共 7 个调用点) 也直接用 taskStore.addDailyCost(), 全部绕过 CostTracker.sessionCost。getSessionCost() 仅反映 worker+verify+review 阶段
+- getNextTask 无原子拾取保护: SELECT ... LIMIT 1 没有 FOR UPDATE SKIP LOCKED。acquireLock 文件锁仅在单机上有效。文件锁失败或多机部署时, 两个实例可同时拾取同一个 queued 任务
