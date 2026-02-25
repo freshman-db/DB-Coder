@@ -2082,7 +2082,13 @@ Respond with EXACTLY this JSON (no markdown):
         await this.taskStore.updateTask(task.id, { subtasks: currentSubtasks });
         // Re-read to prevent stale-state regression in error path (line ~2115)
         const refreshed = await this.taskStore.getTask(task.id);
-        if (refreshed) task = refreshed;
+        if (!refreshed) {
+          log.warn(
+            "Task disappeared after running-status write, using stale data",
+          );
+        } else {
+          task = refreshed;
+        }
       }
 
       // Execute worker — resume from previous subtask if available

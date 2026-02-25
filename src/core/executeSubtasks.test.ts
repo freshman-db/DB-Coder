@@ -87,23 +87,24 @@ function makeSessionResult(overrides?: Partial<SessionResult>): SessionResult {
 // --- Tests ---
 
 describe("executeSubtasks", () => {
-  it("should not mutate withId array (.toSorted)", async () => {
-    // Two subtasks in reverse order — .sort() would mutate the array,
-    // .toSorted() returns a new array leaving the original intact.
+  it("should match subtasks by order-based ID, not array index", async () => {
+    // Persisted subtasks stored in reverse order (B first, A second).
+    // Input subtasks arrive as order:1, order:2.
+    // The code must match by order→id mapping, NOT by array position.
     const subtaskRecords: SubTaskRecord[] = [
       {
-        id: "1",
-        description: "first",
-        executor: "claude",
-        status: "pending",
-        order: 1,
-      },
-      {
-        id: "2",
-        description: "second",
+        id: "B",
+        description: "beta",
         executor: "claude",
         status: "pending",
         order: 2,
+      },
+      {
+        id: "A",
+        description: "alpha",
+        executor: "claude",
+        status: "pending",
+        order: 1,
       },
     ];
 
@@ -116,7 +117,6 @@ describe("executeSubtasks", () => {
         updateTask: async (_id, updates) => {
           if (updates.subtasks) {
             updateCalls.push({ subtasks: updates.subtasks as SubTaskRecord[] });
-            // Simulate DB persisting the update
             currentTask = {
               ...currentTask,
               subtasks: updates.subtasks as SubTaskRecord[],
@@ -130,26 +130,42 @@ describe("executeSubtasks", () => {
       costTracker: { addCost: async () => {} },
     });
 
-    // Pass subtasks in REVERSE order — if .sort() mutates, iteration order bugs emerge
-    const subtasksInput = [
-      { description: "second", order: 2 },
-      { description: "first", order: 1 },
-    ];
-    const inputCopy = [...subtasksInput];
-
     const result = await (loop as unknown as Record<string, Function>)[
       "executeSubtasks"
-    ](currentTask, subtasksInput, {
-      baselineErrors: 0,
-      startCommit: "abc123",
-    });
+    ](
+      currentTask,
+      [
+        { description: "alpha", order: 1 },
+        { description: "beta", order: 2 },
+      ],
+      {
+        baselineErrors: 0,
+        startCommit: "abc123",
+      },
+    );
 
     assert.ok(result.success, "executeSubtasks should succeed");
-    // Original input array should NOT have been reordered by .sort()
-    assert.deepStrictEqual(
-      subtasksInput.map((s) => s.order),
-      inputCopy.map((s) => s.order),
-      "Input array must not be mutated by sort",
+
+    // Sorted execution order: order=1 first, order=2 second.
+    // updateCalls pattern: [running, done, running, done]
+    // Call [0]: set running for order=1 → must target id='A'
+    const firstRunning = updateCalls[0].subtasks.find(
+      (s) => s.status === "running",
+    );
+    assert.equal(
+      firstRunning?.id,
+      "A",
+      "First running update must target id='A' (order=1), not array-index-based 'B'",
+    );
+
+    // Call [2]: set running for order=2 → must target id='B'
+    const secondRunning = updateCalls[2].subtasks.find(
+      (s) => s.status === "running",
+    );
+    assert.equal(
+      secondRunning?.id,
+      "B",
+      "Second running update must target id='B' (order=2), not array-index-based 'A'",
     );
   });
 
