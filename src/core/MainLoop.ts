@@ -207,7 +207,10 @@ function normalizeSubtasks(
         Object.hasOwn(item, "description")
           ? String((item as Record<string, unknown>).description)
               .slice(0, 120)
-              .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")
+              .replace(
+                /(?:\x1b\[|\x9b)[0-9;:?>=!]*[\x20-\x2f]*[@-~]|\x1b[\x20-\x7e]/g,
+                "",
+              )
               .replace(/[\x00-\x1f\x7f-\x9f]/g, " ")
           : undefined;
       log.warn(
