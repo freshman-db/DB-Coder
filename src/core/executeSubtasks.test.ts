@@ -729,10 +729,9 @@ describe("executeSubtasks", () => {
     );
   });
 
-  it("should accumulate totalVerifyMs across retry verify calls (not workerFix time)", async () => {
-    // First hardVerify fails → workerFix → commitAll throws (no git in test)
-    // → loop breaks. totalVerifyMs should include the failed verify duration
-    // but NOT the workerFix duration.
+  it("should accumulate totalVerifyMs including workerFix and retry orchestration time", async () => {
+    // First hardVerify fails (30ms) → retry phase: workerFix (200ms) → commitAll throws
+    // → loop breaks. totalVerifyMs should include both initial verify AND retry phase.
     const subtaskRecords: SubTaskRecord[] = [
       {
         id: "1",
@@ -769,7 +768,7 @@ describe("executeSubtasks", () => {
           return { passed: false, reason: "errors increased" };
         },
         workerFix: async () => {
-          // Advance time by 200ms for fix work — should NOT count in totalVerifyMs
+          // Advance time by 200ms for fix work — now counted in totalVerifyMs
           mock.timers.tick(200);
           return makeSessionResult();
         },
@@ -789,11 +788,11 @@ describe("executeSubtasks", () => {
         hardVerifyCalls >= 1,
         "hardVerify should be called at least once",
       );
-      // Initial verify = 30ms. Retry verify may or may not run (commitAll throws),
-      // but workerFix's 200ms must NOT be included.
+      // Initial verify = 30ms. Retry phase = workerFix 200ms + commitAll throws.
+      // totalVerifyMs includes both initial verify and full retry phase.
       assert.ok(
-        result.totalVerifyMs >= 30 && result.totalVerifyMs <= 60,
-        `totalVerifyMs should be 30-60ms (verify only, no workerFix time), got: ${result.totalVerifyMs}`,
+        result.totalVerifyMs >= 230 && result.totalVerifyMs <= 260,
+        `totalVerifyMs should be 230-260ms (initial verify 30ms + retry phase with workerFix 200ms), got: ${result.totalVerifyMs}`,
       );
     } finally {
       mock.timers.reset();

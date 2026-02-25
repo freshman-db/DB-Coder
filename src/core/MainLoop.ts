@@ -2206,62 +2206,69 @@ Respond with EXACTLY this JSON (no markdown):
 
       // Per-subtask hard verify with HALT retry loop — always runs
       const verifyStart = Date.now();
-      const verification = await this.hardVerify(
-        opts.baselineErrors,
-        opts.startCommit,
-        this.config.projectPath,
-      );
-      totalVerifyMs += Date.now() - verifyStart;
+      let verification: { passed: boolean; reason?: string };
+      try {
+        verification = await this.hardVerify(
+          opts.baselineErrors,
+          opts.startCommit,
+          this.config.projectPath,
+        );
+      } finally {
+        totalVerifyMs += Date.now() - verifyStart;
+      }
       if (!verification.passed) {
         const maxRetries = this.config.values.autonomy.maxRetries;
         let fixAttempts = 0;
         let currentSessionId = result.sessionId;
         let lastVerification = verification;
 
-        while (
-          !lastVerification.passed &&
-          currentSessionId &&
-          fixAttempts < maxRetries
-        ) {
-          fixAttempts++;
-          log.warn(
-            `Subtask ${i + 1} verification failed (attempt ${fixAttempts}/${maxRetries}): ${lastVerification.reason}`,
-          );
-          const fixResult = await this.workerFix(
-            currentSessionId,
-            lastVerification.reason ?? "Unknown",
-            task,
-          );
-          if (fixResult.costUsd > 0)
-            await this.costTracker.addCost(task.id, fixResult.costUsd);
-          currentSessionId = fixResult.sessionId ?? currentSessionId;
+        const retryPhaseStart = Date.now();
+        try {
+          while (
+            !lastVerification.passed &&
+            currentSessionId &&
+            fixAttempts < maxRetries
+          ) {
+            fixAttempts++;
+            log.warn(
+              `Subtask ${i + 1} verification failed (attempt ${fixAttempts}/${maxRetries}): ${lastVerification.reason}`,
+            );
+            const fixResult = await this.workerFix(
+              currentSessionId,
+              lastVerification.reason ?? "Unknown",
+              task,
+            );
+            if (fixResult.costUsd > 0)
+              await this.costTracker.addCost(task.id, fixResult.costUsd);
+            currentSessionId = fixResult.sessionId ?? currentSessionId;
 
-          const changedFilesForCommit = await getModifiedAndAddedFiles(
-            this.config.projectPath,
-          ).catch(() => []);
-          try {
-            await commitAll(
-              "db-coder: fix verification issues",
+            const changedFilesForCommit = await getModifiedAndAddedFiles(
               this.config.projectPath,
-              changedFilesForCommit,
+            ).catch(() => []);
+            try {
+              await commitAll(
+                "db-coder: fix verification issues",
+                this.config.projectPath,
+                changedFilesForCommit,
+              );
+            } catch (commitErr) {
+              log.error(
+                `commitAll failed during subtask verification retry ${fixAttempts}: ${commitErr}`,
+              );
+              lastVerification = {
+                passed: false,
+                reason: `commitAll failed: ${commitErr instanceof Error ? commitErr.message : String(commitErr)}`,
+              };
+              break;
+            }
+            lastVerification = await this.hardVerify(
+              opts.baselineErrors,
+              opts.startCommit,
+              this.config.projectPath,
             );
-          } catch (commitErr) {
-            log.error(
-              `commitAll failed during subtask verification retry ${fixAttempts}: ${commitErr}`,
-            );
-            lastVerification = {
-              passed: false,
-              reason: `commitAll failed: ${commitErr instanceof Error ? commitErr.message : String(commitErr)}`,
-            };
-            break;
           }
-          const retryVerifyStart = Date.now();
-          lastVerification = await this.hardVerify(
-            opts.baselineErrors,
-            opts.startCommit,
-            this.config.projectPath,
-          );
-          totalVerifyMs += Date.now() - retryVerifyStart;
+        } finally {
+          totalVerifyMs += Date.now() - retryPhaseStart;
         }
 
         if (!lastVerification.passed) {
