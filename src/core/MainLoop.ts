@@ -1898,6 +1898,10 @@ Respond with EXACTLY this JSON (no markdown):
             log.error(
               `commitAll failed during subtask verification retry ${fixAttempts}: ${commitErr}`,
             );
+            lastVerification = {
+              passed: false,
+              reason: `commitAll failed: ${commitErr instanceof Error ? commitErr.message : String(commitErr)}`,
+            };
             break;
           }
           lastVerification = await this.hardVerify(
