@@ -6,6 +6,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { getTodayBeijing } from "./date.js";
 
 type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -71,7 +72,7 @@ export class Logger {
     this.logDir = options.logDir ?? join(homedir(), ".db-coder", "logs");
     this.maxBufferSize = options.maxBufferSize ?? DEFAULT_MAX_BUFFER_SIZE;
     if (!existsSync(this.logDir)) mkdirSync(this.logDir, { recursive: true });
-    const date = new Date().toISOString().slice(0, 10);
+    const date = getTodayBeijing();
     this.logFile = join(this.logDir, `${date}.log`);
     this.logStream = createWriteStream(this.logFile, {
       flags: "a",

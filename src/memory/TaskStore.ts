@@ -13,6 +13,7 @@ import type {
   Persona,
 } from "./types.js";
 import type { EvaluationScore } from "../core/types.js";
+import { getTodayBeijing } from "../utils/date.js";
 import type {
   ChatMessageMetadata,
   ReviewAnnotationsJson,
@@ -512,9 +513,10 @@ export class TaskStore {
 
   async addDailyCost(costUsd: number): Promise<void> {
     const sql = this.getSql();
+    const today = getTodayBeijing();
     await sql`
       INSERT INTO daily_costs (date, total_cost_usd, task_count)
-      VALUES (CURRENT_DATE, ${costUsd}, 1)
+      VALUES (${today}::date, ${costUsd}, 1)
       ON CONFLICT (date) DO UPDATE SET
         total_cost_usd = daily_costs.total_cost_usd + ${costUsd},
         task_count = daily_costs.task_count + 1
@@ -525,7 +527,7 @@ export class TaskStore {
     date?: string,
   ): Promise<{ total_cost_usd: number; task_count: number }> {
     const sql = this.getSql();
-    const d = date ?? new Date().toISOString().slice(0, 10);
+    const d = date ?? getTodayBeijing();
     const [row] = await sql<
       Array<{ total_cost_usd: number; task_count: number }>
     >`
