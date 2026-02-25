@@ -166,6 +166,11 @@ function coerceSubtaskOrder(value: unknown, fallback: number): number {
 
 type StatusListener = (status: StatusSnapshot) => void;
 
+type PatchSubtaskResult =
+  | { ok: true; task: Task }
+  | { ok: false; reason: "task-gone" }
+  | { ok: false; reason: "subtask-not-found" };
+
 export class MainLoop {
   private state: LoopState = "idle";
   private running = false;
@@ -2005,15 +2010,15 @@ Respond with EXACTLY this JSON (no markdown):
 
   /**
    * Atomically patch a single subtask: read fresh from DB, apply patch, write,
-   * then post-read for verification. Returns the fresh Task, or null if gone.
+   * then post-read for verification.
    */
   private async patchSubtask(
     taskId: string,
     subtaskId: string,
     patch: Partial<Pick<SubTaskRecord, "status" | "result" | "workerError">>,
-  ): Promise<Task | null> {
+  ): Promise<PatchSubtaskResult> {
     const fresh = await this.taskStore.getTask(taskId);
-    if (!fresh) return null;
+    if (!fresh) return { ok: false, reason: "task-gone" };
     let matched = false;
     const patched = (fresh.subtasks ?? []).map((s) => {
       if (s.id === subtaskId) {
@@ -2026,10 +2031,12 @@ Respond with EXACTLY this JSON (no markdown):
       log.warn(
         `patchSubtask: subtaskId ${subtaskId} not found in task ${taskId}, skipping write`,
       );
-      return fresh;
+      return { ok: false, reason: "subtask-not-found" };
     }
     await this.taskStore.updateTask(taskId, { subtasks: patched });
-    return this.taskStore.getTask(taskId);
+    const verified = await this.taskStore.getTask(taskId);
+    if (!verified) return { ok: false, reason: "task-gone" };
+    return { ok: true, task: verified };
   }
 
   private async executeSubtasks(
@@ -2111,15 +2118,18 @@ Respond with EXACTLY this JSON (no markdown):
       // Update subtask status to running — match by id, not loop index
       // Skip DB update for sentinel IDs that don't match any persisted subtask
       if (persistedIds.has(st.subtaskId)) {
-        const patched = await this.patchSubtask(task.id, st.subtaskId, {
+        const result = await this.patchSubtask(task.id, st.subtaskId, {
           status: "running",
         });
-        if (!patched) {
-          const reason = `Task ${task.id} disappeared after running-status write`;
+        if (!result.ok) {
+          const reason =
+            result.reason === "task-gone"
+              ? `Task ${task.id} disappeared after running-status write`
+              : `Subtask ${st.subtaskId} not found in task ${task.id} during running-status write`;
           log.error(reason);
           return { success: false, reason };
         }
-        task = patched;
+        task = result.task;
       }
 
       // Execute worker — resume from previous subtask if available
@@ -2152,15 +2162,18 @@ Respond with EXACTLY this JSON (no markdown):
         log.warn(subtaskWorkerErrMsg);
         // Persist worker error in subtask history — skip for sentinel IDs
         if (persistedIds.has(st.subtaskId)) {
-          const patched = await this.patchSubtask(task.id, st.subtaskId, {
+          const result = await this.patchSubtask(task.id, st.subtaskId, {
             workerError: subtaskWorkerErrMsg,
           });
-          if (!patched) {
-            const reason = `Task ${task.id} disappeared during subtask error processing`;
+          if (!result.ok) {
+            const reason =
+              result.reason === "task-gone"
+                ? `Task ${task.id} disappeared during subtask error processing`
+                : `Subtask ${st.subtaskId} not found in task ${task.id} during error processing`;
             log.error(reason);
             return { success: false, reason };
           }
-          task = patched;
+          task = result.task;
         } else {
           const refreshed = await this.taskStore.getTask(task.id);
           if (!refreshed) {
@@ -2247,16 +2260,19 @@ Respond with EXACTLY this JSON (no markdown):
           }
 
           if (persistedIds.has(st.subtaskId)) {
-            const patched = await this.patchSubtask(task.id, st.subtaskId, {
+            const result = await this.patchSubtask(task.id, st.subtaskId, {
               status: "failed",
               result: lastVerification.reason,
             });
-            if (!patched) {
-              const reason = `Task ${task.id} disappeared during verification failure processing`;
+            if (!result.ok) {
+              const reason =
+                result.reason === "task-gone"
+                  ? `Task ${task.id} disappeared during verification failure processing`
+                  : `Subtask ${st.subtaskId} not found in task ${task.id} during verification failure processing`;
               log.error(reason);
               return { success: false, reason };
             }
-            task = patched;
+            task = result.task;
           }
           const verifyReason = lastVerification.reason || "verification failed";
           const fullReason = subtaskWorkerErrMsg
@@ -2268,15 +2284,18 @@ Respond with EXACTLY this JSON (no markdown):
 
       // Mark subtask done — skip for sentinel IDs
       if (persistedIds.has(st.subtaskId)) {
-        const patched = await this.patchSubtask(task.id, st.subtaskId, {
+        const result = await this.patchSubtask(task.id, st.subtaskId, {
           status: "done",
         });
-        if (!patched) {
-          const reason = `Task ${task.id} disappeared after marking subtask done`;
+        if (!result.ok) {
+          const reason =
+            result.reason === "task-gone"
+              ? `Task ${task.id} disappeared after marking subtask done`
+              : `Subtask ${st.subtaskId} not found in task ${task.id} during done-status write`;
           log.error(reason);
           return { success: false, reason };
         }
-        task = patched;
+        task = result.task;
       } else {
         const refreshed = await this.taskStore.getTask(task.id);
         if (!refreshed) {

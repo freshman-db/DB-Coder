@@ -581,4 +581,66 @@ describe("executeSubtasks", () => {
       "patchSubtask must read from DB before each write, preserving concurrent modifications",
     );
   });
+
+  it("should fail when patchSubtask pre-read returns task without matching subtask", async () => {
+    // Simulates a race: subtask existed at entry time but was removed before
+    // patchSubtask's pre-read. The patchSubtask should return subtask-not-found
+    // and the caller should propagate failure.
+    const subtaskRecords: SubTaskRecord[] = [
+      {
+        id: "1",
+        description: "only subtask",
+        executor: "claude",
+        status: "pending",
+        order: 1,
+      },
+    ];
+
+    const taskWithSubtask = makeTask(subtaskRecords);
+    const taskWithoutSubtask = makeTask([]); // subtask removed externally
+    let getTaskCallCount = 0;
+    let workerCalled = false;
+
+    const loop = buildStub({
+      taskStore: {
+        getTask: async () => {
+          getTaskCallCount++;
+          // 1: entry read — has subtask (so executeSubtasks proceeds)
+          // 2: patchSubtask(running) pre-read — subtask gone
+          if (getTaskCallCount === 1) return structuredClone(taskWithSubtask);
+          return structuredClone(taskWithoutSubtask);
+        },
+        updateTask: async () => {},
+        addLog: async () => {},
+      },
+      workerExecute: async () => {
+        workerCalled = true;
+        return makeSessionResult();
+      },
+      hardVerify: async () => ({ passed: true }),
+      costTracker: { addCost: async () => {} },
+    });
+
+    const result = await (loop as unknown as Record<string, Function>)[
+      "executeSubtasks"
+    ](taskWithSubtask, [{ description: "only subtask", order: 1 }], {
+      baselineErrors: 0,
+      startCommit: "abc123",
+    });
+
+    assert.equal(
+      result.success,
+      false,
+      "Should return failure when subtask not found in patchSubtask pre-read",
+    );
+    assert.ok(
+      result.reason?.includes("not found in task"),
+      `Reason should mention 'not found in task', got: ${result.reason}`,
+    );
+    assert.equal(
+      workerCalled,
+      false,
+      "Worker should NOT execute when subtask disappears before running-status write",
+    );
+  });
 });
