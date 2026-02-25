@@ -103,7 +103,7 @@ export class Logger {
     return this.recentEntries.slice(-n);
   }
 
-  isLevelEnabled(level: LogLevel): boolean {
+  private shouldLog(level: LogLevel): boolean {
     return LEVEL_PRIORITY[level] >= LEVEL_PRIORITY[this.minLevel];
   }
 
@@ -183,7 +183,7 @@ export class Logger {
   }
 
   private writeInternalError(message: string, err: unknown): void {
-    if (!this.isLevelEnabled("debug")) return;
+    if (!this.shouldLog("debug")) return;
     this.writeConsole({
       timestamp: new Date().toISOString(),
       level: "debug",
@@ -267,7 +267,7 @@ export class Logger {
   }
 
   private emit(level: LogLevel, message: string, data?: unknown): void {
-    if (!this.isLevelEnabled(level)) return;
+    if (!this.shouldLog(level)) return;
 
     const entry: LogEntry = {
       timestamp: new Date().toISOString(),

@@ -201,23 +201,21 @@ function normalizeSubtasks(
     ) {
       valid.push(item as Record<string, unknown>);
     } else {
-      if (log.isLevelEnabled("warn")) {
-        const descPreview =
-          typeof item === "object" &&
-          item !== null &&
-          Object.hasOwn(item, "description")
-            ? String((item as Record<string, unknown>).description)
-                .slice(0, 120)
-                .replace(/[\n\r\x1b][\[0-9;]*[A-Za-z]?/g, " ")
-            : undefined;
-        log.warn(
-          "normalizeSubtasks: dropping invalid subtask item (missing string description)",
-          {
-            type: typeof item,
-            descriptionPreview: descPreview,
-          },
-        );
-      }
+      const descPreview =
+        typeof item === "object" &&
+        item !== null &&
+        Object.hasOwn(item, "description")
+          ? String((item as Record<string, unknown>).description)
+              .slice(0, 120)
+              .replace(/[\x00-\x1f\x7f]/g, " ")
+          : undefined;
+      log.warn(
+        "normalizeSubtasks: dropping invalid subtask item (missing string description)",
+        {
+          type: typeof item,
+          descriptionPreview: descPreview,
+        },
+      );
     }
   }
   return valid.map((item, i) => ({
