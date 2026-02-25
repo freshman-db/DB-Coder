@@ -318,19 +318,23 @@ describe("executeSubtasks", () => {
     ];
 
     const currentTask = makeTask(subtaskRecords);
-    let getTaskCallCount = 0;
+    let runningWritten = false;
     let workerCalled = false;
     const addLogCalls: unknown[] = [];
 
     const loop = buildStub({
       taskStore: {
         getTask: async () => {
-          getTaskCallCount++;
-          // entry=1, patchSubtask(running) pre-read=2 → ok; post-read=3 → null
-          if (getTaskCallCount <= 2) return structuredClone(currentTask);
-          return null;
+          // After running status is persisted, task disappears
+          if (runningWritten) return null;
+          return structuredClone(currentTask);
         },
-        updateTask: async () => {},
+        updateTask: async (_id, updates) => {
+          const subs = updates.subtasks as SubTaskRecord[] | undefined;
+          if (subs?.some((s) => s.status === "running")) {
+            runningWritten = true;
+          }
+        },
         addLog: async (entry: unknown) => {
           addLogCalls.push(entry);
         },
@@ -360,6 +364,11 @@ describe("executeSubtasks", () => {
       `Reason should mention 'during running-status write', got: ${result.reason}`,
     );
     assert.equal(
+      result.failureKind,
+      "task-gone",
+      "failureKind should be 'task-gone' when task disappears after running-status write",
+    );
+    assert.equal(
       workerCalled,
       false,
       "Worker should NOT execute after task disappears",
@@ -385,23 +394,25 @@ describe("executeSubtasks", () => {
     ];
 
     let currentTask = makeTask(subtaskRecords);
-    let getTaskCallCount = 0;
+    let errorWritten = false;
     const addLogCalls: unknown[] = [];
 
     const loop = buildStub({
       taskStore: {
         getTask: async () => {
-          getTaskCallCount++;
-          // 1: entry, 2: patchSubtask(running) pre, 3: post, 4: patchSubtask(workerError) pre → ok
-          // 5: patchSubtask(workerError) post → null
-          if (getTaskCallCount <= 4) return structuredClone(currentTask);
-          return null;
+          // After workerError is persisted, task disappears
+          if (errorWritten) return null;
+          return structuredClone(currentTask);
         },
         updateTask: async (_id, updates) => {
-          if (updates.subtasks) {
+          const subs = updates.subtasks as SubTaskRecord[] | undefined;
+          if (subs) {
+            if (subs.some((s) => s.workerError)) {
+              errorWritten = true;
+            }
             currentTask = {
               ...currentTask,
-              subtasks: updates.subtasks as SubTaskRecord[],
+              subtasks: subs,
             };
           }
         },
@@ -432,6 +443,11 @@ describe("executeSubtasks", () => {
       `Reason should mention 'error-status write', got: ${result.reason}`,
     );
     assert.equal(
+      result.failureKind,
+      "task-gone",
+      "failureKind should be 'task-gone' when task disappears after error-status write",
+    );
+    assert.equal(
       addLogCalls.filter(
         (c) => (c as Record<string, unknown>).phase === "error",
       ).length,
@@ -452,23 +468,25 @@ describe("executeSubtasks", () => {
     ];
 
     let currentTask = makeTask(subtaskRecords);
-    let getTaskCallCount = 0;
+    let doneWritten = false;
     const addLogCalls: unknown[] = [];
 
     const loop = buildStub({
       taskStore: {
         getTask: async () => {
-          getTaskCallCount++;
-          // 1: entry, 2: patchSubtask(running) pre, 3: post, 4: patchSubtask(done) pre → ok
-          // 5: patchSubtask(done) post → null
-          if (getTaskCallCount <= 4) return structuredClone(currentTask);
-          return null;
+          // After done status is persisted, task disappears
+          if (doneWritten) return null;
+          return structuredClone(currentTask);
         },
         updateTask: async (_id, updates) => {
-          if (updates.subtasks) {
+          const subs = updates.subtasks as SubTaskRecord[] | undefined;
+          if (subs) {
+            if (subs.some((s) => s.status === "done")) {
+              doneWritten = true;
+            }
             currentTask = {
               ...currentTask,
-              subtasks: updates.subtasks as SubTaskRecord[],
+              subtasks: subs,
             };
           }
         },
@@ -496,6 +514,11 @@ describe("executeSubtasks", () => {
     assert.ok(
       result.reason?.includes("done-status write"),
       `Reason should mention 'done-status write', got: ${result.reason}`,
+    );
+    assert.equal(
+      result.failureKind,
+      "task-gone",
+      "failureKind should be 'task-gone' when task disappears after done-status write",
     );
     assert.equal(
       addLogCalls.filter(
