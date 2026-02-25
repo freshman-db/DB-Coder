@@ -184,6 +184,27 @@ function coerceSubtaskOrder(value: unknown, fallback: number): number {
   return n;
 }
 
+/**
+ * Normalize a raw subtasks array from brain output:
+ * - Filter out items without a string `description`
+ * - Coerce each `order` to a valid positive integer (fallback: index+1)
+ */
+function normalizeSubtasks(
+  raw: unknown[],
+): Array<{ description: string; order: number }> {
+  return raw
+    .filter(
+      (item): item is Record<string, unknown> =>
+        typeof item === "object" &&
+        item !== null &&
+        typeof (item as Record<string, unknown>).description === "string",
+    )
+    .map((item, i) => ({
+      description: String(item.description),
+      order: coerceSubtaskOrder(item.order, i + 1),
+    }));
+}
+
 type StatusListener = (status: StatusSnapshot) => void;
 
 type PatchSubtaskResult =
@@ -1658,7 +1679,7 @@ ${analysisReport}
                     description: { type: "string" },
                     order: { type: "number" },
                   },
-                  required: ["description"],
+                  required: ["description", "order"],
                 },
               },
             },
@@ -1740,7 +1761,9 @@ ${analysisReport}
             ? t.complexity
             : undefined,
         workInstructions: parseWorkInstructions(t.workInstructions),
-        subtasks: Array.isArray(t.subtasks) ? t.subtasks : undefined,
+        subtasks: Array.isArray(t.subtasks)
+          ? normalizeSubtasks(t.subtasks)
+          : undefined,
       });
 
       const primary = parseOne(first);
@@ -1795,7 +1818,7 @@ ${analysisReport}
               ? textParsed.taskType
               : undefined,
           subtasks: Array.isArray(textParsed.subtasks)
-            ? textParsed.subtasks
+            ? normalizeSubtasks(textParsed.subtasks)
             : undefined,
           costUsd: totalCost,
         };
@@ -2149,7 +2172,11 @@ Respond with EXACTLY this JSON (no markdown):
       );
       return { ...st, subtaskId: `__sentinel_${randomUUID()}` };
     });
-    const sorted = withId.toSorted((a, b) => a.order - b.order);
+    const sorted = withId.toSorted(
+      (a, b) =>
+        (Number.isFinite(a.order) ? a.order : Infinity) -
+        (Number.isFinite(b.order) ? b.order : Infinity),
+    );
 
     let lastSuccessfulSessionId: string | undefined;
 

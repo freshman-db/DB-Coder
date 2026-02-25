@@ -873,4 +873,146 @@ describe("executeSubtasks", () => {
       "subtask-not-found should not trigger updateTask — no write occurred",
     );
   });
+
+  it("should handle subtasks without `order` — sort defense pushes to Infinity, no NaN crash", async () => {
+    // Subtasks with undefined order get sentinel IDs (no persisted match).
+    // The sort comparator must not crash with NaN; Infinity fallback keeps stable order.
+    const subtaskRecords: SubTaskRecord[] = [
+      {
+        id: "1",
+        description: "first",
+        executor: "claude",
+        status: "pending",
+        order: 1,
+      },
+      {
+        id: "2",
+        description: "second",
+        executor: "claude",
+        status: "pending",
+        order: 2,
+      },
+    ];
+
+    let currentTask = makeTask(subtaskRecords);
+    const executedDescriptions: string[] = [];
+
+    const loop = buildStub({
+      taskStore: {
+        getTask: async () => structuredClone(currentTask),
+        updateTask: async (_id, updates) => {
+          if (updates.subtasks) {
+            currentTask = {
+              ...currentTask,
+              subtasks: updates.subtasks as SubTaskRecord[],
+            };
+          }
+        },
+        addLog: async () => {},
+      },
+      workerExecute: async (_task, opts) => {
+        // Track via subtaskDescription option — works even for sentinel IDs
+        const desc = (opts as Record<string, unknown>)?.subtaskDescription;
+        if (typeof desc === "string") executedDescriptions.push(desc);
+        return makeSessionResult();
+      },
+      hardVerify: async () => ({ passed: true }),
+      costTracker: { addCost: async () => {} },
+    });
+
+    // Pass subtasks WITHOUT order field — simulates malformed brain output
+    const result = await (loop as unknown as Record<string, Function>)[
+      "executeSubtasks"
+    ](
+      currentTask,
+      [{ description: "first" }, { description: "second" }] as Array<{
+        description: string;
+        order?: number;
+      }>,
+      {
+        baselineErrors: 0,
+        startCommit: "abc123",
+      },
+    );
+
+    assert.ok(
+      result.success,
+      "executeSubtasks should succeed with missing order",
+    );
+    // Both subtasks have undefined order → Infinity fallback → stable insertion order
+    assert.deepEqual(
+      executedDescriptions,
+      ["first", "second"],
+      "Subtasks should execute in stable order when `order` is missing (Infinity fallback)",
+    );
+  });
+
+  it("should handle subtasks with NaN/string `order` — sort defense prevents NaN comparator", async () => {
+    const subtaskRecords: SubTaskRecord[] = [
+      {
+        id: "1",
+        description: "alpha",
+        executor: "claude",
+        status: "pending",
+        order: 1,
+      },
+      {
+        id: "2",
+        description: "beta",
+        executor: "claude",
+        status: "pending",
+        order: 2,
+      },
+    ];
+
+    let currentTask = makeTask(subtaskRecords);
+    const executedDescriptions: string[] = [];
+
+    const loop = buildStub({
+      taskStore: {
+        getTask: async () => structuredClone(currentTask),
+        updateTask: async (_id, updates) => {
+          if (updates.subtasks) {
+            currentTask = {
+              ...currentTask,
+              subtasks: updates.subtasks as SubTaskRecord[],
+            };
+          }
+        },
+        addLog: async () => {},
+      },
+      workerExecute: async (_task, opts) => {
+        const desc = (opts as Record<string, unknown>)?.subtaskDescription;
+        if (typeof desc === "string") executedDescriptions.push(desc);
+        return makeSessionResult();
+      },
+      hardVerify: async () => ({ passed: true }),
+      costTracker: { addCost: async () => {} },
+    });
+
+    // Pass subtasks with invalid order values
+    const result = await (loop as unknown as Record<string, Function>)[
+      "executeSubtasks"
+    ](
+      currentTask,
+      [
+        { description: "alpha", order: "not-a-number" },
+        { description: "beta", order: NaN },
+      ] as unknown as Array<{ description: string; order: number }>,
+      {
+        baselineErrors: 0,
+        startCommit: "abc123",
+      },
+    );
+
+    assert.ok(
+      result.success,
+      "executeSubtasks should succeed with NaN/string order",
+    );
+    assert.deepEqual(
+      executedDescriptions,
+      ["alpha", "beta"],
+      "Subtasks with invalid order should execute stably (Infinity fallback)",
+    );
+  });
 });
