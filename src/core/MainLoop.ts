@@ -767,7 +767,7 @@ export class MainLoop {
         workerPassed = result.success;
         verification.passed = result.success;
         if (!result.success)
-          verification.reason = "Subtask verification failed";
+          verification.reason = result.reason || "Subtask verification failed";
         this.endStep("execute", result.success ? "done" : "failed");
         this.endStep(
           "verify",
@@ -818,6 +818,18 @@ export class MainLoop {
           verification.reason = errMsg;
           this.beginStep("verify");
           this.endStep("verify", "failed", errMsg);
+          this.eventBus.emit(
+            this.makeEvent("verify", "after", { verification, startCommit }),
+          );
+          await this.taskStore.addLog({
+            task_id: task.id,
+            phase: "verify",
+            agent: "tsc",
+            input_summary: "worker failed — skipped",
+            output_summary: `FAIL: ${errMsg}`,
+            cost_usd: 0,
+            duration_ms: 0,
+          });
         } else {
           this.endStep("execute", "done");
 
@@ -884,6 +896,7 @@ export class MainLoop {
               log.error(
                 `commitAll failed during verification retry ${fixAttempts}: ${commitErr}`,
               );
+              singleVerify.reason = `commitAll failed: ${commitErr}`;
               break;
             }
             const reVerify = await this.hardVerify(
@@ -1019,6 +1032,7 @@ export class MainLoop {
                   log.error(
                     `commitAll failed during review fix round ${fixRound + 1}: ${commitErr}`,
                   );
+                  shouldMerge = false;
                   break;
                 }
 
@@ -1110,6 +1124,7 @@ export class MainLoop {
         log.warn(
           `brainReflect failed (non-fatal, continuing merge flow): ${reflectErr}`,
         );
+        this.eventBus.emit(this.makeEvent("reflect", "after", { error: true }));
         this.endStep("reflect", "failed", `brainReflect error: ${reflectErr}`);
       }
 
@@ -1750,7 +1765,7 @@ Respond with EXACTLY this JSON (no markdown):
       baselineErrors: number;
       startCommit: string;
     },
-  ): Promise<{ success: boolean; sessionId?: string }> {
+  ): Promise<{ success: boolean; sessionId?: string; reason?: string }> {
     const sorted = [...subtasks].sort((a, b) => a.order - b.order);
 
     for (let i = 0; i < sorted.length; i++) {
@@ -1797,7 +1812,7 @@ Respond with EXACTLY this JSON (no markdown):
         await this.taskStore.updateTask(task.id, {
           subtasks: failedSubtasks,
         });
-        return { success: false };
+        return { success: false, reason: errMsg };
       }
 
       // Per-subtask hard verify with HALT retry loop
