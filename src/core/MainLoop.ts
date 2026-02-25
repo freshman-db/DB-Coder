@@ -129,16 +129,18 @@ export function applyStepStatusUpdate(
   status: "done" | "failed",
   summary?: string,
 ): CycleStep[] {
-  const step = steps.find((s) => s.phase === phase);
-  if (!step) {
+  const matched = steps.filter((s) => s.phase === phase);
+  if (matched.length === 0) {
     throw new Error(
       `updateStepStatus: phase "${phase}" not found in cycleSteps`,
     );
   }
-  if (step.finishedAt == null) {
-    throw new Error(
-      `updateStepStatus: step "${phase}" has no finishedAt — only finished steps can be updated`,
-    );
+  for (const step of matched) {
+    if (step.finishedAt == null) {
+      throw new Error(
+        `updateStepStatus: step "${phase}" has no finishedAt — only finished steps can be updated`,
+      );
+    }
   }
   return steps.map((s) => (s.phase === phase ? { ...s, status, summary } : s));
 }
