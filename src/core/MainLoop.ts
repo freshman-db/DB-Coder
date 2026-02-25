@@ -2656,13 +2656,8 @@ Outcome: ${outcome}
 Verification: ${verification.passed ? "PASSED" : `FAILED — ${verification.reason}`}
 ${personaContext}
 1. What went well? What could be improved?
-2. If there are lessons learned, update CLAUDE.md "踩过的坑" section.
-3. Use claude-mem to save important experiences for future reference.
-4. If you notice patterns (recurring issues, good practices), add them to CLAUDE.md.
-5. Use superpowers:requesting-code-review to review the code changes if the task was merged.
-${personaData ? "6. If the persona needs updating based on this experience, include a PERSONA_UPDATE block." : ""}
-
-Keep CLAUDE.md concise — only add genuinely useful rules.`;
+2. Do NOT edit CLAUDE.md unless you discover a critical, repeatable anti-pattern that would affect every future task (extremely rare, <5% of reflections).
+${personaData ? "3. If the persona needs updating based on this experience, include a PERSONA_UPDATE block." : ""}`;
 
     const result = await this.brainSession.run(prompt, {
       permissionMode: "bypassPermissions",
@@ -2671,7 +2666,7 @@ Keep CLAUDE.md concise — only add genuinely useful rules.`;
       timeout: 300_000,
       model: resolveModelId(this.config.values.brain.model),
       appendSystemPrompt:
-        "You are reflecting on a task. You CAN edit CLAUDE.md and use claude-mem. Do not modify source code.",
+        "You are reflecting on a task. Do not modify source code. Do not edit CLAUDE.md unless absolutely necessary.",
       allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
     });
 
