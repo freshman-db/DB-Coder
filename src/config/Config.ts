@@ -18,6 +18,13 @@ const DEFAULTS: DbCoderConfig = {
     maxScanBudget: 1.0,
     claudeMdMaintenanceInterval: 15,
     claudeMdMaintenanceEnabled: true,
+    chainScan: {
+      enabled: true,
+      interval: 5,
+      maxBudget: 3.0,
+      chainsPerTrigger: 2,
+      rediscoveryInterval: 10,
+    },
   },
   claude: { model: "opus", maxTaskBudget: 10.0, maxTurns: 200 },
   codex: {

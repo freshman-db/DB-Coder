@@ -1,9 +1,18 @@
+export interface ChainScanConfig {
+  enabled: boolean;
+  interval: number; // trigger every N completed tasks (default 5)
+  maxBudget: number; // max USD per scan trigger (default 3.0)
+  chainsPerTrigger: number; // how many chains to scan per trigger (default 2)
+  rediscoveryInterval: number; // re-discover entry points every N scans (default 10)
+}
+
 export interface BrainConfig {
   model: string;
   scanInterval: number; // seconds between scans
   maxScanBudget: number; // USD per scan
   claudeMdMaintenanceInterval: number; // trigger every N completed tasks (0=disabled)
   claudeMdMaintenanceEnabled: boolean;
+  chainScan: ChainScanConfig;
 }
 
 export interface ClaudeConfig {

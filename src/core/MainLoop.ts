@@ -49,7 +49,6 @@ import {
   writeFileSync,
   mkdirSync,
   unlinkSync,
-  readdirSync,
 } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -63,6 +62,7 @@ import {
   type WorkInstructions,
   type StructuredWorkInstructions,
 } from "./PersonaLoader.js";
+import { ChainScanner } from "./ChainScanner.js";
 
 const PAUSE_INTERVAL_MS = 5000;
 const ERROR_RECOVERY_MS = 30_000;
@@ -133,8 +133,7 @@ export class MainLoop {
   private consecutiveRejections = 0;
   private brainSession!: ClaudeCodeSession;
   private workerSession!: ClaudeCodeSession;
-  private discoveredModules: string[] = [];
-  private moduleIndex = 0;
+  private chainScanner: ChainScanner;
   private personaLoader: PersonaLoader;
 
   constructor(
@@ -158,6 +157,7 @@ export class MainLoop {
     );
     this.brainSession = new ClaudeCodeSession(sdkExtras);
     this.workerSession = new ClaudeCodeSession(sdkExtras);
+    this.chainScanner = new ChainScanner(this.brainSession, taskStore, config);
   }
 
   private makeEvent(
@@ -237,7 +237,7 @@ export class MainLoop {
     /* no-op in v2 */
   }
 
-  /** Run a manual scan via brain session (not allowed while patrol is running) */
+  /** Run a manual scan via chain scanner (not allowed while patrol is running) */
   async triggerScan(
     depth: "quick" | "normal" | "deep" = "normal",
   ): Promise<void> {
@@ -247,33 +247,33 @@ export class MainLoop {
       );
     this.setState("scanning");
     try {
-      const result = await this.brainThink(
-        `Scan this project at "${depth}" depth. Identify issues and opportunities but do NOT create tasks. Just report what you find.`,
-      );
-      if (result.costUsd > 0) await this.taskStore.addDailyCost(result.costUsd);
+      if (depth === "deep") {
+        await this.chainScanner.fullScan(this.config.projectPath);
+      } else if (depth === "normal") {
+        await this.chainScanner.scanNext(this.config.projectPath);
+      } else {
+        await this.chainScanner.discoverEntryPoints(this.config.projectPath);
+      }
     } finally {
       this.setState("idle");
     }
   }
 
-  /** Manually trigger module identification — delegates to brain */
+  /** Manually trigger entry point discovery via chain scanner */
   async triggerIdentifyModules(): Promise<void> {
     if (this.running)
       throw new Error("Cannot identify modules while patrol loop is running");
     this.setState("scanning");
     try {
-      const result = await this.brainThink(
-        "Identify the functional modules/chains in this project. Update CLAUDE.md with the chain definitions.",
-      );
-      if (result.costUsd > 0) await this.taskStore.addDailyCost(result.costUsd);
+      await this.chainScanner.discoverEntryPoints(this.config.projectPath);
     } finally {
       this.setState("idle");
     }
   }
 
-  /** Manually trigger a single module scan */
+  /** Manually trigger a chain scan (moduleName ignored, delegates to scanNext) */
   async triggerModuleScan(
-    moduleName: string,
+    _moduleName: string,
     _depth: "quick" | "normal" = "normal",
   ): Promise<void> {
     if (this.running)
@@ -282,10 +282,7 @@ export class MainLoop {
       );
     this.setState("scanning");
     try {
-      const result = await this.brainThink(
-        `Deep scan the "${moduleName}" functional chain. Trace data flow from entry point, check edge cases, error handling, and data transformations.`,
-      );
-      if (result.costUsd > 0) await this.taskStore.addDailyCost(result.costUsd);
+      await this.chainScanner.scanNext(this.config.projectPath);
     } finally {
       this.setState("idle");
     }
@@ -1060,13 +1057,16 @@ ${reviewDiff}
         }
       }
 
-      // 12. Periodic deep chain review
+      // 12. Periodic chain scan
       this.tasksCompleted++;
-      if (this.tasksCompleted % 5 === 0) {
+      const { chainScan } = this.config.values.brain;
+      if (chainScan.enabled && this.tasksCompleted % chainScan.interval === 0) {
         try {
-          await this.deepChainReview(projectPath);
+          this.eventBus.emit(this.makeEvent("deep-review", "before"));
+          await this.chainScanner.scanNext(projectPath);
+          this.eventBus.emit(this.makeEvent("deep-review", "after"));
         } catch (err) {
-          log.warn("Deep chain review failed", err);
+          log.warn("Chain scan failed", err);
         }
       }
 
@@ -1473,14 +1473,6 @@ ${analysisReport}
       /* metrics not critical */
     }
 
-    // Module rotation
-    const currentModule = await this.getNextModule(projectPath);
-    if (currentModule) {
-      parts.push(
-        `Current focus module: ${currentModule}/\nDeeply scan this module for improvement opportunities. Prioritize other areas only if there's something more urgent.`,
-      );
-    }
-
     return parts.join("\n\n");
   }
 
@@ -1562,38 +1554,6 @@ Respond with EXACTLY this JSON (no markdown):
       };
     }
     return { taskDescription: null, costUsd: result.costUsd };
-  }
-
-  /** Discover project modules by scanning src/ or root directory */
-  private discoverModules(projectPath: string): string[] {
-    const srcDir = join(projectPath, "src");
-    const baseDir = existsSync(srcDir) ? srcDir : projectPath;
-    try {
-      const entries = readdirSync(baseDir, { withFileTypes: true });
-      return entries
-        .filter(
-          (e) =>
-            e.isDirectory() &&
-            !e.name.startsWith(".") &&
-            e.name !== "node_modules" &&
-            e.name !== "dist",
-        )
-        .map((e) => (existsSync(srcDir) ? `src/${e.name}` : e.name));
-    } catch {
-      return [];
-    }
-  }
-
-  /** Get the next module in rotation */
-  private async getNextModule(projectPath: string): Promise<string> {
-    if (this.discoveredModules.length === 0) {
-      this.discoveredModules = this.discoverModules(projectPath);
-    }
-    if (this.discoveredModules.length === 0) return "";
-    const mod =
-      this.discoveredModules[this.moduleIndex % this.discoveredModules.length];
-    this.moduleIndex++;
-    return mod;
   }
 
   private async brainThink(
@@ -2133,38 +2093,6 @@ Multiple tasks have been rejected consecutively, suggesting a systemic pipeline 
     }
     log.info(
       `Pipeline health check completed (cost: $${result.costUsd.toFixed(3)})`,
-    );
-  }
-
-  // --- Deep chain review (periodic) ---
-
-  private async deepChainReview(projectPath: string): Promise<void> {
-    log.info("Starting periodic deep chain review");
-    const result = await this.brainSession.run(
-      `Perform a deep review of the functional chains defined in CLAUDE.md.
-For each chain, trace the data flow and check:
-1. Error propagation — do errors bubble up or get silently swallowed?
-2. Edge cases — first run, empty data, concurrent access
-3. Data transformations — are conversions correct?
-4. Cross-chain interactions — do chains interfere?
-
-If you find issues, create tasks for them by reporting what needs fixing.
-Update CLAUDE.md if you discover new patterns or pitfalls.`,
-      {
-        permissionMode: "bypassPermissions",
-        maxTurns: 50,
-        cwd: projectPath,
-        timeout: 3_600_000,
-        model: resolveModelId(this.config.values.brain.model),
-        allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
-        appendSystemPrompt:
-          "You are performing a deep code review. You CAN edit CLAUDE.md to add new patterns or pitfalls. Do not modify source code.",
-      },
-    );
-
-    if (result.costUsd > 0) await this.taskStore.addDailyCost(result.costUsd);
-    log.info(
-      `Deep chain review completed (${Math.round(result.durationMs / 1000)}s, $${result.costUsd.toFixed(4)})`,
     );
   }
 

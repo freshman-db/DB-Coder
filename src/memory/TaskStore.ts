@@ -19,6 +19,7 @@ import type {
   ReviewAnnotationsJson,
   TaskPlanJson,
 } from "./schemas.js";
+import type { ChainScanState } from "../core/chain-scanner-types.js";
 import { closeDb, getDb } from "../db.js";
 import { log } from "../utils/logger.js";
 
@@ -218,6 +219,17 @@ CREATE TABLE IF NOT EXISTS personas (
   success_rate REAL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS chain_scan_state (
+  project_path TEXT PRIMARY KEY,
+  next_index INTEGER NOT NULL DEFAULT 0,
+  entry_points JSONB NOT NULL DEFAULT '[]',
+  known_fingerprints JSONB NOT NULL DEFAULT '[]',
+  last_discovery_at TIMESTAMPTZ,
+  last_scan_at TIMESTAMPTZ,
+  scan_count INTEGER NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 `;
 
@@ -940,6 +952,63 @@ export class TaskStore {
   async updatePersonaContent(name: string, content: string): Promise<void> {
     const sql = this.getSql();
     await sql`UPDATE personas SET content = ${content}, updated_at = NOW() WHERE name = ${name}`;
+  }
+
+  // --- Chain Scan State ---
+
+  async getChainScanState(projectPath: string): Promise<ChainScanState | null> {
+    const sql = this.getSql();
+    const [row] = await sql<
+      Array<{
+        project_path: string;
+        next_index: number;
+        entry_points: unknown;
+        known_fingerprints: unknown;
+        last_discovery_at: string | null;
+        last_scan_at: string | null;
+        scan_count: number;
+      }>
+    >`
+      SELECT * FROM chain_scan_state WHERE project_path = ${projectPath}
+    `;
+    if (!row) return null;
+    return {
+      projectPath: row.project_path,
+      nextIndex: row.next_index,
+      entryPoints: (row.entry_points ?? []) as ChainScanState["entryPoints"],
+      knownFingerprints: (row.known_fingerprints ??
+        []) as ChainScanState["knownFingerprints"],
+      lastDiscoveryAt: row.last_discovery_at ?? "",
+      lastScanAt: row.last_scan_at ?? "",
+      scanCount: row.scan_count,
+    };
+  }
+
+  async upsertChainScanState(state: ChainScanState): Promise<void> {
+    const sql = this.getSql();
+    await sql`
+      INSERT INTO chain_scan_state (
+        project_path, next_index, entry_points, known_fingerprints,
+        last_discovery_at, last_scan_at, scan_count, updated_at
+      ) VALUES (
+        ${state.projectPath},
+        ${state.nextIndex},
+        ${sql.json(state.entryPoints as unknown as postgres.JSONValue)},
+        ${sql.json(state.knownFingerprints as unknown as postgres.JSONValue)},
+        ${state.lastDiscoveryAt || null},
+        ${state.lastScanAt || null},
+        ${state.scanCount},
+        NOW()
+      )
+      ON CONFLICT (project_path) DO UPDATE SET
+        next_index = EXCLUDED.next_index,
+        entry_points = EXCLUDED.entry_points,
+        known_fingerprints = EXCLUDED.known_fingerprints,
+        last_discovery_at = EXCLUDED.last_discovery_at,
+        last_scan_at = EXCLUDED.last_scan_at,
+        scan_count = EXCLUDED.scan_count,
+        updated_at = NOW()
+    `;
   }
 
   async close(): Promise<void> {
