@@ -798,7 +798,6 @@ export class MainLoop {
           cost_usd: workerResult.costUsd,
           duration_ms: workerResult.durationMs,
         });
-        this.endStep("execute", "done");
         this.eventBus.emit(
           this.makeEvent("execute", "after", {
             startCommit,
@@ -809,101 +808,122 @@ export class MainLoop {
           }),
         );
 
-        // Hard verification
-        this.beginStep("verify");
-        this.setState("reviewing");
-        const verifyStart = Date.now();
-        const singleVerify = await this.hardVerify(
-          baselineErrors,
-          startCommit,
-          projectPath,
-        );
-        await this.taskStore.addLog({
-          task_id: task.id,
-          phase: "verify",
-          agent: "tsc",
-          input_summary: `baseline=${baselineErrors}, startCommit=${startCommit}`,
-          output_summary: singleVerify.passed
-            ? "PASS"
-            : `FAIL: ${singleVerify.reason}`,
-          cost_usd: 0,
-          duration_ms: Date.now() - verifyStart,
-        });
-        this.eventBus.emit(
-          this.makeEvent("verify", "after", {
-            verification: singleVerify,
-            startCommit,
-          }),
-        );
+        // Check workerResult.isError — skip hardVerify if worker failed
+        if (workerResult.isError) {
+          const errMsg = `Worker execution failed: ${workerResult.errors.join("; ") || "unknown error"}`;
+          log.error(errMsg);
+          this.endStep("execute", "failed");
+          workerPassed = false;
+          verification.passed = false;
+          verification.reason = errMsg;
+          this.beginStep("verify");
+          this.endStep("verify", "failed", errMsg);
+        } else {
+          this.endStep("execute", "done");
 
-        // HALT retry loop: fix up to maxRetries times
-        const maxRetries = this.config.values.autonomy.maxRetries;
-        let fixAttempts = 0;
-        let currentSessionId = workerResult.sessionId;
-
-        while (
-          !singleVerify.passed &&
-          currentSessionId &&
-          fixAttempts < maxRetries
-        ) {
-          fixAttempts++;
-          log.warn(
-            `Hard verification failed (attempt ${fixAttempts}/${maxRetries}): ${singleVerify.reason}`,
-          );
-          const fixResult = await this.workerFix(
-            currentSessionId,
-            singleVerify.reason ?? "Unknown error",
-            task,
-          );
-          if (fixResult.costUsd > 0)
-            await this.costTracker.addCost(task.id, fixResult.costUsd);
-          currentSessionId = fixResult.sessionId ?? currentSessionId;
-
-          const changedFilesForCommit = await getModifiedAndAddedFiles(
-            projectPath,
-          ).catch(() => []);
-          await commitAll(
-            "db-coder: fix verification issues",
-            projectPath,
-            changedFilesForCommit,
-          ).catch(() => {});
-          const reVerify = await this.hardVerify(
+          // Hard verification
+          this.beginStep("verify");
+          this.setState("reviewing");
+          const verifyStart = Date.now();
+          const singleVerify = await this.hardVerify(
             baselineErrors,
             startCommit,
             projectPath,
           );
-          singleVerify.passed = reVerify.passed;
-          singleVerify.reason = reVerify.reason;
+          await this.taskStore.addLog({
+            task_id: task.id,
+            phase: "verify",
+            agent: "tsc",
+            input_summary: `baseline=${baselineErrors}, startCommit=${startCommit}`,
+            output_summary: singleVerify.passed
+              ? "PASS"
+              : `FAIL: ${singleVerify.reason}`,
+            cost_usd: 0,
+            duration_ms: Date.now() - verifyStart,
+          });
           this.eventBus.emit(
-            this.makeEvent("fix", "after", { verification: singleVerify }),
+            this.makeEvent("verify", "after", {
+              verification: singleVerify,
+              startCommit,
+            }),
           );
-        }
 
-        if (!singleVerify.passed && fixAttempts >= maxRetries) {
-          log.warn(
-            `HALT after ${fixAttempts} fix attempts: ${singleVerify.reason}`,
-          );
-          if (brainOpts?.persona) {
-            await this.taskStore.addLog({
-              task_id: task.id,
-              phase: "halt-learning",
-              agent: "system",
-              input_summary: `persona=${brainOpts.persona}`,
-              output_summary: `HALT triggered: ${singleVerify.reason} (after ${fixAttempts} attempts)`,
-              cost_usd: 0,
-              duration_ms: 0,
-            });
+          // HALT retry loop: fix up to maxRetries times
+          const maxRetries = this.config.values.autonomy.maxRetries;
+          let fixAttempts = 0;
+          let currentSessionId = workerResult.sessionId;
+
+          while (
+            !singleVerify.passed &&
+            currentSessionId &&
+            fixAttempts < maxRetries
+          ) {
+            fixAttempts++;
+            log.warn(
+              `Hard verification failed (attempt ${fixAttempts}/${maxRetries}): ${singleVerify.reason}`,
+            );
+            const fixResult = await this.workerFix(
+              currentSessionId,
+              singleVerify.reason ?? "Unknown error",
+              task,
+            );
+            if (fixResult.costUsd > 0)
+              await this.costTracker.addCost(task.id, fixResult.costUsd);
+            currentSessionId = fixResult.sessionId ?? currentSessionId;
+
+            const changedFilesForCommit = await getModifiedAndAddedFiles(
+              projectPath,
+            ).catch(() => []);
+            try {
+              await commitAll(
+                "db-coder: fix verification issues",
+                projectPath,
+                changedFilesForCommit,
+              );
+            } catch (commitErr) {
+              log.error(
+                `commitAll failed during verification retry ${fixAttempts}: ${commitErr}`,
+              );
+              break;
+            }
+            const reVerify = await this.hardVerify(
+              baselineErrors,
+              startCommit,
+              projectPath,
+            );
+            singleVerify.passed = reVerify.passed;
+            singleVerify.reason = reVerify.reason;
+            this.eventBus.emit(
+              this.makeEvent("fix", "after", { verification: singleVerify }),
+            );
           }
-        }
 
-        workerPassed = singleVerify.passed;
-        verification.passed = singleVerify.passed;
-        verification.reason = singleVerify.reason;
-        this.endStep(
-          "verify",
-          singleVerify.passed ? "done" : "failed",
-          singleVerify.reason,
-        );
+          if (!singleVerify.passed && fixAttempts >= maxRetries) {
+            log.warn(
+              `HALT after ${fixAttempts} fix attempts: ${singleVerify.reason}`,
+            );
+            if (brainOpts?.persona) {
+              await this.taskStore.addLog({
+                task_id: task.id,
+                phase: "halt-learning",
+                agent: "system",
+                input_summary: `persona=${brainOpts.persona}`,
+                output_summary: `HALT triggered: ${singleVerify.reason} (after ${fixAttempts} attempts)`,
+                cost_usd: 0,
+                duration_ms: 0,
+              });
+            }
+          }
+
+          workerPassed = singleVerify.passed;
+          verification.passed = singleVerify.passed;
+          verification.reason = singleVerify.reason;
+          this.endStep(
+            "verify",
+            singleVerify.passed ? "done" : "failed",
+            singleVerify.reason,
+          );
+        } // end else (worker succeeded)
       }
 
       // 7. Code review (reviewer auto-selects based on worker config — mutual exclusion)
@@ -989,11 +1009,18 @@ export class MainLoop {
                 const changedFilesForCommit = await getModifiedAndAddedFiles(
                   projectPath,
                 ).catch(() => []);
-                await commitAll(
-                  "db-coder: fix review issues",
-                  projectPath,
-                  changedFilesForCommit,
-                ).catch(() => {});
+                try {
+                  await commitAll(
+                    "db-coder: fix review issues",
+                    projectPath,
+                    changedFilesForCommit,
+                  );
+                } catch (commitErr) {
+                  log.error(
+                    `commitAll failed during review fix round ${fixRound + 1}: ${commitErr}`,
+                  );
+                  break;
+                }
 
                 // Re-verify
                 const reVerify = await this.hardVerify(
@@ -1069,22 +1096,35 @@ export class MainLoop {
       this.beginStep("reflect");
       this.setState("reflecting");
       const outcome = shouldMerge ? "success" : "failed";
-      await this.brainReflect(
-        task,
-        outcome,
-        verification,
-        projectPath,
-        brainOpts?.persona,
-      );
-      this.eventBus.emit(this.makeEvent("reflect", "after"));
-      this.endStep("reflect", "done");
+      try {
+        await this.brainReflect(
+          task,
+          outcome,
+          verification,
+          projectPath,
+          brainOpts?.persona,
+        );
+        this.eventBus.emit(this.makeEvent("reflect", "after"));
+        this.endStep("reflect", "done");
+      } catch (reflectErr) {
+        log.warn(
+          `brainReflect failed (non-fatal, continuing merge flow): ${reflectErr}`,
+        );
+        this.endStep("reflect", "failed", `brainReflect error: ${reflectErr}`);
+      }
 
       // 10. Merge or cleanup
       this.beginStep("merge");
       if (shouldMerge) {
         await switchBranch(originalBranch, projectPath);
         await mergeBranch(branchName, projectPath);
-        await deleteBranch(branchName, projectPath);
+        try {
+          await deleteBranch(branchName, projectPath);
+        } catch (delErr) {
+          log.warn(
+            `deleteBranch failed (non-fatal, merge already succeeded): ${delErr}`,
+          );
+        }
         log.info(
           `Task completed and merged: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`,
         );
@@ -1747,6 +1787,19 @@ Respond with EXACTLY this JSON (no markdown):
         duration_ms: result.durationMs,
       });
 
+      // Check workerResult.isError — skip hardVerify if worker failed
+      if (result.isError) {
+        const errMsg = `Subtask ${i + 1} worker failed: ${result.errors.join("; ") || "unknown error"}`;
+        log.error(errMsg);
+        const failedSubtasks = (task.subtasks ?? []).map((s, idx) =>
+          idx === i ? { ...s, status: "failed" as const, result: errMsg } : s,
+        );
+        await this.taskStore.updateTask(task.id, {
+          subtasks: failedSubtasks,
+        });
+        return { success: false };
+      }
+
       // Per-subtask hard verify with HALT retry loop
       const verification = await this.hardVerify(
         opts.baselineErrors,
@@ -1780,11 +1833,18 @@ Respond with EXACTLY this JSON (no markdown):
           const changedFilesForCommit = await getModifiedAndAddedFiles(
             this.config.projectPath,
           ).catch(() => []);
-          await commitAll(
-            "db-coder: fix verification issues",
-            this.config.projectPath,
-            changedFilesForCommit,
-          ).catch(() => {});
+          try {
+            await commitAll(
+              "db-coder: fix verification issues",
+              this.config.projectPath,
+              changedFilesForCommit,
+            );
+          } catch (commitErr) {
+            log.error(
+              `commitAll failed during subtask verification retry ${fixAttempts}: ${commitErr}`,
+            );
+            break;
+          }
           lastVerification = await this.hardVerify(
             opts.baselineErrors,
             opts.startCommit,
