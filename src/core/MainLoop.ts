@@ -692,66 +692,124 @@ export class MainLoop {
         this.setState("planning");
         await this.taskStore.updateTask(task.id, { phase: "analyzing" });
 
-        // Worker produces a concrete change proposal (read-only)
-        const { proposal, isError: analyzeError } = await this.workerAnalyze(
-          task,
-          brainOpts,
-        );
+        // Analyze → Review → Synthesize loop (with up to 2 REVISE rounds)
+        const maxRevisions = 2;
+        let revisionRound = 0;
+        let analyzeSessionId: string | undefined;
+        let revisionCtx:
+          | { resumeSessionId: string; revisionPrompt: string }
+          | undefined;
+        let planApproved = false;
 
-        if (analyzeError) {
-          const maxAnalyzeRetries = 2;
-          const nextIteration = task.iteration + 1;
-          if (nextIteration > maxAnalyzeRetries) {
-            log.warn(
-              `Worker analyze failed ${nextIteration} times — blocking task (max ${maxAnalyzeRetries} retries)`,
-            );
-            this.endStep(
-              "analyze",
-              "failed",
-              "Empty or error proposal (retries exhausted)",
-            );
-            this.skipRemainingSteps("analyze");
-            await this.taskStore.updateTask(task.id, {
-              status: "blocked",
-              phase: "blocked",
-              iteration: nextIteration,
-            });
-          } else {
-            log.warn(
-              `Worker analyze failed — requeuing task (attempt ${nextIteration}/${maxAnalyzeRetries})`,
-            );
-            this.endStep(
-              "analyze",
-              "failed",
-              `Empty or error proposal, requeuing (attempt ${nextIteration})`,
-            );
-            this.skipRemainingSteps("analyze");
-            await this.taskStore.updateTask(task.id, {
-              status: "queued",
-              phase: "init",
-              iteration: nextIteration,
-            });
+        while (revisionRound <= maxRevisions) {
+          // Worker produces a concrete change proposal (read-only)
+          const analyzeResult = await this.workerAnalyze(
+            task,
+            brainOpts,
+            revisionCtx,
+          );
+          analyzeSessionId = analyzeResult.sessionId;
+
+          if (analyzeResult.isError) {
+            const maxAnalyzeRetries = 2;
+            const nextIteration = task.iteration + 1;
+            if (nextIteration > maxAnalyzeRetries) {
+              log.warn(
+                `Worker analyze failed ${nextIteration} times — blocking task (max ${maxAnalyzeRetries} retries)`,
+              );
+              this.endStep(
+                "analyze",
+                "failed",
+                "Empty or error proposal (retries exhausted)",
+              );
+              this.skipRemainingSteps("analyze");
+              await this.taskStore.updateTask(task.id, {
+                status: "blocked",
+                phase: "blocked",
+                iteration: nextIteration,
+              });
+            } else {
+              log.warn(
+                `Worker analyze failed — requeuing task (attempt ${nextIteration}/${maxAnalyzeRetries})`,
+              );
+              this.endStep(
+                "analyze",
+                "failed",
+                `Empty or error proposal, requeuing (attempt ${nextIteration})`,
+              );
+              this.skipRemainingSteps("analyze");
+              await this.taskStore.updateTask(task.id, {
+                status: "queued",
+                phase: "init",
+                iteration: nextIteration,
+              });
+            }
+            await switchBranch(originalBranch, projectPath).catch(() => {});
+            await this.cleanupTaskBranch(branchName, { force: true });
+            this.setCurrentTaskId(null);
+            this.currentTaskDescription = null;
+            this.setState("idle");
+            return false;
           }
-          await switchBranch(originalBranch, projectPath).catch(() => {});
-          await this.cleanupTaskBranch(branchName, { force: true });
-          this.setCurrentTaskId(null);
-          this.currentTaskDescription = null;
-          this.setState("idle");
-          return false;
+
+          // Reviewer evaluates the proposal (mutually exclusive with worker)
+          const planReview = await this.reviewPlan(
+            analyzeResult.proposal,
+            task,
+          );
+
+          // Brain synthesizes proposal + feedback into final plan
+          const synthesis = await this.brainSynthesizePlan(
+            analyzeResult.proposal,
+            planReview,
+            task,
+          );
+
+          if (synthesis.decision === "approved") {
+            approvedPlan = synthesis.finalPlan;
+            planApproved = true;
+            break;
+          }
+
+          if (synthesis.decision === "revise" && analyzeSessionId) {
+            revisionRound++;
+            if (revisionRound > maxRevisions) {
+              log.warn(
+                `Plan revisions exhausted (${maxRevisions} rounds) — blocking task`,
+              );
+              break;
+            }
+            log.info(
+              `Brain requested plan revision (round ${revisionRound}/${maxRevisions})`,
+            );
+
+            // Build full revision context: brain instructions + reviewer issues
+            const reviewerIssues = planReview.issues
+              .map((i) => `- [${i.severity}] ${i.description}`)
+              .join("\n");
+            const revisionPrompt = `## Revision Required (Round ${revisionRound}/${maxRevisions})
+
+### Brain's Direction
+${synthesis.reviseInstructions ?? "Revise the proposal to address reviewer concerns."}
+
+### Reviewer's Specific Issues
+${reviewerIssues || "No specific issues listed."}
+
+Revise your previous proposal to address ALL issues above. Produce a complete updated proposal in the same structured format.`;
+
+            revisionCtx = {
+              resumeSessionId: analyzeSessionId,
+              revisionPrompt,
+            };
+            continue;
+          }
+
+          // REJECTED or REVISE without sessionId (e.g. Codex)
+          log.warn("Brain rejected analysis plan — blocking task");
+          break;
         }
 
-        // Reviewer evaluates the proposal (mutually exclusive with worker)
-        const planReview = await this.reviewPlan(proposal, task);
-
-        // Brain synthesizes proposal + feedback into final plan
-        const synthesis = await this.brainSynthesizePlan(
-          proposal,
-          planReview,
-          task,
-        );
-
-        if (!synthesis.approved) {
-          log.warn("Brain rejected analysis plan — blocking task");
+        if (!planApproved) {
           this.endStep("analyze", "failed", "Plan rejected by brain");
           this.skipRemainingSteps("analyze");
           await this.taskStore.updateTask(task.id, {
@@ -766,7 +824,6 @@ export class MainLoop {
           return false;
         }
 
-        approvedPlan = synthesis.finalPlan;
         this.endStep("analyze", "done");
       }
 
@@ -1807,7 +1864,15 @@ Respond with EXACTLY this JSON (no markdown):
       startCommit: string;
     },
   ): Promise<{ success: boolean; sessionId?: string; reason?: string }> {
-    const sorted = [...subtasks].sort((a, b) => a.order - b.order);
+    // Re-read task from DB to ensure subtasks array is fresh
+    task = (await this.taskStore.getTask(task.id))!;
+
+    // Build sorted array with id from task.subtasks (same order as original decision.subtasks)
+    const withId = subtasks.map((st, i) => ({
+      ...st,
+      subtaskId: (task.subtasks ?? [])[i]?.id ?? String(i + 1),
+    }));
+    const sorted = withId.sort((a, b) => a.order - b.order);
 
     for (let i = 0; i < sorted.length; i++) {
       const st = sorted[i];
@@ -1815,9 +1880,9 @@ Respond with EXACTLY this JSON (no markdown):
         `Subtask ${i + 1}/${sorted.length}: ${truncate(st.description, 100)}`,
       );
 
-      // Update subtask status to running
-      const currentSubtasks = (task.subtasks ?? []).map((s, idx) =>
-        idx === i ? { ...s, status: "running" as const } : s,
+      // Update subtask status to running — match by id, not loop index
+      const currentSubtasks = (task.subtasks ?? []).map((s) =>
+        s.id === st.subtaskId ? { ...s, status: "running" as const } : s,
       );
       await this.taskStore.updateTask(task.id, { subtasks: currentSubtasks });
 
@@ -1849,8 +1914,10 @@ Respond with EXACTLY this JSON (no markdown):
         subtaskWorkerErrMsg = `Subtask ${i + 1} worker reported error: ${result.errors.join("; ") || "unknown error"}`;
         log.warn(subtaskWorkerErrMsg);
         // Persist worker error in subtask history
-        const updatedSubtasks = (task.subtasks ?? []).map((s, idx) =>
-          idx === i ? { ...s, workerError: subtaskWorkerErrMsg } : s,
+        const updatedSubtasks = (task.subtasks ?? []).map((s) =>
+          s.id === st.subtaskId
+            ? { ...s, workerError: subtaskWorkerErrMsg }
+            : s,
         );
         await this.taskStore.updateTask(task.id, { subtasks: updatedSubtasks });
       }
@@ -1929,8 +1996,8 @@ Respond with EXACTLY this JSON (no markdown):
             });
           }
 
-          const failedSubtasks = (task.subtasks ?? []).map((s, idx) =>
-            idx === i
+          const failedSubtasks = (task.subtasks ?? []).map((s) =>
+            s.id === st.subtaskId
               ? {
                   ...s,
                   status: "failed" as const,
@@ -1950,8 +2017,8 @@ Respond with EXACTLY this JSON (no markdown):
       }
 
       // Mark subtask done
-      const doneSubtasks = (task.subtasks ?? []).map((s, idx) =>
-        idx === i ? { ...s, status: "done" as const } : s,
+      const doneSubtasks = (task.subtasks ?? []).map((s) =>
+        s.id === st.subtaskId ? { ...s, status: "done" as const } : s,
       );
       await this.taskStore.updateTask(task.id, { subtasks: doneSubtasks });
       // Re-read task for updated subtask state
@@ -2163,15 +2230,32 @@ Respond with EXACTLY this JSON (no markdown, no extra text):
       complexity?: string;
       workInstructions?: WorkInstructions;
     },
-  ): Promise<{ proposal: string; costUsd: number; isError: boolean }> {
-    const { prompt: basePrompt } = await this.personaLoader.buildWorkerPrompt({
-      taskDescription: task.task_description,
-      personaName: brainOpts?.persona,
-      taskType: brainOpts?.taskType,
-      workInstructions: brainOpts?.workInstructions,
-    });
+    revision?: {
+      resumeSessionId: string;
+      revisionPrompt: string;
+    },
+  ): Promise<{
+    proposal: string;
+    costUsd: number;
+    isError: boolean;
+    sessionId?: string;
+  }> {
+    let analyzePrompt: string;
 
-    const analyzePrompt = `## Analysis Mode (Read-Only)
+    if (revision) {
+      // Revision round: resume session with feedback context
+      analyzePrompt = revision.revisionPrompt;
+    } else {
+      const { prompt: basePrompt } = await this.personaLoader.buildWorkerPrompt(
+        {
+          taskDescription: task.task_description,
+          personaName: brainOpts?.persona,
+          taskType: brainOpts?.taskType,
+          workInstructions: brainOpts?.workInstructions,
+        },
+      );
+
+      analyzePrompt = `## Analysis Mode (Read-Only)
 
 You are analyzing code to produce a detailed change proposal. Do NOT modify any files.
 
@@ -2187,6 +2271,7 @@ Produce a structured proposal with:
 5. **Test strategy** — what tests to add/modify
 
 Be specific: include function signatures, type definitions, and concrete code snippets where helpful.`;
+    }
 
     const complexity = brainOpts?.complexity ?? "M";
     const cConfig = COMPLEXITY_CONFIG[complexity];
@@ -2197,15 +2282,17 @@ Be specific: include function signatures, type definitions, and concrete code sn
       maxBudget: Math.min(cConfig.maxBudget, 5.0),
       timeout: Math.min(cConfig.timeout, 600_000),
       model: resolveModelId(this.config.values.claude.model),
+      resumeSessionId: revision?.resumeSessionId,
     });
 
     if (result.costUsd > 0) {
       await this.costTracker.addCost(task.id, result.costUsd);
     }
 
+    const phase = revision ? "analyzing-revision" : "analyzing";
     await this.taskStore.addLog({
       task_id: task.id,
-      phase: "analyzing",
+      phase,
       agent: this.worker.name,
       input_summary: truncate(task.task_description, SUMMARY_PREVIEW_LEN),
       output_summary: result.text.slice(0, SUMMARY_PREVIEW_LEN),
@@ -2217,6 +2304,7 @@ Be specific: include function signatures, type definitions, and concrete code sn
       proposal: result.text,
       costUsd: result.costUsd,
       isError: result.isError || !result.text.trim(),
+      sessionId: result.sessionId,
     };
   }
 
@@ -2277,7 +2365,12 @@ ${proposal}
     proposal: string,
     planReview: ReviewResult,
     task: Task,
-  ): Promise<{ approved: boolean; finalPlan?: string; costUsd: number }> {
+  ): Promise<{
+    decision: "approved" | "rejected" | "revise";
+    finalPlan?: string;
+    reviseInstructions?: string;
+    costUsd: number;
+  }> {
     const reviewSummary = planReview.passed
       ? `Review PASSED: ${planReview.summary}`
       : `Review FAILED:\n${planReview.issues.map((i) => `- [${i.severity}] ${i.description}`).join("\n")}\nSummary: ${planReview.summary}`;
@@ -2298,11 +2391,16 @@ If the plan is good (reviewer concerns are minor or addressed), output:
 APPROVED
 [final plan incorporating any reviewer fixes]
 
-If the plan has fundamental issues, output:
+If the plan direction is right but needs specific fixes, output:
+REVISE
+[specific instructions for what the worker must change in the proposal]
+
+If the plan is fundamentally flawed and cannot be salvaged, output:
 REJECTED
 [reason for rejection]
 
-Be decisive. Minor reviewer concerns should not block a good plan.`;
+Prefer REVISE over REJECTED when the proposal shows understanding of the problem but has gaps.
+Be decisive. Minor reviewer concerns should not block a good plan — use APPROVED.`;
 
     const result = await this.brainThink(prompt);
 
@@ -2311,27 +2409,45 @@ Be decisive. Minor reviewer concerns should not block a good plan.`;
     }
 
     const text = result.text.trim();
-    const approved = text.startsWith("APPROVED") || text.includes("\nAPPROVED");
+    const isApproved =
+      text.startsWith("APPROVED") || text.includes("\nAPPROVED");
+    const isRevise = text.startsWith("REVISE") || text.includes("\nREVISE");
+
+    const decision = isApproved
+      ? ("approved" as const)
+      : isRevise
+        ? ("revise" as const)
+        : ("rejected" as const);
 
     await this.taskStore.addLog({
       task_id: task.id,
       phase: "plan-review",
       agent: "brain",
       input_summary: "Plan synthesis",
-      output_summary: `${approved ? "APPROVED" : "REJECTED"}: ${text.slice(0, 200)}`,
+      output_summary: `${decision.toUpperCase()}: ${text.slice(0, 200)}`,
       cost_usd: result.costUsd,
       duration_ms: result.durationMs,
     });
 
-    if (approved) {
-      // Extract plan text after "APPROVED" line
+    if (isApproved) {
       const planStart = text.indexOf("\n", text.indexOf("APPROVED"));
       const finalPlan =
         planStart >= 0 ? text.slice(planStart).trim() : proposal;
-      return { approved: true, finalPlan, costUsd: result.costUsd };
+      return { decision: "approved", finalPlan, costUsd: result.costUsd };
     }
 
-    return { approved: false, costUsd: result.costUsd };
+    if (isRevise) {
+      const instrStart = text.indexOf("\n", text.indexOf("REVISE"));
+      const reviseInstructions =
+        instrStart >= 0 ? text.slice(instrStart).trim() : "";
+      return {
+        decision: "revise",
+        reviseInstructions,
+        costUsd: result.costUsd,
+      };
+    }
+
+    return { decision: "rejected", costUsd: result.costUsd };
   }
 
   // --- Decision phase (post-review) ---
