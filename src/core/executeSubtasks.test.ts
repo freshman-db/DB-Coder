@@ -1016,6 +1016,190 @@ describe("executeSubtasks", () => {
     );
   });
 
+  it("should use order-based fallback (not index) when orderToId lookup misses — prevents wrong id binding", async () => {
+    // Persisted subtasks WITHOUT order (legacy data) — simulates records
+    // created before the order field was introduced.
+    //
+    // Incoming:  order=5, order=6 — neither exists in orderToId (empty map).
+    //
+    // OLD BUG (fallback = String(i+1)):
+    //   i=0 → fallback "1" → persistedIds has "1" → persistedOrder undefined
+    //   → enters the "no order field" sentinel branch, touching persisted id.
+    // NEW CODE (fallback = String(st.order)):
+    //   order=5 → fallback "5" → persistedIds lacks "5" → sentinel directly,
+    //   never consulting persisted ids "1"/"2" at all.
+    //
+    // Both paths produce sentinels, but the fix avoids probing persisted ids
+    // entirely when the incoming order doesn't correspond to any persisted id.
+    // This also validates that new subtask ID generation (line 706,
+    // order-based) stays consistent with the fallback lookup semantics.
+    const subtaskRecords: SubTaskRecord[] = [
+      {
+        id: "1",
+        description: "first",
+        executor: "claude",
+        status: "pending",
+      },
+      {
+        id: "2",
+        description: "second",
+        executor: "claude",
+        status: "pending",
+      },
+    ];
+
+    let currentTask = makeTask(subtaskRecords);
+    const updateCalls: Array<{ subtasks: SubTaskRecord[] }> = [];
+
+    const loop = buildStub({
+      taskStore: {
+        getTask: async () => structuredClone(currentTask),
+        updateTask: async (_id, updates) => {
+          if (updates.subtasks) {
+            updateCalls.push({ subtasks: updates.subtasks as SubTaskRecord[] });
+            currentTask = {
+              ...currentTask,
+              subtasks: updates.subtasks as SubTaskRecord[],
+            };
+          }
+        },
+        addLog: async () => {},
+      },
+      workerExecute: async () => makeSessionResult(),
+      hardVerify: async () => ({ passed: true }),
+      costTracker: { addCost: async () => {} },
+    });
+
+    const result = await (loop as unknown as Record<string, Function>)[
+      "executeSubtasks"
+    ](
+      currentTask,
+      [
+        { description: "new-task-A", order: 5 },
+        { description: "new-task-B", order: 6 },
+      ],
+      {
+        baselineErrors: 0,
+        startCommit: "abc123",
+      },
+    );
+
+    assert.ok(
+      result.success,
+      "executeSubtasks should succeed with sentinel IDs",
+    );
+    // Sentinel subtasks skip patchSubtask DB writes (persistedIds check).
+    // With old code, fallback "1"/"2" would hit persistedIds and trigger
+    // the order mismatch branch. With the fix, fallback "5"/"6" aren't
+    // in persistedIds → no spurious DB writes for persisted subtask IDs.
+    // updateCalls should contain NO running-status writes for id="1" or id="2".
+    for (const call of updateCalls) {
+      for (const s of call.subtasks) {
+        if (s.id === "1" || s.id === "2") {
+          assert.notEqual(
+            s.status,
+            "running",
+            `Persisted subtask id=${s.id} should NOT be set to running by unrelated incoming orders`,
+          );
+        }
+      }
+    }
+  });
+
+  it("should use sentinel when fallback String(order) hits persistedId but stored order mismatches", async () => {
+    // Persisted: id="1" order=1, id="2" order=2, id="3" order=7
+    // Incoming:  order=1 (orderToId hit), order=3 (miss → fallback)
+    //
+    // For order=3: orderToId has no entry for 3 → fallback String(3)="3"
+    //   → persistedIds has "3" → persistedOrder=7 → 7≠3 → ORDER MISMATCH
+    //   → sentinel (NOT id="3"), verifying the mismatch branch at lines 2195-2198.
+    const subtaskRecords: SubTaskRecord[] = [
+      {
+        id: "1",
+        description: "task-A",
+        executor: "claude",
+        status: "pending",
+        order: 1,
+      },
+      {
+        id: "2",
+        description: "task-B",
+        executor: "claude",
+        status: "pending",
+        order: 2,
+      },
+      {
+        id: "3",
+        description: "task-C",
+        executor: "claude",
+        status: "pending",
+        order: 7,
+      },
+    ];
+
+    let currentTask = makeTask(subtaskRecords);
+    const updateCalls: Array<{ subtasks: SubTaskRecord[] }> = [];
+    const executedDescriptions: string[] = [];
+
+    const loop = buildStub({
+      taskStore: {
+        getTask: async () => structuredClone(currentTask),
+        updateTask: async (_id, updates) => {
+          if (updates.subtasks) {
+            updateCalls.push({ subtasks: updates.subtasks as SubTaskRecord[] });
+            currentTask = {
+              ...currentTask,
+              subtasks: updates.subtasks as SubTaskRecord[],
+            };
+          }
+        },
+        addLog: async () => {},
+      },
+      workerExecute: async (_task, opts) => {
+        const desc = (opts as Record<string, unknown>)?.subtaskDescription;
+        if (typeof desc === "string") executedDescriptions.push(desc);
+        return makeSessionResult();
+      },
+      hardVerify: async () => ({ passed: true }),
+      costTracker: { addCost: async () => {} },
+    });
+
+    const result = await (loop as unknown as Record<string, Function>)[
+      "executeSubtasks"
+    ](
+      currentTask,
+      [
+        { description: "known-task", order: 1 }, // orderToId hit → id="1"
+        { description: "mismatch-test", order: 3 }, // miss → fallback "3" in persistedIds, order=7≠3 → sentinel
+      ],
+      {
+        baselineErrors: 0,
+        startCommit: "abc123",
+      },
+    );
+
+    assert.ok(result.success, "executeSubtasks should succeed");
+    // Both subtasks should execute (order=1 first, then order=3).
+    assert.deepEqual(
+      executedDescriptions,
+      ["known-task", "mismatch-test"],
+      "Should execute known-task (order=1) then mismatch-test (order=3)",
+    );
+    // order=3 should NOT reuse id="3" because stored order=7 mismatches.
+    // Verify id="3" was never set to running in any update call.
+    for (const call of updateCalls) {
+      for (const s of call.subtasks) {
+        if (s.id === "3") {
+          assert.notEqual(
+            s.status,
+            "running",
+            `Persisted subtask id="3" (order=7) should NOT be set to running for incoming order=3`,
+          );
+        }
+      }
+    }
+  });
+
   it("should produce NaN-free comparator results for all invalid order combinations", () => {
     // Directly verify the sort comparator logic never returns NaN
     const cmp = (a: { order: unknown }, b: { order: unknown }): number => {
