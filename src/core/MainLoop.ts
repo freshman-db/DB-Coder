@@ -1137,15 +1137,15 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
               (s) => s.phase === "execute",
             );
             if (executeStep?.finishedAt != null) {
+              this.updateStepStatus("execute", "failed", singleVerify.reason);
+            } else if (executeStep) {
               log.info(
-                "Skipping execute step status update: step already finished",
+                "Skipping execute step status update: step not yet finished",
                 {
                   hasStep: !!executeStep,
                   finishedAt: executeStep?.finishedAt,
                 },
               );
-            } else if (executeStep) {
-              this.updateStepStatus("execute", "failed", singleVerify.reason);
             } else {
               log.info("Skipping execute step status update: step not found");
             }
