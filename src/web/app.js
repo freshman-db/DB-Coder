@@ -463,6 +463,7 @@ async function renderDashboard() {
 const PHASE_LABELS = {
   decide: "决策",
   "create-task": "创建",
+  analyze: "分析",
   execute: "执行",
   verify: "验证",
   review: "审查",

@@ -69,6 +69,7 @@ export interface CycleStep {
 export const CYCLE_PIPELINE = [
   "decide",
   "create-task",
+  "analyze",
   "execute",
   "verify",
   "review",
@@ -100,7 +101,7 @@ export interface StatusSnapshot {
   patrolling: boolean;
   paused: boolean;
   cycleNumber?: number;
-  currentPhase?: string;
+  currentPhase?: StepPhase;
   cycleSteps?: CycleStep[];
   taskDescription?: string;
 }
