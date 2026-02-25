@@ -2150,7 +2150,10 @@ Respond with EXACTLY this JSON (no markdown):
     }
     task = freshTask;
 
-    // Build order→id map from persisted subtasks, then match by order (not index)
+    // Build order→id map from persisted subtasks, then match by order (not index).
+    // Known limitation: if brain reuses the same order number across cycles for
+    // semantically different subtasks, the main-path lookup will bind the wrong id.
+    // That is an architectural concern (order stability) beyond this fallback fix.
     const orderToId = new Map<number, string>();
     for (const s of task.subtasks ?? []) {
       if (s.order != null) {
@@ -2165,12 +2168,16 @@ Respond with EXACTLY this JSON (no markdown):
     const persistedOrderById = new Map(
       (task.subtasks ?? []).map((s) => [s.id, s.order]),
     );
-    const withId = subtasks.map((st, i) => {
+    const withId = subtasks.map((st) => {
       const matchedId = orderToId.get(st.order);
       if (matchedId) {
         return { ...st, subtaskId: matchedId };
       }
-      const fallback = String(i + 1);
+      // Fallback uses order (not array index) so out-of-order subtasks
+      // don't bind to wrong persisted IDs. The subsequent persistedOrder
+      // cross-check ensures we only reuse an id when its stored order
+      // actually matches st.order; otherwise we fall through to sentinel.
+      const fallback = String(st.order);
       if (persistedIds.has(fallback)) {
         const persistedOrder = persistedOrderById.get(fallback);
         if (persistedOrder == null) {
