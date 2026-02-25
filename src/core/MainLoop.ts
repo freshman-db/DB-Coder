@@ -699,7 +699,7 @@ export class MainLoop {
           const rawOrders = decision.subtasks.map((st, i) =>
             coerceSubtaskOrder(st.order, i + 1),
           );
-          const hasGaps = new Set(rawOrders).size !== rawOrders.length;
+          const hasDuplicates = new Set(rawOrders).size !== rawOrders.length;
           updates.subtasks = decision.subtasks.map((st, i) => {
             const coerced = coerceSubtaskOrder(st.order, i + 1);
             return {
@@ -707,7 +707,7 @@ export class MainLoop {
               description: st.description,
               executor: "claude" as const,
               status: "pending" as const,
-              order: hasGaps ? i + 1 : coerced,
+              order: hasDuplicates ? i + 1 : coerced,
             };
           });
         }
