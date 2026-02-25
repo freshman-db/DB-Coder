@@ -198,7 +198,7 @@ export class MainLoop {
   private currentTaskId: string | null = null;
   private currentTaskDescription: string | null = null;
   private cycleNumber = 0;
-  private currentPhase: string | null = null;
+  private currentPhase: StepPhase | null = null;
   private cycleSteps: CycleStep[] = [];
   private statusListeners = new Set<StatusListener>();
   private lockFile: string;
@@ -901,6 +901,8 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
         }
 
         this.endStep("analyze", "done");
+      } else {
+        this.endStep("analyze", "skipped");
       }
 
       // 5. Execute (subtask loop or single shot)
@@ -3306,7 +3308,11 @@ Rules:
     this.broadcastStatus();
   }
 
-  private beginStep(phase: string): void {
+  private beginStep(phase: StepPhase): void {
+    if (!CYCLE_PIPELINE.includes(phase)) {
+      log.warn(`beginStep called with unknown phase "${phase}", ignoring`);
+      return;
+    }
     this.currentPhase = phase;
     this.cycleSteps = this.cycleSteps.map((s) =>
       s.phase === phase
@@ -3317,11 +3323,15 @@ Rules:
   }
 
   private endStep(
-    phase: string,
+    phase: StepPhase,
     result: "done" | "failed" | "skipped",
     summary?: string,
     durationOverrideMs?: number,
   ): void {
+    if (!CYCLE_PIPELINE.includes(phase)) {
+      log.warn(`endStep called with unknown phase "${phase}", ignoring`);
+      return;
+    }
     const now = Date.now();
     this.cycleSteps = this.cycleSteps.map((s) => {
       if (s.phase !== phase) return s;
@@ -3353,7 +3363,7 @@ Rules:
     this.broadcastStatus();
   }
 
-  private skipRemainingSteps(fromPhase?: string): void {
+  private skipRemainingSteps(fromPhase?: StepPhase): void {
     let shouldSkip = !fromPhase;
     this.cycleSteps = this.cycleSteps.map((s) => {
       if (s.phase === fromPhase) {
