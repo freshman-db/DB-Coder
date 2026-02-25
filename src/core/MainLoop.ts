@@ -795,6 +795,7 @@ export class MainLoop {
       }
 
       let workerPassed: boolean;
+      let workerSessionId: string | undefined;
       const verification: { passed: boolean; reason?: string } = {
         passed: true,
       };
@@ -970,6 +971,7 @@ export class MainLoop {
         }
 
         workerPassed = singleVerify.passed;
+        workerSessionId = currentSessionId;
         verification.passed = singleVerify.passed;
         verification.reason = singleVerify.reason;
         this.endStep(
@@ -1048,7 +1050,7 @@ export class MainLoop {
             case "rewrite": {
               // Fix/rewrite loop (at most maxReviewFixes rounds)
               const maxFixes = this.config.values.autonomy.maxReviewFixes;
-              let fixSessionId: string | undefined;
+              let fixSessionId: string | undefined = workerSessionId;
 
               for (let fixRound = 0; fixRound < maxFixes; fixRound++) {
                 const fixResult = await this.workerReviewFix(
