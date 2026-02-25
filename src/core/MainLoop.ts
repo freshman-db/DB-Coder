@@ -184,6 +184,35 @@ function coerceSubtaskOrder(value: unknown, fallback: number): number {
   return n;
 }
 
+/**
+ * Normalize a raw subtasks array from brain output:
+ * - Filter out items without a string `description`
+ * - Coerce each `order` to a valid positive integer (fallback: index+1)
+ */
+function normalizeSubtasks(
+  raw: unknown[],
+): Array<{ description: string; order: number }> {
+  const valid: Array<Record<string, unknown>> = [];
+  for (const item of raw) {
+    if (
+      typeof item === "object" &&
+      item !== null &&
+      typeof (item as Record<string, unknown>).description === "string"
+    ) {
+      valid.push(item as Record<string, unknown>);
+    } else {
+      log.warn(
+        "normalizeSubtasks: dropping invalid subtask item (missing string description)",
+        { item },
+      );
+    }
+  }
+  return valid.map((item, i) => ({
+    description: String(item.description),
+    order: coerceSubtaskOrder(item.order, i + 1),
+  }));
+}
+
 type StatusListener = (status: StatusSnapshot) => void;
 
 type PatchSubtaskResult =
@@ -1608,7 +1637,7 @@ ${analysisReport}
   - a structured object with fields: acceptanceCriteria (testable "done" statements),
     filesToModify (explicit paths), guardrails (what NOT to do), verificationSteps,
     references (related files/docs to read first)
-- subtasks: ONLY for complex tasks needing 2+ independent steps. Most tasks should NOT have subtasks.
+- subtasks: ONLY for complex tasks needing 2+ independent steps. Most tasks should NOT have subtasks. Each subtask needs: description (string) and order (integer starting from 1, execution sequence).
 - persona: feature-builder, refactoring-expert, bugfix-debugger, test-engineer, security-auditor, performance-optimizer, frontend-specialist
 - taskType: feature, bugfix, refactoring, test, security, performance, frontend, code-quality, docs
 - reasoning: brief explanation of why these tasks were chosen`;
@@ -1658,7 +1687,7 @@ ${analysisReport}
                     description: { type: "string" },
                     order: { type: "number" },
                   },
-                  required: ["description"],
+                  required: ["description", "order"],
                 },
               },
             },
@@ -1740,7 +1769,9 @@ ${analysisReport}
             ? t.complexity
             : undefined,
         workInstructions: parseWorkInstructions(t.workInstructions),
-        subtasks: Array.isArray(t.subtasks) ? t.subtasks : undefined,
+        subtasks: Array.isArray(t.subtasks)
+          ? normalizeSubtasks(t.subtasks)
+          : undefined,
       });
 
       const primary = parseOne(first);
@@ -1795,7 +1826,7 @@ ${analysisReport}
               ? textParsed.taskType
               : undefined,
           subtasks: Array.isArray(textParsed.subtasks)
-            ? textParsed.subtasks
+            ? normalizeSubtasks(textParsed.subtasks)
             : undefined,
           costUsd: totalCost,
         };
@@ -2149,7 +2180,14 @@ Respond with EXACTLY this JSON (no markdown):
       );
       return { ...st, subtaskId: `__sentinel_${randomUUID()}` };
     });
-    const sorted = withId.toSorted((a, b) => a.order - b.order);
+    const sorted = withId.toSorted((a, b) => {
+      const aOrd = Number.isFinite(a.order) ? a.order : Infinity;
+      const bOrd = Number.isFinite(b.order) ? b.order : Infinity;
+      if (aOrd === bOrd) return 0;
+      if (!Number.isFinite(aOrd)) return 1;
+      if (!Number.isFinite(bOrd)) return -1;
+      return aOrd - bOrd;
+    });
 
     let lastSuccessfulSessionId: string | undefined;
 
