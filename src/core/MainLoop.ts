@@ -994,10 +994,8 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
           }),
         );
 
-        // Close execute step before starting verify (single-active-step invariant)
-        this.endStep("execute", "done");
-
         // Hard verification — always runs regardless of workerResult.isError
+        this.endStep("execute", "done");
         try {
           this.beginStep("verify");
           this.setState("reviewing");
@@ -1098,7 +1096,6 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
           verification.passed = singleVerify.passed;
           verification.reason = singleVerify.reason;
 
-          // Close verify step first, then retroactively mark execute as failed
           this.endStep(
             "verify",
             singleVerify.passed ? "done" : "failed",
@@ -1110,46 +1107,12 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
         } catch (verifyErr) {
           const errMsg =
             verifyErr instanceof Error ? verifyErr.message : String(verifyErr);
-          if (findFinishedStepsByPhase(this.cycleSteps, "execute")) {
-            try {
-              this.updateStepStatus(
-                "execute",
-                "failed",
-                `Verification phase exception: ${errMsg}`,
-              );
-            } catch (statusErr) {
-              log.warn(
-                "updateStepStatus failed in catch(verifyErr), preserving original error",
-                { statusErr },
-              );
-            }
-          } else {
-            const execSteps = this.cycleSteps.filter(
-              (s) => s.phase === "execute",
-            );
-            log.warn(
-              "findFinishedStepsByPhase returned null for execute in catch(verifyErr)",
-              {
-                exists: execSteps.length > 0,
-                count: execSteps.length,
-                allFinished:
-                  execSteps.length > 0 &&
-                  execSteps.every((s) => s.finishedAt != null),
-              },
-            );
-            try {
-              this.updateStepStatus(
-                "execute",
-                "failed",
-                `Verification phase exception: ${errMsg}`,
-              );
-            } catch (statusErr) {
-              log.warn(
-                "updateStepStatus failed in catch(verifyErr) else branch, preserving original error",
-                { statusErr },
-              );
-            }
-          }
+          this.endStep("verify", "failed", `Exception: ${errMsg}`);
+          this.updateStepStatus(
+            "execute",
+            "failed",
+            `Verification phase exception: ${errMsg}`,
+          );
           throw verifyErr;
         }
       }
