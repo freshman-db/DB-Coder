@@ -1107,12 +1107,42 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
         } catch (verifyErr) {
           const errMsg =
             verifyErr instanceof Error ? verifyErr.message : String(verifyErr);
-          this.endStep("verify", "failed", `Exception: ${errMsg}`);
-          this.updateStepStatus(
-            "execute",
-            "failed",
-            `Verification phase exception: ${errMsg}`,
+          try {
+            this.endStep("verify", "failed", `Exception: ${errMsg}`);
+          } catch (statusErr) {
+            log.warn(
+              "endStep('verify') failed in catch(verifyErr), preserving original error",
+              { statusErr },
+            );
+          }
+          const execSteps = this.cycleSteps.filter(
+            (s) => s.phase === "execute",
           );
+          const finished = findFinishedStepsByPhase(this.cycleSteps, "execute");
+          if (!finished) {
+            log.warn(
+              "findFinishedStepsByPhase returned null for execute in catch(verifyErr)",
+              {
+                exists: execSteps.length > 0,
+                count: execSteps.length,
+                allFinished:
+                  execSteps.length > 0 &&
+                  execSteps.every((s) => s.finishedAt != null),
+              },
+            );
+          }
+          try {
+            this.updateStepStatus(
+              "execute",
+              "failed",
+              `Verification phase exception: ${errMsg}`,
+            );
+          } catch (statusErr) {
+            log.warn(
+              "updateStepStatus('execute') failed in catch(verifyErr), preserving original error",
+              { statusErr },
+            );
+          }
           throw verifyErr;
         }
       }
