@@ -2041,14 +2041,15 @@ Respond with EXACTLY this JSON (no markdown):
       const fallback = String(i + 1);
       if (persistedIds.has(fallback)) {
         const persistedOrder = persistedOrderById.get(fallback);
-        if (
-          persistedOrder == null ||
-          String(persistedOrder) === String(st.order)
-        ) {
+        if (persistedOrder == null) {
           log.warn(
-            persistedOrder == null
-              ? `No persisted subtask found for order=${st.order}, fallback id=${fallback} has no persisted order, assuming compatible`
-              : `No persisted subtask found for order=${st.order}, using fallback id=${fallback}`,
+            `Persisted subtask has no order field for fallback id=${fallback}, order=${st.order}, using sentinel`,
+          );
+          return { ...st, subtaskId: `__sentinel_${randomUUID()}` };
+        }
+        if (Number(persistedOrder) === Number(st.order)) {
+          log.warn(
+            `Persisted subtask fallback id=${fallback} matches order=${st.order}, reusing id`,
           );
           return { ...st, subtaskId: fallback };
         }
