@@ -926,6 +926,9 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
           }),
         );
 
+        // Close execute step before starting verify (single-active-step invariant)
+        this.endStep("execute", "done");
+
         // Hard verification — always runs regardless of workerResult.isError
         this.beginStep("verify");
         this.setState("reviewing");
@@ -1026,12 +1029,10 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
         verification.passed = singleVerify.passed;
         verification.reason = singleVerify.reason;
 
-        // endStep execute based on hardVerify result, not worker report
-        this.endStep(
-          "execute",
-          singleVerify.passed ? "done" : "failed",
-          singleVerify.passed ? undefined : workerErrMsg,
-        );
+        // If hardVerify failed, retroactively mark execute as failed with verify reason
+        if (!singleVerify.passed) {
+          this.updateStepStatus("execute", "failed", singleVerify.reason);
+        }
         this.endStep(
           "verify",
           singleVerify.passed ? "done" : "failed",
@@ -3046,6 +3047,18 @@ Rules:
         summary,
       };
     });
+    this.broadcastStatus();
+  }
+
+  /** Update only status and summary of a finished step (preserves finishedAt/durationMs). */
+  private updateStepStatus(
+    phase: string,
+    status: CycleStepStatus,
+    summary?: string,
+  ): void {
+    this.cycleSteps = this.cycleSteps.map((s) =>
+      s.phase === phase ? { ...s, status, summary } : s,
+    );
     this.broadcastStatus();
   }
 
