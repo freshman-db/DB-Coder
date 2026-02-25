@@ -2016,7 +2016,22 @@ Respond with EXACTLY this JSON (no markdown):
     },
   ): Promise<{ success: boolean; sessionId?: string; reason?: string }> {
     // Re-read task from DB to ensure subtasks array is fresh
-    task = (await this.taskStore.getTask(task.id))!;
+    const freshTask = await this.taskStore.getTask(task.id);
+    if (!freshTask) {
+      const reason = `Task ${task.id} disappeared before subtask execution`;
+      log.error(reason);
+      await this.taskStore.addLog({
+        task_id: task.id,
+        phase: "error",
+        agent: "system",
+        input_summary: "executeSubtasks entry re-read",
+        output_summary: reason,
+        cost_usd: 0,
+        duration_ms: 0,
+      });
+      return { success: false, reason };
+    }
+    task = freshTask;
 
     // Build order→id map from persisted subtasks, then match by order (not index)
     const orderToId = new Map<number, string>();
@@ -2081,14 +2096,22 @@ Respond with EXACTLY this JSON (no markdown):
         );
         await this.taskStore.updateTask(task.id, { subtasks: currentSubtasks });
         // Re-read to prevent stale-state regression in error path (line ~2115)
-        const refreshed = await this.taskStore.getTask(task.id);
-        if (!refreshed) {
-          log.warn(
-            "Task disappeared after running-status write, using stale data",
-          );
-        } else {
-          task = refreshed;
+        const refreshedAfterRunning = await this.taskStore.getTask(task.id);
+        if (!refreshedAfterRunning) {
+          const reason = `Task ${task.id} disappeared after running-status write`;
+          log.error(reason);
+          await this.taskStore.addLog({
+            task_id: task.id,
+            phase: "error",
+            agent: "system",
+            input_summary: "executeSubtasks running-status re-read",
+            output_summary: reason,
+            cost_usd: 0,
+            duration_ms: 0,
+          });
+          return { success: false, reason };
         }
+        task = refreshedAfterRunning;
       }
 
       // Execute worker — resume from previous subtask if available
@@ -2131,14 +2154,22 @@ Respond with EXACTLY this JSON (no markdown):
           });
         }
         // Re-read task so in-memory subtasks include the workerError just persisted
-        const refreshed = await this.taskStore.getTask(task.id);
-        if (!refreshed) {
-          log.warn(
-            "Task disappeared during subtask processing, using stale data",
-          );
-        } else {
-          task = refreshed;
+        const refreshedAfterError = await this.taskStore.getTask(task.id);
+        if (!refreshedAfterError) {
+          const reason = `Task ${task.id} disappeared during subtask error processing`;
+          log.error(reason);
+          await this.taskStore.addLog({
+            task_id: task.id,
+            phase: "error",
+            agent: "system",
+            input_summary: "executeSubtasks error-path re-read",
+            output_summary: reason,
+            cost_usd: 0,
+            duration_ms: 0,
+          });
+          return { success: false, reason };
         }
+        task = refreshedAfterError;
       }
 
       // Per-subtask hard verify with HALT retry loop — always runs
@@ -2245,7 +2276,22 @@ Respond with EXACTLY this JSON (no markdown):
         await this.taskStore.updateTask(task.id, { subtasks: doneSubtasks });
       }
       // Re-read task for updated subtask state
-      task = (await this.taskStore.getTask(task.id))!;
+      const refreshedAfterDone = await this.taskStore.getTask(task.id);
+      if (!refreshedAfterDone) {
+        const reason = `Task ${task.id} disappeared after marking subtask done`;
+        log.error(reason);
+        await this.taskStore.addLog({
+          task_id: task.id,
+          phase: "error",
+          agent: "system",
+          input_summary: "executeSubtasks done-status re-read",
+          output_summary: reason,
+          cost_usd: 0,
+          duration_ms: 0,
+        });
+        return { success: false, reason };
+      }
+      task = refreshedAfterDone;
 
       // Capture session for next subtask resume (only on success)
       lastSuccessfulSessionId = result.sessionId;
