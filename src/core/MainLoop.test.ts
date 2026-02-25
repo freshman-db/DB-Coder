@@ -1,7 +1,12 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
-import { countTscErrors, setCountTscErrorsDepsForTests } from "./MainLoop.js";
+import {
+  countTscErrors,
+  setCountTscErrorsDepsForTests,
+  applyStepStatusUpdate,
+} from "./MainLoop.js";
+import type { CycleStep } from "./types.js";
 
 // --- countTscErrors ---
 
@@ -74,5 +79,56 @@ Found 2 errors.`,
 
     const count = await countTscErrors("/project");
     assert.equal(count, 1);
+  });
+});
+
+// --- applyStepStatusUpdate ---
+
+describe("applyStepStatusUpdate", () => {
+  const finishedStep: CycleStep = {
+    phase: "execute",
+    status: "done",
+    startedAt: 1000,
+    finishedAt: 2000,
+    durationMs: 1000,
+  };
+
+  it("should throw when phase is not found in cycleSteps", () => {
+    const steps: CycleStep[] = [finishedStep];
+    assert.throws(
+      () => applyStepStatusUpdate(steps, "verify", "failed", "tsc errors"),
+      { message: /phase "verify" not found/ },
+    );
+  });
+
+  it("should throw when step has no finishedAt", () => {
+    const unfinished: CycleStep = {
+      phase: "execute",
+      status: "active",
+      startedAt: 1000,
+    };
+    assert.throws(
+      () =>
+        applyStepStatusUpdate([unfinished], "execute", "failed", "tsc errors"),
+      { message: /has no finishedAt/ },
+    );
+  });
+
+  it("should update status and summary for a finished step", () => {
+    const steps: CycleStep[] = [finishedStep];
+    const result = applyStepStatusUpdate(
+      steps,
+      "execute",
+      "failed",
+      "2 tsc errors",
+    );
+    assert.equal(result.length, 1);
+    assert.equal(result[0].status, "failed");
+    assert.equal(result[0].summary, "2 tsc errors");
+    // Preserves timing fields
+    assert.equal(result[0].finishedAt, 2000);
+    assert.equal(result[0].durationMs, 1000);
+    // Original not mutated
+    assert.equal(steps[0].status, "done");
   });
 });

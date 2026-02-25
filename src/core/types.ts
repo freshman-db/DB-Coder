@@ -58,7 +58,7 @@ export type CycleStepStatus =
   | "skipped";
 
 export interface CycleStep {
-  phase: string;
+  phase: StepPhase;
   status: CycleStepStatus;
   startedAt?: number;
   finishedAt?: number;
@@ -66,7 +66,7 @@ export interface CycleStep {
   summary?: string;
 }
 
-export const CYCLE_PIPELINE: readonly string[] = [
+export const CYCLE_PIPELINE = [
   "decide",
   "create-task",
   "execute",
@@ -75,6 +75,8 @@ export const CYCLE_PIPELINE: readonly string[] = [
   "reflect",
   "merge",
 ] as const;
+
+export type StepPhase = (typeof CYCLE_PIPELINE)[number];
 
 export interface EvaluationScore {
   problemLegitimacy: number; // -2 to +2: 问题真实性

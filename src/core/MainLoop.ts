@@ -24,6 +24,7 @@ import type {
   StatusSnapshot,
   CycleStep,
   CycleStepStatus,
+  StepPhase,
   TaskPlan,
   PlanTask,
   TaskType,
@@ -119,6 +120,27 @@ export function setCountTscErrorsDepsForTests(
   countTscErrorsDeps = overrides
     ? { ...defaultCountTscErrorsDeps, ...overrides }
     : defaultCountTscErrorsDeps;
+}
+
+/** Pure logic for updateStepStatus — exported for testing. */
+export function applyStepStatusUpdate(
+  steps: CycleStep[],
+  phase: StepPhase,
+  status: "done" | "failed",
+  summary?: string,
+): CycleStep[] {
+  const step = steps.find((s) => s.phase === phase);
+  if (!step) {
+    throw new Error(
+      `updateStepStatus: phase "${phase}" not found in cycleSteps`,
+    );
+  }
+  if (step.finishedAt == null) {
+    throw new Error(
+      `updateStepStatus: step "${phase}" has no finishedAt — only finished steps can be updated`,
+    );
+  }
+  return steps.map((s) => (s.phase === phase ? { ...s, status, summary } : s));
 }
 
 type StatusListener = (status: StatusSnapshot) => void;
@@ -3063,17 +3085,15 @@ Rules:
 
   /** Update only status and summary of a finished step (preserves finishedAt/durationMs). */
   private updateStepStatus(
-    phase: string,
+    phase: StepPhase,
     status: "done" | "failed",
     summary?: string,
   ): void {
-    const found = this.cycleSteps.some((s) => s.phase === phase);
-    if (!found) {
-      log.warn("updateStepStatus: phase not found", { phase });
-      return;
-    }
-    this.cycleSteps = this.cycleSteps.map((s) =>
-      s.phase === phase ? { ...s, status, summary } : s,
+    this.cycleSteps = applyStepStatusUpdate(
+      this.cycleSteps,
+      phase,
+      status,
+      summary,
     );
     this.broadcastStatus();
   }
