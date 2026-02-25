@@ -62,7 +62,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { safeBuild } from "../utils/safeBuild.js";
 import { CycleEventBus } from "./CycleEventBus.js";
 import type { CycleEvent, CyclePhase, CycleTiming } from "./CycleEvents.js";
@@ -2045,7 +2045,7 @@ Respond with EXACTLY this JSON (no markdown):
       log.warn(
         `No persisted subtask for order=${st.order}, fallback=${fallback} not in persisted subtasks, using sentinel`,
       );
-      return { ...st, subtaskId: `unknown-${st.order}` };
+      return { ...st, subtaskId: `__sentinel_${randomUUID()}` };
     });
     const sorted = withId.sort((a, b) => a.order - b.order);
 
