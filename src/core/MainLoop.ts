@@ -926,117 +926,129 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
           }),
         );
 
+        // Close execute step before starting verify (single-active-step invariant)
+        this.endStep("execute", "done");
+
         // Hard verification — always runs regardless of workerResult.isError
-        this.beginStep("verify");
-        this.setState("reviewing");
-        const verifyStart = Date.now();
-        const singleVerify = await this.hardVerify(
-          baselineErrors,
-          startCommit,
-          projectPath,
-        );
-        await this.taskStore.addLog({
-          task_id: task.id,
-          phase: "verify",
-          agent: "tsc",
-          input_summary: `baseline=${baselineErrors}, startCommit=${startCommit}${workerResult.isError ? ", workerError=true" : ""}`,
-          output_summary: singleVerify.passed
-            ? "PASS"
-            : `FAIL: ${singleVerify.reason}`,
-          cost_usd: 0,
-          duration_ms: Date.now() - verifyStart,
-        });
-        this.eventBus.emit(
-          this.makeEvent("verify", "after", {
-            verification: singleVerify,
-            startCommit,
-          }),
-        );
-
-        // HALT retry loop: fix up to maxRetries times
-        const maxRetries = this.config.values.autonomy.maxRetries;
-        let fixAttempts = 0;
-        let currentSessionId = workerResult.sessionId;
-
-        while (
-          !singleVerify.passed &&
-          currentSessionId &&
-          fixAttempts < maxRetries
-        ) {
-          fixAttempts++;
-          log.warn(
-            `Hard verification failed (attempt ${fixAttempts}/${maxRetries}): ${singleVerify.reason}`,
-          );
-          const fixResult = await this.workerFix(
-            currentSessionId,
-            singleVerify.reason ?? "Unknown error",
-            task,
-          );
-          if (fixResult.costUsd > 0)
-            await this.costTracker.addCost(task.id, fixResult.costUsd);
-          currentSessionId = fixResult.sessionId ?? currentSessionId;
-
-          const changedFilesForCommit = await getModifiedAndAddedFiles(
-            projectPath,
-          ).catch(() => []);
-          try {
-            await commitAll(
-              "db-coder: fix verification issues",
-              projectPath,
-              changedFilesForCommit,
-            );
-          } catch (commitErr) {
-            log.error(
-              `commitAll failed during verification retry ${fixAttempts}: ${commitErr}`,
-            );
-            singleVerify.reason = `commitAll failed: ${commitErr}`;
-            break;
-          }
-          const reVerify = await this.hardVerify(
+        try {
+          this.beginStep("verify");
+          this.setState("reviewing");
+          const verifyStart = Date.now();
+          const singleVerify = await this.hardVerify(
             baselineErrors,
             startCommit,
             projectPath,
           );
-          singleVerify.passed = reVerify.passed;
-          singleVerify.reason = reVerify.reason;
+          await this.taskStore.addLog({
+            task_id: task.id,
+            phase: "verify",
+            agent: "tsc",
+            input_summary: `baseline=${baselineErrors}, startCommit=${startCommit}${workerResult.isError ? ", workerError=true" : ""}`,
+            output_summary: singleVerify.passed
+              ? "PASS"
+              : `FAIL: ${singleVerify.reason}`,
+            cost_usd: 0,
+            duration_ms: Date.now() - verifyStart,
+          });
           this.eventBus.emit(
-            this.makeEvent("fix", "after", { verification: singleVerify }),
+            this.makeEvent("verify", "after", {
+              verification: singleVerify,
+              startCommit,
+            }),
           );
-        }
 
-        if (!singleVerify.passed && fixAttempts >= maxRetries) {
-          log.warn(
-            `HALT after ${fixAttempts} fix attempts: ${singleVerify.reason}`,
-          );
-          if (brainOpts?.persona) {
-            await this.taskStore.addLog({
-              task_id: task.id,
-              phase: "halt-learning",
-              agent: "system",
-              input_summary: `persona=${brainOpts.persona}`,
-              output_summary: `HALT triggered: ${singleVerify.reason} (after ${fixAttempts} attempts)`,
-              cost_usd: 0,
-              duration_ms: 0,
-            });
+          // HALT retry loop: fix up to maxRetries times
+          const maxRetries = this.config.values.autonomy.maxRetries;
+          let fixAttempts = 0;
+          let currentSessionId = workerResult.sessionId;
+
+          while (
+            !singleVerify.passed &&
+            currentSessionId &&
+            fixAttempts < maxRetries
+          ) {
+            fixAttempts++;
+            log.warn(
+              `Hard verification failed (attempt ${fixAttempts}/${maxRetries}): ${singleVerify.reason}`,
+            );
+            const fixResult = await this.workerFix(
+              currentSessionId,
+              singleVerify.reason ?? "Unknown error",
+              task,
+            );
+            if (fixResult.costUsd > 0)
+              await this.costTracker.addCost(task.id, fixResult.costUsd);
+            currentSessionId = fixResult.sessionId ?? currentSessionId;
+
+            const changedFilesForCommit = await getModifiedAndAddedFiles(
+              projectPath,
+            ).catch(() => []);
+            try {
+              await commitAll(
+                "db-coder: fix verification issues",
+                projectPath,
+                changedFilesForCommit,
+              );
+            } catch (commitErr) {
+              log.error(
+                `commitAll failed during verification retry ${fixAttempts}: ${commitErr}`,
+              );
+              singleVerify.reason = `commitAll failed: ${commitErr}`;
+              break;
+            }
+            const reVerify = await this.hardVerify(
+              baselineErrors,
+              startCommit,
+              projectPath,
+            );
+            singleVerify.passed = reVerify.passed;
+            singleVerify.reason = reVerify.reason;
+            this.eventBus.emit(
+              this.makeEvent("fix", "after", { verification: singleVerify }),
+            );
           }
+
+          if (!singleVerify.passed && fixAttempts >= maxRetries) {
+            log.warn(
+              `HALT after ${fixAttempts} fix attempts: ${singleVerify.reason}`,
+            );
+            if (brainOpts?.persona) {
+              await this.taskStore.addLog({
+                task_id: task.id,
+                phase: "halt-learning",
+                agent: "system",
+                input_summary: `persona=${brainOpts.persona}`,
+                output_summary: `HALT triggered: ${singleVerify.reason} (after ${fixAttempts} attempts)`,
+                cost_usd: 0,
+                duration_ms: 0,
+              });
+            }
+          }
+
+          workerPassed = singleVerify.passed;
+          workerSessionId = currentSessionId;
+          verification.passed = singleVerify.passed;
+          verification.reason = singleVerify.reason;
+
+          // If hardVerify failed, retroactively mark execute as failed with verify reason
+          if (!singleVerify.passed) {
+            this.updateStepStatus("execute", "failed", singleVerify.reason);
+          }
+          this.endStep(
+            "verify",
+            singleVerify.passed ? "done" : "failed",
+            singleVerify.reason,
+          );
+        } catch (verifyErr) {
+          const errMsg =
+            verifyErr instanceof Error ? verifyErr.message : String(verifyErr);
+          this.updateStepStatus(
+            "execute",
+            "failed",
+            `Verification phase exception: ${errMsg}`,
+          );
+          throw verifyErr;
         }
-
-        workerPassed = singleVerify.passed;
-        workerSessionId = currentSessionId;
-        verification.passed = singleVerify.passed;
-        verification.reason = singleVerify.reason;
-
-        // endStep execute based on hardVerify result, not worker report
-        this.endStep(
-          "execute",
-          singleVerify.passed ? "done" : "failed",
-          singleVerify.passed ? undefined : workerErrMsg,
-        );
-        this.endStep(
-          "verify",
-          singleVerify.passed ? "done" : "failed",
-          singleVerify.reason,
-        );
       }
 
       // 7. Code review (reviewer auto-selects based on worker config — mutual exclusion)
@@ -3046,6 +3058,23 @@ Rules:
         summary,
       };
     });
+    this.broadcastStatus();
+  }
+
+  /** Update only status and summary of a finished step (preserves finishedAt/durationMs). */
+  private updateStepStatus(
+    phase: string,
+    status: "done" | "failed",
+    summary?: string,
+  ): void {
+    const found = this.cycleSteps.some((s) => s.phase === phase);
+    if (!found) {
+      log.warn("updateStepStatus: phase not found", { phase });
+      return;
+    }
+    this.cycleSteps = this.cycleSteps.map((s) =>
+      s.phase === phase ? { ...s, status, summary } : s,
+    );
     this.broadcastStatus();
   }
 
