@@ -2016,7 +2016,14 @@ Respond with EXACTLY this JSON (no markdown):
     },
   ): Promise<{ success: boolean; sessionId?: string; reason?: string }> {
     // Re-read task from DB to ensure subtasks array is fresh
-    task = (await this.taskStore.getTask(task.id))!;
+    const freshTask = await this.taskStore.getTask(task.id);
+    if (!freshTask) {
+      return {
+        success: false,
+        reason: `Task ${task.id} disappeared before subtask execution`,
+      };
+    }
+    task = freshTask;
 
     // Build order→id map from persisted subtasks, then match by order (not index)
     const orderToId = new Map<number, string>();
@@ -2081,14 +2088,14 @@ Respond with EXACTLY this JSON (no markdown):
         );
         await this.taskStore.updateTask(task.id, { subtasks: currentSubtasks });
         // Re-read to prevent stale-state regression in error path (line ~2115)
-        const refreshed = await this.taskStore.getTask(task.id);
-        if (!refreshed) {
-          log.warn(
-            "Task disappeared after running-status write, using stale data",
-          );
-        } else {
-          task = refreshed;
+        const refreshedAfterRunning = await this.taskStore.getTask(task.id);
+        if (!refreshedAfterRunning) {
+          return {
+            success: false,
+            reason: `Task ${task.id} disappeared after running-status write`,
+          };
         }
+        task = refreshedAfterRunning;
       }
 
       // Execute worker — resume from previous subtask if available
@@ -2131,14 +2138,14 @@ Respond with EXACTLY this JSON (no markdown):
           });
         }
         // Re-read task so in-memory subtasks include the workerError just persisted
-        const refreshed = await this.taskStore.getTask(task.id);
-        if (!refreshed) {
-          log.warn(
-            "Task disappeared during subtask processing, using stale data",
-          );
-        } else {
-          task = refreshed;
+        const refreshedAfterError = await this.taskStore.getTask(task.id);
+        if (!refreshedAfterError) {
+          return {
+            success: false,
+            reason: `Task ${task.id} disappeared during subtask error processing`,
+          };
         }
+        task = refreshedAfterError;
       }
 
       // Per-subtask hard verify with HALT retry loop — always runs
@@ -2245,7 +2252,14 @@ Respond with EXACTLY this JSON (no markdown):
         await this.taskStore.updateTask(task.id, { subtasks: doneSubtasks });
       }
       // Re-read task for updated subtask state
-      task = (await this.taskStore.getTask(task.id))!;
+      const refreshedAfterDone = await this.taskStore.getTask(task.id);
+      if (!refreshedAfterDone) {
+        return {
+          success: false,
+          reason: `Task ${task.id} disappeared after marking subtask done`,
+        };
+      }
+      task = refreshedAfterDone;
 
       // Capture session for next subtask resume (only on success)
       lastSuccessfulSessionId = result.sessionId;

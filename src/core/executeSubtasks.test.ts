@@ -243,4 +243,113 @@ describe("executeSubtasks", () => {
     );
     assert.ok(errorCall?.workerError, "Error path should set workerError");
   });
+
+  it("should fail-fast when getTask() returns null at entry", async () => {
+    const subtaskRecords: SubTaskRecord[] = [
+      {
+        id: "1",
+        description: "only subtask",
+        executor: "claude",
+        status: "pending",
+        order: 1,
+      },
+    ];
+
+    const currentTask = makeTask(subtaskRecords);
+    let workerCalled = false;
+
+    const loop = buildStub({
+      taskStore: {
+        // First getTask (entry re-read) returns null — task disappeared
+        getTask: async () => null,
+        updateTask: async () => {},
+        addLog: async () => {},
+      },
+      workerExecute: async () => {
+        workerCalled = true;
+        return makeSessionResult();
+      },
+      hardVerify: async () => ({ passed: true }),
+      costTracker: { addCost: async () => {} },
+    });
+
+    const result = await (loop as unknown as Record<string, Function>)[
+      "executeSubtasks"
+    ](currentTask, [{ description: "only subtask", order: 1 }], {
+      baselineErrors: 0,
+      startCommit: "abc123",
+    });
+
+    assert.equal(
+      result.success,
+      false,
+      "Should return failure when task disappears at entry",
+    );
+    assert.ok(
+      result.reason?.includes("disappeared") || result.reason?.includes("null"),
+      `Reason should mention task disappearance, got: ${result.reason}`,
+    );
+    assert.equal(
+      workerCalled,
+      false,
+      "Worker should NOT be called when task is null",
+    );
+  });
+
+  it("should fail-fast when getTask() returns null after running-status write", async () => {
+    const subtaskRecords: SubTaskRecord[] = [
+      {
+        id: "1",
+        description: "only subtask",
+        executor: "claude",
+        status: "pending",
+        order: 1,
+      },
+    ];
+
+    const currentTask = makeTask(subtaskRecords);
+    let getTaskCallCount = 0;
+    let workerCalled = false;
+
+    const loop = buildStub({
+      taskStore: {
+        getTask: async () => {
+          getTaskCallCount++;
+          // First call (entry re-read) returns task; second call (after running write) returns null
+          if (getTaskCallCount === 1) return structuredClone(currentTask);
+          return null;
+        },
+        updateTask: async () => {},
+        addLog: async () => {},
+      },
+      workerExecute: async () => {
+        workerCalled = true;
+        return makeSessionResult();
+      },
+      hardVerify: async () => ({ passed: true }),
+      costTracker: { addCost: async () => {} },
+    });
+
+    const result = await (loop as unknown as Record<string, Function>)[
+      "executeSubtasks"
+    ](currentTask, [{ description: "only subtask", order: 1 }], {
+      baselineErrors: 0,
+      startCommit: "abc123",
+    });
+
+    assert.equal(
+      result.success,
+      false,
+      "Should return failure when task disappears after running write",
+    );
+    assert.ok(
+      result.reason?.includes("disappeared") || result.reason?.includes("null"),
+      `Reason should mention task disappearance, got: ${result.reason}`,
+    );
+    assert.equal(
+      workerCalled,
+      false,
+      "Worker should NOT execute after task disappears",
+    );
+  });
 });
