@@ -703,7 +703,7 @@ export class MainLoop {
           updates.subtasks = decision.subtasks.map((st, i) => {
             const coerced = coerceSubtaskOrder(st.order, i + 1);
             return {
-              id: String(i + 1),
+              id: String(hasDuplicates ? i + 1 : coerced),
               description: st.description,
               executor: "claude" as const,
               status: "pending" as const,
