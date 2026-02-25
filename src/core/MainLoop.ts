@@ -1052,23 +1052,30 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
           verification.passed = singleVerify.passed;
           verification.reason = singleVerify.reason;
 
-          // If hardVerify failed, retroactively mark execute as failed with verify reason
-          if (!singleVerify.passed) {
-            this.updateStepStatus("execute", "failed", singleVerify.reason);
-          }
+          // Close verify step first, then retroactively mark execute as failed
           this.endStep(
             "verify",
             singleVerify.passed ? "done" : "failed",
             singleVerify.reason,
           );
+          if (!singleVerify.passed) {
+            this.updateStepStatus("execute", "failed", singleVerify.reason);
+          }
         } catch (verifyErr) {
           const errMsg =
             verifyErr instanceof Error ? verifyErr.message : String(verifyErr);
-          this.updateStepStatus(
-            "execute",
-            "failed",
-            `Verification phase exception: ${errMsg}`,
-          );
+          try {
+            this.updateStepStatus(
+              "execute",
+              "failed",
+              `Verification phase exception: ${errMsg}`,
+            );
+          } catch (statusErr) {
+            log.warn(
+              "updateStepStatus failed in catch block, preserving original error",
+              { statusErr },
+            );
+          }
           throw verifyErr;
         }
       }
