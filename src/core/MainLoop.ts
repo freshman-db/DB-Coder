@@ -1136,13 +1136,18 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
             const executeStep = this.cycleSteps.find(
               (s) => s.phase === "execute",
             );
-            if (executeStep?.startedAt) {
+            if (executeStep?.finishedAt != null) {
+              log.info(
+                "Skipping execute step status update: step already finished",
+                {
+                  hasStep: !!executeStep,
+                  finishedAt: executeStep?.finishedAt,
+                },
+              );
+            } else if (executeStep) {
               this.updateStepStatus("execute", "failed", singleVerify.reason);
             } else {
-              log.info("Skipping execute step status update: step not active", {
-                hasStep: !!executeStep,
-                hasStartedAt: !!executeStep?.startedAt,
-              });
+              log.info("Skipping execute step status update: step not found");
             }
           }
         } catch (verifyErr) {
