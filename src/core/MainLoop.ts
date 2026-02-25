@@ -2063,7 +2063,7 @@ Respond with EXACTLY this JSON (no markdown):
       );
       return { ...st, subtaskId: `__sentinel_${randomUUID()}` };
     });
-    const sorted = withId.sort((a, b) => a.order - b.order);
+    const sorted = withId.toSorted((a, b) => a.order - b.order);
 
     let lastSuccessfulSessionId: string | undefined;
 
@@ -2080,6 +2080,15 @@ Respond with EXACTLY this JSON (no markdown):
           s.id === st.subtaskId ? { ...s, status: "running" as const } : s,
         );
         await this.taskStore.updateTask(task.id, { subtasks: currentSubtasks });
+        // Re-read to prevent stale-state regression in error path (line ~2115)
+        const refreshed = await this.taskStore.getTask(task.id);
+        if (!refreshed) {
+          log.warn(
+            "Task disappeared after running-status write, using stale data",
+          );
+        } else {
+          task = refreshed;
+        }
       }
 
       // Execute worker — resume from previous subtask if available
