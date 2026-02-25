@@ -122,6 +122,20 @@ export function setCountTscErrorsDepsForTests(
     : defaultCountTscErrorsDeps;
 }
 
+/**
+ * Return all steps matching `phase` whose finishedAt is set, or null if
+ * the precondition is not met (no matching steps, or any match lacks finishedAt).
+ */
+function findFinishedStepsByPhase(
+  steps: CycleStep[],
+  phase: StepPhase,
+): CycleStep[] | null {
+  const matched = steps.filter((s) => s.phase === phase);
+  if (matched.length === 0) return null;
+  if (matched.some((s) => s.finishedAt == null)) return null;
+  return matched;
+}
+
 /** Pure logic for updateStepStatus — exported for testing. */
 export function applyStepStatusUpdate(
   steps: CycleStep[],
@@ -129,18 +143,17 @@ export function applyStepStatusUpdate(
   status: "done" | "failed",
   summary?: string,
 ): CycleStep[] {
-  const matched = steps.filter((s) => s.phase === phase);
-  if (matched.length === 0) {
-    throw new Error(
-      `updateStepStatus: phase "${phase}" not found in cycleSteps`,
-    );
-  }
-  for (const step of matched) {
-    if (step.finishedAt == null) {
+  const finished = findFinishedStepsByPhase(steps, phase);
+  if (finished === null) {
+    const exists = steps.some((s) => s.phase === phase);
+    if (!exists) {
       throw new Error(
-        `updateStepStatus: step "${phase}" has no finishedAt — only finished steps can be updated`,
+        `updateStepStatus: phase "${phase}" not found in cycleSteps`,
       );
     }
+    throw new Error(
+      `updateStepStatus: step "${phase}" has no finishedAt — only finished steps can be updated`,
+    );
   }
   return steps.map((s) => (s.phase === phase ? { ...s, status, summary } : s));
 }
@@ -1066,10 +1079,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
         } catch (verifyErr) {
           const errMsg =
             verifyErr instanceof Error ? verifyErr.message : String(verifyErr);
-          const execStep = this.cycleSteps.findLast(
-            (s) => s.phase === "execute",
-          );
-          if (execStep && execStep.finishedAt != null) {
+          if (findFinishedStepsByPhase(this.cycleSteps, "execute")) {
             try {
               this.updateStepStatus(
                 "execute",
@@ -1083,11 +1093,15 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
               );
             }
           } else {
+            const execSteps = this.cycleSteps.filter(
+              (s) => s.phase === "execute",
+            );
             log.warn(
               "Skipping updateStepStatus for execute: step not found or not finished",
               {
-                exists: !!execStep,
-                finishedAt: execStep?.finishedAt,
+                exists: execSteps.length > 0,
+                count: execSteps.length,
+                allFinished: execSteps.every((s) => s.finishedAt != null),
               },
             );
           }
