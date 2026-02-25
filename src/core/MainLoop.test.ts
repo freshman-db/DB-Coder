@@ -114,6 +114,53 @@ describe("applyStepStatusUpdate", () => {
     );
   });
 
+  it("should throw when any duplicate-phase step has no finishedAt", () => {
+    const steps: CycleStep[] = [
+      {
+        phase: "execute",
+        status: "done",
+        startedAt: 1000,
+        finishedAt: 2000,
+        durationMs: 1000,
+      },
+      { phase: "execute", status: "active", startedAt: 3000 },
+    ];
+    assert.throws(
+      () => applyStepStatusUpdate(steps, "execute", "failed", "err"),
+      { message: /has no finishedAt/ },
+    );
+  });
+
+  it("should update all duplicate-phase steps when all finished", () => {
+    const steps: CycleStep[] = [
+      {
+        phase: "execute",
+        status: "done",
+        startedAt: 1000,
+        finishedAt: 2000,
+        durationMs: 1000,
+      },
+      {
+        phase: "execute",
+        status: "done",
+        startedAt: 3000,
+        finishedAt: 4000,
+        durationMs: 1000,
+      },
+    ];
+    const result = applyStepStatusUpdate(
+      steps,
+      "execute",
+      "failed",
+      "both updated",
+    );
+    assert.equal(result.length, 2);
+    assert.equal(result[0].status, "failed");
+    assert.equal(result[0].summary, "both updated");
+    assert.equal(result[1].status, "failed");
+    assert.equal(result[1].summary, "both updated");
+  });
+
   it("should update status and summary for a finished step", () => {
     const steps: CycleStep[] = [finishedStep];
     const result = applyStepStatusUpdate(
