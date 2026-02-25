@@ -1015,4 +1015,33 @@ describe("executeSubtasks", () => {
       "Subtasks with invalid order should execute stably (Infinity fallback)",
     );
   });
+
+  it("should produce NaN-free comparator results for all invalid order combinations", () => {
+    // Directly verify the sort comparator logic never returns NaN
+    const cmp = (a: { order: unknown }, b: { order: unknown }): number => {
+      const aOrd = Number.isFinite(a.order) ? (a.order as number) : Infinity;
+      const bOrd = Number.isFinite(b.order) ? (b.order as number) : Infinity;
+      if (aOrd === bOrd) return 0;
+      if (!Number.isFinite(aOrd)) return 1;
+      if (!Number.isFinite(bOrd)) return -1;
+      return aOrd - bOrd;
+    };
+    const pairs: Array<{ order: unknown }> = [
+      { order: undefined },
+      { order: NaN },
+      { order: Infinity },
+      { order: "abc" },
+      { order: 1 },
+      { order: 3 },
+    ];
+    for (const x of pairs) {
+      for (const y of pairs) {
+        const result = cmp(x, y);
+        assert.ok(
+          !Number.isNaN(result),
+          `comparator(${JSON.stringify(x)}, ${JSON.stringify(y)}) must not be NaN, got ${result}`,
+        );
+      }
+    }
+  });
 });

@@ -192,17 +192,25 @@ function coerceSubtaskOrder(value: unknown, fallback: number): number {
 function normalizeSubtasks(
   raw: unknown[],
 ): Array<{ description: string; order: number }> {
-  return raw
-    .filter(
-      (item): item is Record<string, unknown> =>
-        typeof item === "object" &&
-        item !== null &&
-        typeof (item as Record<string, unknown>).description === "string",
-    )
-    .map((item, i) => ({
-      description: String(item.description),
-      order: coerceSubtaskOrder(item.order, i + 1),
-    }));
+  const valid: Array<Record<string, unknown>> = [];
+  for (const item of raw) {
+    if (
+      typeof item === "object" &&
+      item !== null &&
+      typeof (item as Record<string, unknown>).description === "string"
+    ) {
+      valid.push(item as Record<string, unknown>);
+    } else {
+      log.warn(
+        "normalizeSubtasks: dropping invalid subtask item (missing string description)",
+        { item },
+      );
+    }
+  }
+  return valid.map((item, i) => ({
+    description: String(item.description),
+    order: coerceSubtaskOrder(item.order, i + 1),
+  }));
 }
 
 type StatusListener = (status: StatusSnapshot) => void;
@@ -1629,7 +1637,7 @@ ${analysisReport}
   - a structured object with fields: acceptanceCriteria (testable "done" statements),
     filesToModify (explicit paths), guardrails (what NOT to do), verificationSteps,
     references (related files/docs to read first)
-- subtasks: ONLY for complex tasks needing 2+ independent steps. Most tasks should NOT have subtasks.
+- subtasks: ONLY for complex tasks needing 2+ independent steps. Most tasks should NOT have subtasks. Each subtask needs: description (string) and order (integer starting from 1, execution sequence).
 - persona: feature-builder, refactoring-expert, bugfix-debugger, test-engineer, security-auditor, performance-optimizer, frontend-specialist
 - taskType: feature, bugfix, refactoring, test, security, performance, frontend, code-quality, docs
 - reasoning: brief explanation of why these tasks were chosen`;
@@ -2172,11 +2180,14 @@ Respond with EXACTLY this JSON (no markdown):
       );
       return { ...st, subtaskId: `__sentinel_${randomUUID()}` };
     });
-    const sorted = withId.toSorted(
-      (a, b) =>
-        (Number.isFinite(a.order) ? a.order : Infinity) -
-        (Number.isFinite(b.order) ? b.order : Infinity),
-    );
+    const sorted = withId.toSorted((a, b) => {
+      const aOrd = Number.isFinite(a.order) ? a.order : Infinity;
+      const bOrd = Number.isFinite(b.order) ? b.order : Infinity;
+      if (aOrd === bOrd) return 0;
+      if (!Number.isFinite(aOrd)) return 1;
+      if (!Number.isFinite(bOrd)) return -1;
+      return aOrd - bOrd;
+    });
 
     let lastSuccessfulSessionId: string | undefined;
 
