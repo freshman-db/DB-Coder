@@ -626,6 +626,7 @@ export class MainLoop {
             description: st.description,
             executor: "claude" as const,
             status: "pending" as const,
+            order: st.order ?? i + 1,
           }));
         }
         await this.taskStore.updateTask(task.id, updates);
@@ -1993,10 +1994,23 @@ Respond with EXACTLY this JSON (no markdown):
     // Re-read task from DB to ensure subtasks array is fresh
     task = (await this.taskStore.getTask(task.id))!;
 
-    // Build sorted array with id from task.subtasks (same order as original decision.subtasks)
+    // Build order→id map from persisted subtasks, then match by order (not index)
+    const orderToId = new Map<number, string>();
+    for (const s of task.subtasks ?? []) {
+      if (s.order != null) {
+        if (orderToId.has(s.order)) {
+          log.warn(`Duplicate subtask order ${s.order}, keeping first`);
+        } else {
+          orderToId.set(s.order, s.id);
+        }
+      }
+    }
     const withId = subtasks.map((st, i) => ({
       ...st,
-      subtaskId: (task.subtasks ?? [])[i]?.id ?? String(i + 1),
+      subtaskId:
+        orderToId.get(st.order) ??
+        (task.subtasks ?? [])[i]?.id ??
+        String(i + 1),
     }));
     const sorted = withId.sort((a, b) => a.order - b.order);
 

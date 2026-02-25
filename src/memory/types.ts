@@ -59,6 +59,7 @@ export interface SubTaskRecord {
   description: string;
   executor: "claude" | "codex";
   status: "pending" | "running" | "done" | "failed";
+  order?: number;
   result?: string;
   workerError?: string;
 }
