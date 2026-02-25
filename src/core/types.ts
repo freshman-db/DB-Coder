@@ -1,10 +1,4 @@
-import type {
-  ProjectAnalysis,
-  AnalysisItem,
-  SubTaskRecord,
-} from "../memory/types.js";
-import type { ReviewIssue } from "../bridges/CodingAgent.js";
-import type { MemoryCategory } from "../types/constants.js";
+import type { ProjectAnalysis, AnalysisItem } from "../memory/types.js";
 
 export type { ProjectAnalysis, AnalysisItem };
 
@@ -40,26 +34,6 @@ export interface PlanSubTask {
 export interface TaskPlan {
   tasks: PlanTask[];
   reasoning: string;
-}
-
-export interface MergedReviewResult {
-  passed: boolean;
-  mustFix: ReviewIssue[]; // Both reviewers flagged — must fix
-  shouldFix: ReviewIssue[]; // Only one reviewer flagged — optional
-  summary: string;
-}
-
-export interface ReflectionResult {
-  experiences: ExtractedExperience[];
-  taskSummary: string;
-  adjustments: string[];
-}
-
-export interface ExtractedExperience {
-  category: MemoryCategory;
-  title: string;
-  content: string;
-  tags: string[];
 }
 
 export type LoopState =

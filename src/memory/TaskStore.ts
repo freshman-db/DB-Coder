@@ -74,76 +74,9 @@ CREATE TABLE IF NOT EXISTS daily_costs (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_description_trgm ON tasks USING gin (task_description gin_trgm_ops);
 
-CREATE TABLE IF NOT EXISTS adjustments (
-  id SERIAL PRIMARY KEY,
-  project_path TEXT NOT NULL,
-  task_id UUID REFERENCES tasks(id),
-  text TEXT NOT NULL,
-  category TEXT NOT NULL DEFAULT 'strategy',
-  effectiveness REAL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'active',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS goal_progress (
-  id SERIAL PRIMARY KEY,
-  project_path TEXT NOT NULL,
-  goal_index INTEGER NOT NULL,
-  progress_pct REAL NOT NULL DEFAULT 0,
-  evidence TEXT NOT NULL DEFAULT '',
-  scan_id INTEGER REFERENCES scan_results(id),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS config_proposals (
-  id SERIAL PRIMARY KEY,
-  project_path TEXT NOT NULL,
-  field_path TEXT NOT NULL,
-  current_value JSONB,
-  proposed_value JSONB,
-  reason TEXT NOT NULL DEFAULT '',
-  confidence REAL DEFAULT 0.5,
-  status TEXT NOT NULL DEFAULT 'pending',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS review_events (
-  id SERIAL PRIMARY KEY,
-  task_id UUID REFERENCES tasks(id) ON DELETE CASCADE,
-  attempt INTEGER NOT NULL,
-  passed BOOLEAN NOT NULL,
-  must_fix_count INTEGER DEFAULT 0,
-  should_fix_count INTEGER DEFAULT 0,
-  issue_categories JSONB DEFAULT '[]',
-  fix_agent TEXT,
-  duration_ms INTEGER,
-  cost_usd NUMERIC(10,4) DEFAULT 0,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
 
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS depends_on UUID[] DEFAULT '{}';
 
-CREATE TABLE IF NOT EXISTS prompt_versions (
-  id SERIAL PRIMARY KEY,
-  project_path TEXT NOT NULL,
-  prompt_name TEXT NOT NULL,
-  version INTEGER NOT NULL DEFAULT 1,
-  patches JSONB NOT NULL,
-  rationale TEXT NOT NULL DEFAULT '',
-  confidence REAL DEFAULT 0.5,
-  effectiveness REAL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'candidate',
-  baseline_metrics JSONB,
-  current_metrics JSONB,
-  tasks_evaluated INTEGER DEFAULT 0,
-  activated_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (project_path, prompt_name, version)
-);
-CREATE INDEX IF NOT EXISTS idx_prompt_versions_active
-  ON prompt_versions (project_path, prompt_name) WHERE status = 'active';
 
 CREATE TABLE IF NOT EXISTS plan_drafts (
   id SERIAL PRIMARY KEY,
@@ -175,16 +108,6 @@ CREATE TABLE IF NOT EXISTS plan_chat_messages (
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS evaluation_score JSONB;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS evaluation_reasoning TEXT DEFAULT '';
 
-CREATE TABLE IF NOT EXISTS evaluation_events (
-  id SERIAL PRIMARY KEY,
-  task_id UUID REFERENCES tasks(id) ON DELETE CASCADE,
-  passed BOOLEAN NOT NULL,
-  score JSONB NOT NULL,
-  reasoning TEXT NOT NULL DEFAULT '',
-  cost_usd NUMERIC(10,4) DEFAULT 0,
-  duration_ms INTEGER,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
 
 CREATE TABLE IF NOT EXISTS service_state (
   project_path TEXT NOT NULL,
@@ -194,19 +117,6 @@ CREATE TABLE IF NOT EXISTS service_state (
   PRIMARY KEY (project_path, key)
 );
 
-CREATE TABLE IF NOT EXISTS scan_modules (
-  id SERIAL PRIMARY KEY,
-  project_path TEXT NOT NULL,
-  name TEXT NOT NULL,
-  description TEXT,
-  entry_points TEXT[] NOT NULL DEFAULT '{}',
-  involved_files TEXT[] NOT NULL DEFAULT '{}',
-  data_flow TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE(project_path, name)
-);
-
-ALTER TABLE scan_results ADD COLUMN IF NOT EXISTS module_name TEXT DEFAULT NULL;
 
 CREATE TABLE IF NOT EXISTS personas (
   id SERIAL PRIMARY KEY,

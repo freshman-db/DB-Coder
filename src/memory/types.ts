@@ -87,25 +87,6 @@ export interface TaskLog {
   created_at: Date;
 }
 
-export interface ReviewEvent {
-  id: number;
-  task_id: string;
-  attempt: number;
-  passed: boolean;
-  must_fix_count: number;
-  should_fix_count: number;
-  issue_categories: string[];
-  fix_agent: string | null;
-  duration_ms: number | null;
-  cost_usd: number;
-  created_at: Date;
-}
-
-export interface RecurringIssueCategory {
-  category: string;
-  count: number;
-}
-
 export interface OperationalMetrics {
   cycleCount: number;
   avgCycleDurationMs: number;
@@ -114,17 +95,6 @@ export interface OperationalMetrics {
   queueDepth: number;
   tasksByStatus: Record<string, number>;
   recentHealthScores: number[];
-}
-
-export interface ScanModule {
-  id: number;
-  project_path: string;
-  name: string;
-  description: string | null;
-  entry_points: string[];
-  involved_files: string[];
-  data_flow: string | null;
-  created_at: Date;
 }
 
 export interface ScanResult {

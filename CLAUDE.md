@@ -81,8 +81,8 @@ chain_scan_state: project_path(pk), next_index, entry_points(jsonb),
                   last_scan_at, scan_count, updated_at
 ```
 
-停用表 (不删除, 停止写入): adjustments, scan_modules, scan_results,
-evaluation_events, review_events, goal_progress, prompt_versions, config_proposals
+停用表 (仅保留读取, 不再写入): scan_results
+已清理表 (已 DROP): adjustments, scan_modules, evaluation_events, review_events, goal_progress, prompt_versions, config_proposals
 
 ## 功能链路
 
@@ -174,7 +174,7 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 - CLI 命令错误处理不一致: 旧命令无 try/catch (自然冒泡), 新增命令 try/catch 吞错误。应统一
 - hardVerify 多重缺陷: (1) 空 diff 只 warn 不 fail [已修复 9258ac2, 未合并]; (2) baselineErrors=-1 时短路自动 pass [已修复 9258ac2, 未合并]; (3) countTscErrors 超时返回 0 误认编译成功 [已修复 a19ca93, 未合并]
 - 成功路径异常隔离缺失: merge 冲突/dirty git state/deleteBranch 失败都走外层 catch, 已验证代码被 cleanup 永久丢失。switchBranch 前需 git reset --hard [已修复 8968d95: deleteBranch 独立 try/catch, brainReflect 独立 try/catch; 未修复: switchBranch/mergeBranch 仍无独立隔离]
-- worker 执行/重试缺陷: (1) workerExecute 不检查 isError [已修复 8968d95, 单任务+子任务]; (2) makeErrorResult sessionId="" 导致 while 循环提前退出 [未修复]; (3) commitAll .catch(()=>{}) 致验证在旧代码上运行 [已修复 8968d95, 3处]; (4) subtask 路径同样不检查 isError [已修复 8968d95]
+- worker 执行/重试缺陷: (1) isError 过于激进跳过 hardVerify [已修复 a7b7763, isError 降为 warning, hardVerify 始终运行]; (2) makeErrorResult sessionId="" 导致 while 循环提前退出 [未修复]; (3) commitAll .catch(()=>{}) 致验证在旧代码上运行 [已修复 8968d95, 3处]; (4) subtask workerError 字段未加入 SubTaskRecord 类型定义 [未修复, 运行时有效但类型不安全]
 - brainReflect 三重问题: (1) 在任务分支上运行, reject 时丢失学习 [未修复]; (2) 未 commit 编辑泄漏到 main 或在分支差异时报错丢代码 [未修复]; (3) 失败标 failed 阻止已验证任务合并 [已修复 8968d95, 独立 try/catch]
 - specReview 多重缺陷: (1) diff 截断无标记 [已修复 90bd756, 未合并]; (2) diff 按字母序排, .test.ts 占满截断后核心变更不可见; (3) parseSpecResult 用 JSON.parse 而非 extractJsonFromText [重试浪费 ~$0.5-2]; (4) startCommit="" 时浪费全部审查费用
 - CostTracker 系统性绕过: chainScan/claudeMdMaintenance/brainDecide 等 7+ 调用点直接用 taskStore.addDailyCost() 绕过 CostTracker.addCost(), sessionCost 仅反映 worker+verify+review。进程崩溃后 sessionCost 归零与 DB 不一致

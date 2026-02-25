@@ -693,7 +693,52 @@ export class MainLoop {
         await this.taskStore.updateTask(task.id, { phase: "analyzing" });
 
         // Worker produces a concrete change proposal (read-only)
-        const { proposal } = await this.workerAnalyze(task, brainOpts);
+        const { proposal, isError: analyzeError } = await this.workerAnalyze(
+          task,
+          brainOpts,
+        );
+
+        if (analyzeError) {
+          const maxAnalyzeRetries = 2;
+          const nextIteration = task.iteration + 1;
+          if (nextIteration > maxAnalyzeRetries) {
+            log.warn(
+              `Worker analyze failed ${nextIteration} times — blocking task (max ${maxAnalyzeRetries} retries)`,
+            );
+            this.endStep(
+              "analyze",
+              "failed",
+              "Empty or error proposal (retries exhausted)",
+            );
+            this.skipRemainingSteps("analyze");
+            await this.taskStore.updateTask(task.id, {
+              status: "blocked",
+              phase: "blocked",
+              iteration: nextIteration,
+            });
+          } else {
+            log.warn(
+              `Worker analyze failed — requeuing task (attempt ${nextIteration}/${maxAnalyzeRetries})`,
+            );
+            this.endStep(
+              "analyze",
+              "failed",
+              `Empty or error proposal, requeuing (attempt ${nextIteration})`,
+            );
+            this.skipRemainingSteps("analyze");
+            await this.taskStore.updateTask(task.id, {
+              status: "queued",
+              phase: "init",
+              iteration: nextIteration,
+            });
+          }
+          await switchBranch(originalBranch, projectPath).catch(() => {});
+          await this.cleanupTaskBranch(branchName, { force: true });
+          this.setCurrentTaskId(null);
+          this.currentTaskDescription = null;
+          this.setState("idle");
+          return false;
+        }
 
         // Reviewer evaluates the proposal (mutually exclusive with worker)
         const planReview = await this.reviewPlan(proposal, task);
@@ -2113,7 +2158,7 @@ Respond with EXACTLY this JSON (no markdown, no extra text):
       complexity?: string;
       workInstructions?: WorkInstructions;
     },
-  ): Promise<{ proposal: string; costUsd: number }> {
+  ): Promise<{ proposal: string; costUsd: number; isError: boolean }> {
     const { prompt: basePrompt } = await this.personaLoader.buildWorkerPrompt({
       taskDescription: task.task_description,
       personaName: brainOpts?.persona,
@@ -2163,7 +2208,11 @@ Be specific: include function signatures, type definitions, and concrete code sn
       duration_ms: result.durationMs,
     });
 
-    return { proposal: result.text, costUsd: result.costUsd };
+    return {
+      proposal: result.text,
+      costUsd: result.costUsd,
+      isError: result.isError || !result.text.trim(),
+    };
   }
 
   /**
