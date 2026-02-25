@@ -605,6 +605,125 @@ describe("executeSubtasks", () => {
     );
   });
 
+  it("should accumulate totalVerifyMs across subtasks", async () => {
+    const subtaskRecords: SubTaskRecord[] = [
+      {
+        id: "A",
+        description: "alpha",
+        executor: "claude",
+        status: "pending",
+        order: 1,
+      },
+      {
+        id: "B",
+        description: "beta",
+        executor: "claude",
+        status: "pending",
+        order: 2,
+      },
+    ];
+
+    let currentTask = makeTask(subtaskRecords);
+
+    // Stub Date.now to simulate verify taking 50ms per call
+    const realDateNow = Date.now;
+    let fakeTime = 1000;
+    let hardVerifyCalls = 0;
+    Date.now = () => fakeTime;
+
+    try {
+      const loop = buildStub({
+        taskStore: {
+          getTask: async () => structuredClone(currentTask),
+          updateTask: async (_id, updates) => {
+            if (updates.subtasks) {
+              currentTask = {
+                ...currentTask,
+                subtasks: updates.subtasks as SubTaskRecord[],
+              };
+            }
+          },
+          addLog: async () => {},
+        },
+        workerExecute: async () => makeSessionResult(),
+        hardVerify: async () => {
+          hardVerifyCalls++;
+          // Advance time by 50ms during each verify call
+          fakeTime += 50;
+          return { passed: true };
+        },
+        costTracker: { addCost: async () => {} },
+      });
+
+      const result = await (loop as unknown as Record<string, Function>)[
+        "executeSubtasks"
+      ](
+        currentTask,
+        [
+          { description: "alpha", order: 1 },
+          { description: "beta", order: 2 },
+        ],
+        {
+          baselineErrors: 0,
+          startCommit: "abc123",
+        },
+      );
+
+      assert.ok(result.success, "executeSubtasks should succeed");
+      assert.equal(
+        hardVerifyCalls,
+        2,
+        "hardVerify should be called once per subtask",
+      );
+      assert.equal(
+        result.totalVerifyMs,
+        100,
+        "totalVerifyMs should be sum of per-subtask verify durations (50 + 50 = 100)",
+      );
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+
+  it("should return totalVerifyMs=0 on early failure before any verify", async () => {
+    const subtaskRecords: SubTaskRecord[] = [
+      {
+        id: "1",
+        description: "only subtask",
+        executor: "claude",
+        status: "pending",
+        order: 1,
+      },
+    ];
+
+    const currentTask = makeTask(subtaskRecords);
+
+    const loop = buildStub({
+      taskStore: {
+        getTask: async () => null,
+        updateTask: async () => {},
+        addLog: async () => {},
+      },
+      workerExecute: async () => makeSessionResult(),
+      hardVerify: async () => ({ passed: true }),
+      costTracker: { addCost: async () => {} },
+    });
+
+    const result = await (loop as unknown as Record<string, Function>)[
+      "executeSubtasks"
+    ](currentTask, [{ description: "only subtask", order: 1 }], {
+      baselineErrors: 0,
+      startCommit: "abc123",
+    });
+
+    assert.equal(result.success, false, "Should fail when task disappears");
+    assert.equal(
+      result.totalVerifyMs,
+      0,
+      "totalVerifyMs should be 0 when no verify ran",
+    );
+  });
+
   it("should fail when patchSubtask pre-read returns task without matching subtask", async () => {
     // Simulates a race: subtask existed at entry time but was removed before
     // patchSubtask's pre-read. The patchSubtask should return subtask-not-found

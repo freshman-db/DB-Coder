@@ -950,6 +950,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
           "verify",
           result.success ? "done" : "failed",
           verification.reason,
+          result.totalVerifyMs,
         );
       } else {
         // Single-shot execution (with optional approved plan)
@@ -2048,13 +2049,15 @@ Respond with EXACTLY this JSON (no markdown):
     sessionId?: string;
     reason?: string;
     failureKind?: "task-gone" | "subtask-not-found";
+    totalVerifyMs: number;
   }> {
+    let totalVerifyMs = 0;
     // Re-read task from DB to ensure subtasks array is fresh
     const freshTask = await this.taskStore.getTask(task.id);
     if (!freshTask) {
       const reason = `Task ${task.id} disappeared before subtask execution`;
       log.error(reason);
-      return { success: false, reason };
+      return { success: false, reason, totalVerifyMs };
     }
     task = freshTask;
 
@@ -2125,7 +2128,12 @@ Respond with EXACTLY this JSON (no markdown):
               ? `Task ${task.id} disappeared during running-status write`
               : `Subtask ${st.subtaskId} not found in task ${task.id} during running-status write`;
           log.error(reason);
-          return { success: false, reason, failureKind: result.reason };
+          return {
+            success: false,
+            reason,
+            failureKind: result.reason,
+            totalVerifyMs,
+          };
         }
         task = result.task;
       }
@@ -2169,7 +2177,12 @@ Respond with EXACTLY this JSON (no markdown):
                 ? `Task ${task.id} disappeared during error-status write`
                 : `Subtask ${st.subtaskId} not found in task ${task.id} during error-status write`;
             log.error(reason);
-            return { success: false, reason, failureKind: result.reason };
+            return {
+              success: false,
+              reason,
+              failureKind: result.reason,
+              totalVerifyMs,
+            };
           }
           task = result.task;
         } else {
@@ -2177,18 +2190,20 @@ Respond with EXACTLY this JSON (no markdown):
           if (!refreshed) {
             const reason = `Task ${task.id} disappeared during subtask error processing`;
             log.error(reason);
-            return { success: false, reason };
+            return { success: false, reason, totalVerifyMs };
           }
           task = refreshed;
         }
       }
 
       // Per-subtask hard verify with HALT retry loop — always runs
+      const verifyStart = Date.now();
       const verification = await this.hardVerify(
         opts.baselineErrors,
         opts.startCommit,
         this.config.projectPath,
       );
+      totalVerifyMs += Date.now() - verifyStart;
       if (!verification.passed) {
         const maxRetries = this.config.values.autonomy.maxRetries;
         let fixAttempts = 0;
@@ -2232,11 +2247,13 @@ Respond with EXACTLY this JSON (no markdown):
             };
             break;
           }
+          const retryVerifyStart = Date.now();
           lastVerification = await this.hardVerify(
             opts.baselineErrors,
             opts.startCommit,
             this.config.projectPath,
           );
+          totalVerifyMs += Date.now() - retryVerifyStart;
         }
 
         if (!lastVerification.passed) {
@@ -2268,7 +2285,12 @@ Respond with EXACTLY this JSON (no markdown):
                   ? `Task ${task.id} disappeared during verification-failure write`
                   : `Subtask ${st.subtaskId} not found in task ${task.id} during verification-failure write`;
               log.error(reason);
-              return { success: false, reason, failureKind: result.reason };
+              return {
+                success: false,
+                reason,
+                failureKind: result.reason,
+                totalVerifyMs,
+              };
             }
             task = result.task;
           }
@@ -2276,7 +2298,7 @@ Respond with EXACTLY this JSON (no markdown):
           const fullReason = subtaskWorkerErrMsg
             ? `${verifyReason} (worker also reported: ${result.errors.join("; ") || "unknown error"})`
             : verifyReason;
-          return { success: false, reason: fullReason };
+          return { success: false, reason: fullReason, totalVerifyMs };
         }
       }
 
@@ -2291,7 +2313,12 @@ Respond with EXACTLY this JSON (no markdown):
               ? `Task ${task.id} disappeared during done-status write`
               : `Subtask ${st.subtaskId} not found in task ${task.id} during done-status write`;
           log.error(reason);
-          return { success: false, reason, failureKind: result.reason };
+          return {
+            success: false,
+            reason,
+            failureKind: result.reason,
+            totalVerifyMs,
+          };
         }
         task = result.task;
       } else {
@@ -2299,7 +2326,7 @@ Respond with EXACTLY this JSON (no markdown):
         if (!refreshed) {
           const reason = `Task ${task.id} disappeared after marking subtask done`;
           log.error(reason);
-          return { success: false, reason };
+          return { success: false, reason, totalVerifyMs };
         }
         task = refreshed;
       }
@@ -2308,7 +2335,7 @@ Respond with EXACTLY this JSON (no markdown):
       lastSuccessfulSessionId = result.sessionId;
     }
 
-    return { success: true };
+    return { success: true, totalVerifyMs };
   }
 
   private async workerFix(
@@ -3260,11 +3287,13 @@ Rules:
     phase: string,
     result: "done" | "failed" | "skipped",
     summary?: string,
+    durationOverrideMs?: number,
   ): void {
     const now = Date.now();
     this.cycleSteps = this.cycleSteps.map((s) => {
       if (s.phase !== phase) return s;
-      const durationMs = s.startedAt ? now - s.startedAt : undefined;
+      const durationMs =
+        durationOverrideMs ?? (s.startedAt ? now - s.startedAt : undefined);
       return {
         ...s,
         status: result as CycleStepStatus,
