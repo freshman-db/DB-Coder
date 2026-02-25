@@ -1133,13 +1133,16 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
             singleVerify.reason,
           );
           if (!singleVerify.passed) {
-            try {
+            const executeStep = this.cycleSteps.find(
+              (s) => s.phase === "execute",
+            );
+            if (executeStep?.startedAt) {
               this.updateStepStatus("execute", "failed", singleVerify.reason);
-            } catch (statusErr) {
-              log.warn(
-                "updateStepStatus('execute') failed after verify, continuing with failed verification result",
-                { statusErr },
-              );
+            } else {
+              log.info("Skipping execute step status update: step not active", {
+                hasStep: !!executeStep,
+                hasStartedAt: !!executeStep?.startedAt,
+              });
             }
           }
         } catch (verifyErr) {
