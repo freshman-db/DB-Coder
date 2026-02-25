@@ -934,17 +934,17 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
         if (!result.success)
           verification.reason = result.reason || "Subtask verification failed";
         this.endStep("execute", result.success ? "done" : "failed");
-        this.beginStep("verify");
-        this.endStep(
-          "verify",
-          result.success ? "done" : "failed",
-          verification.reason,
-        );
         this.eventBus.emit(
           this.makeEvent("execute", "after", {
             startCommit,
             result: { costUsd: 0, durationMs: 0 },
           }),
+        );
+        this.beginStep("verify");
+        this.endStep(
+          "verify",
+          result.success ? "done" : "failed",
+          verification.reason,
         );
       } else {
         // Single-shot execution (with optional approved plan)
