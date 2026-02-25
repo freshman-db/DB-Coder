@@ -202,18 +202,14 @@ function normalizeSubtasks(
       valid.push(item as Record<string, unknown>);
     } else {
       const descPreview =
-        typeof item === "object" &&
-        item !== null &&
-        typeof (item as Record<string, unknown>).description === "string"
-          ? ((item as Record<string, unknown>).description as string)
+        typeof item === "object" && item !== null && "description" in item
+          ? String((item as Record<string, unknown>).description).slice(0, 120)
           : undefined;
       log.warn(
         "normalizeSubtasks: dropping invalid subtask item (missing string description)",
         {
           type: typeof item,
-          descriptionPreview: descPreview
-            ? descPreview.slice(0, 120)
-            : undefined,
+          descriptionPreview: descPreview,
         },
       );
     }
