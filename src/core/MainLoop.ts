@@ -2030,6 +2030,9 @@ Respond with EXACTLY this JSON (no markdown):
       }
     }
     const persistedIds = new Set((task.subtasks ?? []).map((s) => s.id));
+    const persistedOrderById = new Map(
+      (task.subtasks ?? []).map((s) => [s.id, s.order]),
+    );
     const withId = subtasks.map((st, i) => {
       const matchedId = orderToId.get(st.order);
       if (matchedId) {
@@ -2037,12 +2040,15 @@ Respond with EXACTLY this JSON (no markdown):
       }
       const fallback = String(i + 1);
       if (persistedIds.has(fallback)) {
-        const persistedOrder = (task.subtasks ?? []).find(
-          (s) => s.id === fallback,
-        )?.order;
-        if (persistedOrder === st.order) {
+        const persistedOrder = persistedOrderById.get(fallback);
+        if (
+          persistedOrder == null ||
+          String(persistedOrder) === String(st.order)
+        ) {
           log.warn(
-            `No persisted subtask found for order=${st.order}, using fallback id=${fallback}`,
+            persistedOrder == null
+              ? `No persisted subtask found for order=${st.order}, fallback id=${fallback} has no persisted order, assuming compatible`
+              : `No persisted subtask found for order=${st.order}, using fallback id=${fallback}`,
           );
           return { ...st, subtaskId: fallback };
         }
