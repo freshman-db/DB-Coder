@@ -621,12 +621,14 @@ export class MainLoop {
           updates.plan = { complexity: decision.complexity };
         }
         if (decision.subtasks && decision.subtasks.length > 0) {
+          const rawOrders = decision.subtasks.map((st, i) => st.order ?? i + 1);
+          const hasGaps = new Set(rawOrders).size !== rawOrders.length;
           updates.subtasks = decision.subtasks.map((st, i) => ({
             id: String(i + 1),
             description: st.description,
             executor: "claude" as const,
             status: "pending" as const,
-            order: st.order ?? i + 1,
+            order: hasGaps ? i + 1 : (st.order ?? i + 1),
           }));
         }
         await this.taskStore.updateTask(task.id, updates);
@@ -896,8 +898,19 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
       };
 
       if (brainOpts?.subtasks && brainOpts.subtasks.length > 0) {
+        // Normalize orders to match persisted subtasks
+        const normalizedSubtasks = brainOpts.subtasks.map((st, i) => ({
+          ...st,
+          order: typeof st.order === "number" ? st.order : i + 1,
+        }));
+        // Deduplicate: if any orders collide, fall back to sequential
+        const orderSet = new Set(normalizedSubtasks.map((s) => s.order));
+        const subtasksForExec =
+          orderSet.size !== normalizedSubtasks.length
+            ? normalizedSubtasks.map((st, i) => ({ ...st, order: i + 1 }))
+            : normalizedSubtasks;
         // Subtask execution loop
-        const result = await this.executeSubtasks(task, brainOpts.subtasks, {
+        const result = await this.executeSubtasks(task, subtasksForExec, {
           persona: brainOpts.persona,
           taskType: brainOpts.taskType,
           complexity: brainOpts.complexity,
@@ -2005,13 +2018,18 @@ Respond with EXACTLY this JSON (no markdown):
         }
       }
     }
-    const withId = subtasks.map((st, i) => ({
-      ...st,
-      subtaskId:
-        orderToId.get(st.order) ??
-        (task.subtasks ?? [])[i]?.id ??
-        String(i + 1),
-    }));
+    const withId = subtasks.map((st) => {
+      const matchedId = orderToId.get(st.order);
+      if (!matchedId) {
+        log.warn(
+          `No persisted subtask found for order=${st.order}, using fallback id`,
+        );
+      }
+      return {
+        ...st,
+        subtaskId: matchedId ?? String(st.order),
+      };
+    });
     const sorted = withId.sort((a, b) => a.order - b.order);
 
     let lastSuccessfulSessionId: string | undefined;
