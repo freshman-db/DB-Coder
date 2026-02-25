@@ -909,6 +909,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
         if (!result.success)
           verification.reason = result.reason || "Subtask verification failed";
         this.endStep("execute", result.success ? "done" : "failed");
+        this.beginStep("verify");
         this.endStep(
           "verify",
           result.success ? "done" : "failed",
