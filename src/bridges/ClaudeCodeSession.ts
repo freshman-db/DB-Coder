@@ -75,12 +75,17 @@ export type StreamEvent = SDKMessage;
 // Type for the query function (allows injection for testing)
 export type QueryFn = typeof query;
 
+// Per-call mutable state, scoped to avoid cross-call interference.
+interface RunContext {
+  abortController: AbortController;
+  killed: boolean;
+  query: Query | null;
+}
+
 // --- Session ---
 
 export class ClaudeCodeSession {
-  private activeQuery: Query | null = null;
-  private abortController: AbortController | null = null;
-  private killed = false;
+  private activeRun: RunContext | null = null;
   private sdkExtras: SdkExtras;
   private queryFn: QueryFn;
 
@@ -93,6 +98,12 @@ export class ClaudeCodeSession {
    * Run a prompt using the Agent SDK query() API.
    */
   async run(prompt: string, opts: SessionOptions): Promise<SessionResult> {
+    if (this.activeRun) {
+      throw new Error(
+        "ClaudeCodeSession.run() is not re-entrant: a query is already active",
+      );
+    }
+
     const start = Date.now();
     const { options, timeoutMs } = buildSdkOptions(
       prompt,
@@ -100,11 +111,15 @@ export class ClaudeCodeSession {
       this.sdkExtras,
     );
 
-    // Set up timeout via AbortController
+    // Per-call state: abort controller, killed flag, query handle
     const ac = options.abortController ?? new AbortController();
     options.abortController = ac;
-    this.abortController = ac;
-    this.killed = false;
+    const ctx: RunContext = {
+      abortController: ac,
+      killed: false,
+      query: null,
+    };
+    this.activeRun = ctx;
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
@@ -121,7 +136,7 @@ export class ClaudeCodeSession {
 
     try {
       const q = this.queryFn({ prompt, options });
-      this.activeQuery = q;
+      ctx.query = q;
 
       const result = await collectResult(q, {
         onText: opts.onText,
@@ -150,8 +165,8 @@ export class ClaudeCodeSession {
       const errMsg = err instanceof Error ? err.message : String(err);
       const isAbort = err instanceof Error && err.name === "AbortError";
 
-      // Distinguish manual kill() from timeout
-      if (this.killed) {
+      // Read per-call killed flag (not instance state)
+      if (ctx.killed) {
         return this.makeErrorResult(
           -2,
           ["Session aborted by kill()"],
@@ -170,8 +185,10 @@ export class ClaudeCodeSession {
       log.error("ClaudeCodeSession: query failed", { error: errMsg });
       return this.makeErrorResult(1, [errMsg], Date.now() - start);
     } finally {
-      this.activeQuery = null;
-      this.abortController = null;
+      // Only clear if we are still the active run (defensive)
+      if (this.activeRun === ctx) {
+        this.activeRun = null;
+      }
     }
   }
 
@@ -201,11 +218,9 @@ export class ClaudeCodeSession {
 
   /** Abort the running query (manual kill, distinct from timeout) */
   kill(): void {
-    this.killed = true;
-    if (this.abortController) {
-      this.abortController.abort();
-      this.abortController = null;
-    }
-    this.activeQuery = null;
+    const ctx = this.activeRun;
+    if (!ctx) return;
+    ctx.killed = true;
+    ctx.abortController.abort();
   }
 }

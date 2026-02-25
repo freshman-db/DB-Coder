@@ -27,6 +27,7 @@ import { TASK_DESC_MAX_LENGTH } from "./types/constants.js";
 import { discoverPlugins } from "./bridges/pluginDiscovery.js";
 import { buildHooks } from "./bridges/hooks.js";
 import type { SdkExtras } from "./bridges/buildSdkOptions.js";
+import { createSystemDataMcpServer } from "./mcp/SystemDataMcp.js";
 
 const program = new Command()
   .name("db-coder")
@@ -111,7 +112,12 @@ program
         log.debug(`Tool used: ${name}`);
       },
     });
-    const sdkExtras: SdkExtras = { plugins, hooks };
+    const systemDataMcp = createSystemDataMcpServer({ projectPath, taskStore });
+    const sdkExtras: SdkExtras = {
+      plugins,
+      hooks,
+      mcpServers: { "db-coder-system-data": systemDataMcp },
+    };
 
     const mainLoop = new MainLoop(
       config,

@@ -112,6 +112,9 @@ export class CodexBridge implements CodingAgent {
         },
       });
 
+      const numTurns = events.filter(e => e.type === 'turn.completed').length || undefined;
+      const stopReason = exitCode === -1 ? 'timeout' : exitCode !== 0 ? 'error' : undefined;
+
       // Non-zero exit code means Codex CLI itself failed (bad flags, crash, etc.)
       if (exitCode !== 0) {
         return {
@@ -119,6 +122,8 @@ export class CodexBridge implements CodingAgent {
           output: stderr || `codex exec failed with exit code ${exitCode}`,
           cost_usd: extractCost(events),
           duration_ms: Date.now() - start,
+          numTurns,
+          stopReason,
         };
       }
 
@@ -136,6 +141,8 @@ export class CodexBridge implements CodingAgent {
         cost_usd: cost,
         duration_ms: Date.now() - start,
         structured: output ? tryParseJson(output) : undefined,
+        numTurns,
+        stopReason,
       };
     } catch (err) {
       log.error('CodexBridge execute failed', err);

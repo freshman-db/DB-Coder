@@ -279,6 +279,74 @@ test("POST /api/tasks with invalid body returns 400", async () => {
   assert.equal(createCalls, 0);
 });
 
+test("GET /api/tasks/pending-review returns pending_review tasks array", async () => {
+  const expectedTasks = [
+    {
+      id: "task-pr-1",
+      task_description: "Review auth flow",
+      status: "pending_review",
+    },
+    {
+      id: "task-pr-2",
+      task_description: "Review cache layer",
+      status: "pending_review",
+    },
+  ] as unknown as Awaited<ReturnType<TaskStore["getPendingReviewTasks"]>>;
+  let requestedProjectPath: string | undefined;
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getPendingReviewTasks: async (projectPath) => {
+        requestedProjectPath = projectPath;
+        return expectedTasks;
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "GET",
+    url: "/api/tasks/pending-review",
+    token,
+  });
+
+  assert.equal(state.statusCode, 200);
+  assert.deepEqual(parseJson<typeof expectedTasks>(state), expectedTasks);
+  assert.equal(requestedProjectPath, "/workspace/project");
+});
+
+test("GET /api/tasks/:id still works after pending-review route reorder", async () => {
+  const expectedTask = {
+    id: "task-uuid-123",
+    task_description: "Implement feature X",
+    status: "done",
+  } as unknown as Awaited<ReturnType<TaskStore["getTask"]>>;
+  const expectedLogs = [
+    { id: 1, phase: "execute", output_summary: "done" },
+  ] as unknown as Awaited<ReturnType<TaskStore["getTaskLogs"]>>;
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getTask: async (id) => {
+        if (id === "task-uuid-123") return expectedTask;
+        return null;
+      },
+      getTaskLogs: async () => expectedLogs,
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "GET",
+    url: "/api/tasks/task-uuid-123",
+    token,
+  });
+
+  assert.equal(state.statusCode, 200);
+  const body = parseJson<Record<string, unknown>>(state);
+  assert.equal(body.id, "task-uuid-123");
+  assert.equal(body.task_description, "Implement feature X");
+  assert.deepEqual(body.logs, expectedLogs);
+});
+
 test("GET /api/plans/:id/messages parses plan ID and returns messages", async () => {
   let requestedId: number | undefined;
   const expectedMessages = [

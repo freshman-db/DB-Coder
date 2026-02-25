@@ -47,7 +47,11 @@ const DEFAULTS: DbCoderConfig = {
     claudeMemUrl: "http://localhost:37777",
     pgConnectionString: "postgresql://db:db@localhost:5432/db_coder",
   },
-  git: { branchPrefix: "db-coder/", protectedBranches: ["main", "master"] },
+  git: {
+    branchPrefix: "db-coder/",
+    protectedBranches: ["main", "master"],
+    branchRetentionDays: 7,
+  },
   server: { port: 18800, host: "127.0.0.1" },
   mcp: { enabled: true },
   plugins: {},
@@ -86,7 +90,21 @@ function deepMerge(
   target: DbCoderConfig,
   source: DeepPartial<DbCoderConfig>,
 ): DbCoderConfig {
-  const result = { ...target } as Record<string, unknown>;
+  return mergeObjects(
+    target as unknown as Record<string, unknown>,
+    source as unknown as Record<string, unknown>,
+    0,
+  ) as unknown as DbCoderConfig;
+}
+
+const MAX_MERGE_DEPTH = 3;
+
+function mergeObjects(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+  depth: number,
+): Record<string, unknown> {
+  const result = { ...target };
   for (const [key, sv] of Object.entries(source)) {
     if (
       sv !== undefined &&
@@ -94,12 +112,27 @@ function deepMerge(
       typeof sv === "object" &&
       !Array.isArray(sv)
     ) {
-      result[key] = { ...(result[key] as Record<string, unknown>), ...sv };
+      const tv = result[key];
+      if (
+        depth < MAX_MERGE_DEPTH &&
+        tv !== undefined &&
+        tv !== null &&
+        typeof tv === "object" &&
+        !Array.isArray(tv)
+      ) {
+        result[key] = mergeObjects(
+          tv as Record<string, unknown>,
+          sv as Record<string, unknown>,
+          depth + 1,
+        );
+      } else {
+        result[key] = { ...sv };
+      }
     } else if (sv !== undefined) {
       result[key] = sv;
     }
   }
-  return result as unknown as DbCoderConfig;
+  return result;
 }
 
 function loadJsonFile(path: string): DeepPartial<DbCoderConfig> | null {
@@ -138,6 +171,15 @@ function persistApiToken(
   // Tighten permissions on pre-existing files that may have been created with a
   // permissive umask (writeFileSync mode only applies when creating a new file).
   chmodSync(path, 0o600);
+}
+
+const MODEL_MAP: Record<string, string> = {
+  opus: "claude-opus-4-6",
+  sonnet: "claude-sonnet-4-6",
+};
+
+export function resolveModelId(shortName: string): string {
+  return MODEL_MAP[shortName] ?? MODEL_MAP.sonnet;
 }
 
 export class Config {

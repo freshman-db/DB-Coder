@@ -1,13 +1,25 @@
-import type postgres from 'postgres';
-import type { Task, TaskLog, TaskStatus, ScanResult, PlanDraft, PlanReviewStatus, PlanDraftAnnotation, ChatMessage, ChatStatus, OperationalMetrics, Persona } from './types.js';
-import type { EvaluationScore } from '../core/types.js';
+import type postgres from "postgres";
+import type {
+  Task,
+  TaskLog,
+  TaskStatus,
+  ScanResult,
+  PlanDraft,
+  PlanReviewStatus,
+  PlanDraftAnnotation,
+  ChatMessage,
+  ChatStatus,
+  OperationalMetrics,
+  Persona,
+} from "./types.js";
+import type { EvaluationScore } from "../core/types.js";
 import type {
   ChatMessageMetadata,
   ReviewAnnotationsJson,
   TaskPlanJson,
-} from './schemas.js';
-import { closeDb, getDb } from '../db.js';
-import { log } from '../utils/logger.js';
+} from "./schemas.js";
+import { closeDb, getDb } from "../db.js";
+import { log } from "../utils/logger.js";
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS tasks (
@@ -208,22 +220,39 @@ CREATE TABLE IF NOT EXISTS personas (
 );
 `;
 
-type TaskUpdateInput = Partial<Pick<Task, 'phase' | 'status' | 'plan' | 'subtasks' | 'review_results' | 'iteration' | 'total_cost_usd' | 'git_branch' | 'start_commit'>>
-  & { evaluation_score?: EvaluationScore; evaluation_reasoning?: string };
+type TaskUpdateInput = Partial<
+  Pick<
+    Task,
+    | "phase"
+    | "status"
+    | "plan"
+    | "subtasks"
+    | "review_results"
+    | "iteration"
+    | "total_cost_usd"
+    | "git_branch"
+    | "start_commit"
+  >
+> & { evaluation_score?: EvaluationScore; evaluation_reasoning?: string };
 const TASK_UPDATE_FIELDS: Array<keyof TaskUpdateInput> = [
-  'phase',
-  'status',
-  'plan',
-  'subtasks',
-  'review_results',
-  'iteration',
-  'total_cost_usd',
-  'git_branch',
-  'start_commit',
-  'evaluation_score',
-  'evaluation_reasoning',
+  "phase",
+  "status",
+  "plan",
+  "subtasks",
+  "review_results",
+  "iteration",
+  "total_cost_usd",
+  "git_branch",
+  "start_commit",
+  "evaluation_score",
+  "evaluation_reasoning",
 ];
-const TASK_JSONB_FIELDS = new Set<keyof TaskUpdateInput>(['plan', 'subtasks', 'review_results', 'evaluation_score']);
+const TASK_JSONB_FIELDS = new Set<keyof TaskUpdateInput>([
+  "plan",
+  "subtasks",
+  "review_results",
+  "evaluation_score",
+]);
 
 export class TaskStore {
   private sql: postgres.Sql | null;
@@ -236,7 +265,7 @@ export class TaskStore {
   /** Returns the live SQL connection, or throws if this instance has been closed. */
   private getSql(): postgres.Sql {
     if (this.isClosed || !this.sql) {
-      throw new Error('TaskStore is closed');
+      throw new Error("TaskStore is closed");
     }
     return this.sql;
   }
@@ -244,12 +273,17 @@ export class TaskStore {
   async init(): Promise<void> {
     const sql = this.getSql();
     await sql.unsafe(SCHEMA_SQL);
-    log.info('TaskStore initialized');
+    log.info("TaskStore initialized");
   }
 
   // --- Tasks ---
 
-  async createTask(projectPath: string, description: string, priority = 2, dependsOn: string[] = []): Promise<Task> {
+  async createTask(
+    projectPath: string,
+    description: string,
+    priority = 2,
+    dependsOn: string[] = [],
+  ): Promise<Task> {
     const sql = this.getSql();
     const [row] = await sql<Task[]>`
       INSERT INTO tasks (project_path, task_description, priority, depends_on)
@@ -290,7 +324,8 @@ export class TaskStore {
     const offset = (page - 1) * pageSize;
 
     const statuses = status ? (Array.isArray(status) ? status : [status]) : [];
-    const statusFilter = statuses.length > 0 ? sql`AND status = ANY(${statuses})` : sql``;
+    const statusFilter =
+      statuses.length > 0 ? sql`AND status = ANY(${statuses})` : sql``;
 
     const [countRow] = await sql<[{ count: string }]>`
       SELECT COUNT(*)::text AS count FROM tasks
@@ -336,9 +371,9 @@ export class TaskStore {
       vals.push(value);
     }
     if (sets.length === 0) return;
-    sets.push('updated_at = NOW()');
+    sets.push("updated_at = NOW()");
     await sql.unsafe(
-      `UPDATE tasks SET ${sets.join(', ')} WHERE id = $${vals.length + 1}`,
+      `UPDATE tasks SET ${sets.join(", ")} WHERE id = $${vals.length + 1}`,
       [...vals, id] as postgres.ParameterOrJSON<never>[],
     );
   }
@@ -346,7 +381,7 @@ export class TaskStore {
   async incrementTaskCost(taskId: string, amount: number): Promise<void> {
     const sql = this.getSql();
     await sql.unsafe(
-      'UPDATE tasks SET total_cost_usd = COALESCE(total_cost_usd, 0) + $1 WHERE id = $2',
+      "UPDATE tasks SET total_cost_usd = COALESCE(total_cost_usd, 0) + $1 WHERE id = $2",
       [amount, taskId] as postgres.ParameterOrJSON<never>[],
     );
   }
@@ -366,12 +401,14 @@ export class TaskStore {
     if (activeTasks.length === 0) return 0;
 
     const recoveredWithDoneSubtasks = activeTasks
-      .map(task => ({ id: task.id, done: countDoneSubtasks(task.subtasks) }))
-      .filter(task => task.done > 0)
-      .map(task => `${task.id}: ${task.done} done`);
+      .map((task) => ({ id: task.id, done: countDoneSubtasks(task.subtasks) }))
+      .filter((task) => task.done > 0)
+      .map((task) => `${task.id}: ${task.done} done`);
 
     if (recoveredWithDoneSubtasks.length > 0) {
-      log.warn(`Recovering active tasks with completed subtasks (${recoveredWithDoneSubtasks.join(', ')})`);
+      log.warn(
+        `Recovering active tasks with completed subtasks (${recoveredWithDoneSubtasks.join(", ")})`,
+      );
     }
 
     const result = await sql`
@@ -399,7 +436,10 @@ export class TaskStore {
     return row ?? null;
   }
 
-  async findSimilarTask(projectPath: string, description: string): Promise<Task | null> {
+  async findSimilarTask(
+    projectPath: string,
+    description: string,
+  ): Promise<Task | null> {
     const sql = this.getSql();
     const [row] = await sql<Task[]>`
       SELECT *, similarity(task_description, ${description}) AS sim
@@ -413,7 +453,10 @@ export class TaskStore {
     return row ?? null;
   }
 
-  async findSimilarCompletedTask(projectPath: string, description: string): Promise<Task | null> {
+  async findSimilarCompletedTask(
+    projectPath: string,
+    description: string,
+  ): Promise<Task | null> {
     const sql = this.getSql();
     const [row] = await sql<Task[]>`
       SELECT *, similarity(task_description, ${description}) AS sim
@@ -428,7 +471,11 @@ export class TaskStore {
   }
 
   /** Check if a similar task has recently failed/blocked (cooldown period) */
-  async hasRecentlyFailedSimilar(projectPath: string, description: string, cooldownHours = 24): Promise<boolean> {
+  async hasRecentlyFailedSimilar(
+    projectPath: string,
+    description: string,
+    cooldownHours = 24,
+  ): Promise<boolean> {
     const sql = this.getSql();
     const [row] = await sql<[{ found: boolean }]>`
       SELECT EXISTS(
@@ -444,7 +491,7 @@ export class TaskStore {
 
   // --- Logs ---
 
-  async addLog(entry: Omit<TaskLog, 'id' | 'created_at'>): Promise<void> {
+  async addLog(entry: Omit<TaskLog, "id" | "created_at">): Promise<void> {
     const sql = this.getSql();
     await sql`
       INSERT INTO task_logs (task_id, phase, agent, input_summary, output_summary, cost_usd, duration_ms)
@@ -474,18 +521,28 @@ export class TaskStore {
     `;
   }
 
-  async getDailyCost(date?: string): Promise<{ total_cost_usd: number; task_count: number }> {
+  async getDailyCost(
+    date?: string,
+  ): Promise<{ total_cost_usd: number; task_count: number }> {
     const sql = this.getSql();
     const d = date ?? new Date().toISOString().slice(0, 10);
-    const [row] = await sql<Array<{ total_cost_usd: number; task_count: number }>>`
+    const [row] = await sql<
+      Array<{ total_cost_usd: number; task_count: number }>
+    >`
       SELECT total_cost_usd, task_count FROM daily_costs WHERE date = ${d}
     `;
     return row ?? { total_cost_usd: 0, task_count: 0 };
   }
 
-  async getRecentCosts(days = 7): Promise<Array<{ date: string; total_cost_usd: number; task_count: number }>> {
+  async getRecentCosts(
+    days = 7,
+  ): Promise<
+    Array<{ date: string; total_cost_usd: number; task_count: number }>
+  > {
     const sql = this.getSql();
-    return sql<Array<{ date: string; total_cost_usd: number; task_count: number }>>`
+    return sql<
+      Array<{ date: string; total_cost_usd: number; task_count: number }>
+    >`
       SELECT date::text, total_cost_usd, task_count FROM daily_costs
       ORDER BY date DESC LIMIT ${days}
     `;
@@ -503,10 +560,24 @@ export class TaskStore {
     `;
   }
 
-  async getOperationalMetrics(projectPath: string): Promise<OperationalMetrics> {
+  async getOperationalMetrics(
+    projectPath: string,
+  ): Promise<OperationalMetrics> {
     const sql = this.getSql();
-    const [cycleRows, passRateRows, queueDepthRows, statusRows, dailyCost, recentScans] = await Promise.all([
-      sql<Array<{ cycle_count: number | string | null; avg_cycle_duration_ms: number | string | null }>>`
+    const [
+      cycleRows,
+      passRateRows,
+      queueDepthRows,
+      statusRows,
+      dailyCost,
+      recentScans,
+    ] = await Promise.all([
+      sql<
+        Array<{
+          cycle_count: number | string | null;
+          avg_cycle_duration_ms: number | string | null;
+        }>
+      >`
         SELECT
           COUNT(*)::int AS cycle_count,
           COALESCE(AVG(cycle_duration_ms), 0) AS avg_cycle_duration_ms
@@ -519,7 +590,12 @@ export class TaskStore {
           GROUP BY t.id
         ) AS completed_cycles
       `,
-      sql<Array<{ done_count: number | string | null; failed_count: number | string | null }>>`
+      sql<
+        Array<{
+          done_count: number | string | null;
+          failed_count: number | string | null;
+        }>
+      >`
         SELECT
           COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0)::int AS done_count,
           COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0)::int AS failed_count
@@ -551,17 +627,23 @@ export class TaskStore {
     const totalCompleted = doneCount + failedCount;
     const taskPassRate = totalCompleted > 0 ? doneCount / totalCompleted : 0;
 
-    const tasksByStatus = statusRows.reduce<Record<string, number>>((acc, row) => {
-      if (!row?.status) {
+    const tasksByStatus = statusRows.reduce<Record<string, number>>(
+      (acc, row) => {
+        if (!row?.status) {
+          return acc;
+        }
+        acc[row.status] = toFiniteNumber(row.count);
         return acc;
-      }
-      acc[row.status] = toFiniteNumber(row.count);
-      return acc;
-    }, {});
+      },
+      {},
+    );
 
     const recentHealthScores = recentScans
-      .map(scan => scan.health_score)
-      .filter((score): score is number => typeof score === 'number' && Number.isFinite(score));
+      .map((scan) => scan.health_score)
+      .filter(
+        (score): score is number =>
+          typeof score === "number" && Number.isFinite(score),
+      );
 
     return {
       cycleCount: toFiniteNumber(cycleRow?.cycle_count),
@@ -583,6 +665,83 @@ export class TaskStore {
     `;
   }
 
+  // --- Pipeline Health ---
+
+  async getBlockedTaskSummary(
+    projectPath: string,
+    windowHours = 48,
+    limit = 20,
+  ): Promise<{
+    blockedCount: number;
+    recentFailures: Array<{
+      taskId: string;
+      description: string;
+      phase: string;
+      agent: string;
+      outputSummary: string;
+      updatedAt: Date;
+    }>;
+  }> {
+    const sql = this.getSql();
+    const [countRow] = await sql<Array<{ count: number }>>`
+      SELECT COUNT(*)::int AS count FROM tasks
+      WHERE project_path = ${projectPath}
+        AND status IN ('blocked', 'failed')
+        AND updated_at > NOW() - make_interval(hours => ${windowHours})
+    `;
+    const blockedCount = countRow?.count ?? 0;
+
+    const recentFailures = await sql<
+      Array<{
+        taskId: string;
+        description: string;
+        phase: string;
+        agent: string;
+        outputSummary: string;
+        updatedAt: Date;
+      }>
+    >`
+      SELECT
+        t.id AS "taskId",
+        t.task_description AS description,
+        COALESCE(lg.phase, t.phase) AS phase,
+        COALESCE(lg.agent, '') AS agent,
+        COALESCE(lg.output_summary, '') AS "outputSummary",
+        t.updated_at AS "updatedAt"
+      FROM tasks t
+      LEFT JOIN LATERAL (
+        SELECT phase, agent, output_summary
+        FROM task_logs
+        WHERE task_id = t.id
+        ORDER BY created_at DESC
+        LIMIT 1
+      ) lg ON true
+      WHERE t.project_path = ${projectPath}
+        AND t.status IN ('blocked', 'failed')
+        AND t.updated_at > NOW() - make_interval(hours => ${windowHours})
+      ORDER BY t.updated_at DESC
+      LIMIT ${limit}
+    `;
+
+    return { blockedCount, recentFailures };
+  }
+
+  async requeueBlockedTasks(
+    projectPath: string,
+    taskIds: string[],
+  ): Promise<number> {
+    if (taskIds.length === 0) return 0;
+    const sql = this.getSql();
+    const result = await sql`
+      UPDATE tasks
+      SET status = 'queued', iteration = 0, updated_at = NOW()
+      WHERE id = ANY(${taskIds})
+        AND project_path = ${projectPath}
+        AND status IN ('blocked', 'failed')
+    `;
+    return result.count;
+  }
+
   // --- Plan Drafts ---
 
   async getPlanDraft(id: number): Promise<PlanDraft | null> {
@@ -593,7 +752,10 @@ export class TaskStore {
     return row ?? null;
   }
 
-  async listPlanDrafts(projectPath: string, status?: PlanReviewStatus): Promise<PlanDraft[]> {
+  async listPlanDrafts(
+    projectPath: string,
+    status?: PlanReviewStatus,
+  ): Promise<PlanDraft[]> {
     const sql = this.getSql();
     if (status) {
       return sql<PlanDraft[]>`
@@ -609,7 +771,11 @@ export class TaskStore {
     `;
   }
 
-  async updatePlanDraftStatus(id: number, status: PlanReviewStatus, annotations?: PlanDraftAnnotation[]): Promise<void> {
+  async updatePlanDraftStatus(
+    id: number,
+    status: PlanReviewStatus,
+    annotations?: PlanDraftAnnotation[],
+  ): Promise<void> {
     const sql = this.getSql();
     if (annotations) {
       await sql`
@@ -638,7 +804,12 @@ export class TaskStore {
     return row;
   }
 
-  async addChatMessage(sessionId: number, role: string, content: string, metadata?: Record<string, unknown>): Promise<ChatMessage> {
+  async addChatMessage(
+    sessionId: number,
+    role: string,
+    content: string,
+    metadata?: Record<string, unknown>,
+  ): Promise<ChatMessage> {
     const sql = this.getSql();
     const [row] = await sql<ChatMessage[]>`
       INSERT INTO plan_chat_messages (session_id, role, content, metadata)
@@ -664,19 +835,25 @@ export class TaskStore {
     `;
   }
 
-  async updateChatSessionId(draftId: number, chatSessionId: string): Promise<void> {
+  async updateChatSessionId(
+    draftId: number,
+    chatSessionId: string,
+  ): Promise<void> {
     const sql = this.getSql();
     await sql`
       UPDATE plan_drafts SET chat_session_id = ${chatSessionId} WHERE id = ${draftId}
     `;
   }
 
-  async updatePlanDraftPlan(draftId: number, data: {
-    plan: unknown;
-    markdown: string;
-    reasoning: string;
-    cost_usd: number;
-  }): Promise<void> {
+  async updatePlanDraftPlan(
+    draftId: number,
+    data: {
+      plan: unknown;
+      markdown: string;
+      reasoning: string;
+      cost_usd: number;
+    },
+  ): Promise<void> {
     const sql = this.getSql();
     await sql`
       UPDATE plan_drafts
@@ -688,14 +865,21 @@ export class TaskStore {
     `;
   }
 
-
-  async getServiceState(projectPath: string, key: string): Promise<string | null> {
+  async getServiceState(
+    projectPath: string,
+    key: string,
+  ): Promise<string | null> {
     const sql = this.getSql();
-    const rows = await sql`SELECT value FROM service_state WHERE project_path = ${projectPath} AND key = ${key}`;
+    const rows =
+      await sql`SELECT value FROM service_state WHERE project_path = ${projectPath} AND key = ${key}`;
     return rows.length > 0 ? rows[0].value : null;
   }
 
-  async setServiceState(projectPath: string, key: string, value: string): Promise<void> {
+  async setServiceState(
+    projectPath: string,
+    key: string,
+    value: string,
+  ): Promise<void> {
     const sql = this.getSql();
     await sql`INSERT INTO service_state (project_path, key, value, updated_at)
               VALUES (${projectPath}, ${key}, ${value}, NOW())
@@ -706,7 +890,9 @@ export class TaskStore {
 
   async getPersona(name: string): Promise<Persona | null> {
     const sql = this.getSql();
-    const rows = await sql<Persona[]>`SELECT * FROM personas WHERE name = ${name} LIMIT 1`;
+    const rows = await sql<
+      Persona[]
+    >`SELECT * FROM personas WHERE name = ${name} LIMIT 1`;
     return rows[0] ?? null;
   }
 
@@ -715,7 +901,13 @@ export class TaskStore {
     return sql<Persona[]>`SELECT * FROM personas ORDER BY name`;
   }
 
-  async upsertPersona(p: { name: string; role: string; content: string; task_types: string[]; focus_areas: string[] }): Promise<Persona> {
+  async upsertPersona(p: {
+    name: string;
+    role: string;
+    content: string;
+    task_types: string[];
+    focus_areas: string[];
+  }): Promise<Persona> {
     const sql = this.getSql();
     const [row] = await sql<Persona[]>`
       INSERT INTO personas (name, role, content, task_types, focus_areas)
@@ -761,21 +953,21 @@ export class TaskStore {
 function countDoneSubtasks(subtasks: unknown): number {
   if (!Array.isArray(subtasks)) return 0;
   return subtasks.reduce((count, subtask) => {
-    if (typeof subtask !== 'object' || subtask === null) return count;
+    if (typeof subtask !== "object" || subtask === null) return count;
     const status = (subtask as { status?: unknown }).status;
-    return status === 'done' ? count + 1 : count;
+    return status === "done" ? count + 1 : count;
   }, 0);
 }
 
 function toFiniteNumber(value: unknown): number {
-  if (typeof value === 'number') {
+  if (typeof value === "number") {
     return Number.isFinite(value) ? value : 0;
   }
-  if (typeof value === 'string') {
+  if (typeof value === "string") {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : 0;
   }
-  if (typeof value === 'bigint') {
+  if (typeof value === "bigint") {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : 0;
   }

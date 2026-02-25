@@ -1,4 +1,8 @@
-import type { ReviewIssue, ReviewResult } from "../bridges/CodingAgent.js";
+import type {
+  PreExistingIssue,
+  ReviewIssue,
+  ReviewResult,
+} from "../bridges/CodingAgent.js";
 import { SUMMARY_PREVIEW_LEN } from "../types/constants.js";
 
 export const VALID_SEVERITIES = new Set([
@@ -19,6 +23,20 @@ export function getErrorMessage(err: unknown): string {
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function parsePreExistingIssues(raw: unknown): PreExistingIssue[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter(
+      (item): item is Record<string, unknown> =>
+        isRecord(item) && typeof item.description === "string",
+    )
+    .map((item) => ({
+      description: String(item.description),
+      file: typeof item.file === "string" ? item.file : undefined,
+      severity: typeof item.severity === "string" ? item.severity : undefined,
+    }));
 }
 
 export function isPositiveFinite(value: unknown): value is number {
@@ -151,6 +169,7 @@ export function tryParseReview(text: string): Omit<ReviewResult, "cost_usd"> {
             }))
         : [],
       summary: typeof parsed.summary === "string" ? parsed.summary : "",
+      preExistingIssues: parsePreExistingIssues(parsed.preExistingIssues),
     };
   }
 

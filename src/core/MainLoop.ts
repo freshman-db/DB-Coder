@@ -1,3 +1,4 @@
+import { resolveModelId } from "../config/Config.js";
 import type { Config } from "../config/Config.js";
 import type { TaskQueue } from "./TaskQueue.js";
 import type { CodexBridge } from "../bridges/CodexBridge.js";
@@ -10,7 +11,6 @@ import {
 import type { SdkExtras } from "../bridges/buildSdkOptions.js";
 import type { Task, SubTaskRecord } from "../memory/types.js";
 import type {
-  MergedReviewResult,
   LoopState,
   StatusSnapshot,
   CycleStep,
@@ -20,7 +20,6 @@ import type {
   TaskType,
 } from "./types.js";
 import { CYCLE_PIPELINE } from "./types.js";
-import type { ReviewResult, ReviewIssue } from "../bridges/CodingAgent.js";
 import {
   createBranch,
   switchBranch,
@@ -34,12 +33,12 @@ import {
   deleteBranch,
   listBranches,
   forceDeleteBranch,
+  getBranchHeadCommit,
   getDiffStats,
   getDiffSince,
 } from "../utils/git.js";
 import { log } from "../utils/logger.js";
 import { truncate, extractJsonFromText, isRecord } from "../utils/parse.js";
-import { wordJaccard } from "../utils/similarity.js";
 import {
   SUMMARY_PREVIEW_LEN,
   TASK_DESC_MAX_LENGTH,
@@ -131,6 +130,7 @@ export class MainLoop {
   private stoppedPromise: Promise<void> | null = null;
   private stoppedResolve: (() => void) | null = null;
   private tasksCompleted = 0;
+  private consecutiveRejections = 0;
   private brainSession!: ClaudeCodeSession;
   private workerSession!: ClaudeCodeSession;
   private discoveredModules: string[] = [];
@@ -636,11 +636,12 @@ export class MainLoop {
 
     const branchName = `${this.config.values.git.branchPrefix}${task.id.slice(0, BRANCH_ID_LENGTH)}`;
     let originalBranch = "main";
+    let startCommit = "";
 
     try {
       // 4. Prepare git branch
       originalBranch = await getCurrentBranch(projectPath).catch(() => "main");
-      const startCommit = await getHeadCommit(projectPath).catch(() => "");
+      startCommit = await getHeadCommit(projectPath).catch(() => "");
       const baselineErrors = await countTscErrors(projectPath);
 
       if (await branchExists(branchName, projectPath)) {
@@ -673,7 +674,7 @@ export class MainLoop {
           phase: "blocked",
         });
         await switchBranch(originalBranch, projectPath).catch(() => {});
-        await this.cleanupTaskBranch(branchName);
+        await this.cleanupTaskBranch(branchName, { force: true });
         this.setCurrentTaskId(null);
         this.currentTaskDescription = null;
         this.setState("idle");
@@ -866,13 +867,24 @@ export class MainLoop {
         ).catch(() => []);
         if (changedFiles.length > 0) {
           const reviewStart = Date.now();
+          const reviewDiff = await getDiffSince(startCommit, projectPath, {
+            ignoreWhitespace: true,
+          }).catch(() => "(diff unavailable)");
           const codexReview = await this.codex.review(
-            `You are an adversarial code reviewer. Presume issues exist — find them.
+            `You are an adversarial code reviewer. Review ONLY the changes in this diff.
+
+## Task
+${task.task_description}
 
 ## Changed Files
 ${changedFiles.join("\n")}
 
-## Review Focus Areas
+## Git Diff
+\`\`\`diff
+${reviewDiff}
+\`\`\`
+
+## Review Focus Areas (apply ONLY to the diff above, not pre-existing code)
 
 ### 1. Bugs & Logic Errors
 - Off-by-one errors, null dereference, race conditions
@@ -899,9 +911,14 @@ ${changedFiles.join("\n")}
 - "While I'm here" improvements mixed with the main change
 
 ## Rules
+- ONLY report issues introduced or worsened by THIS diff in the "issues" array.
+- If you notice pre-existing bugs/issues in touched files (NOT introduced by this diff), list them separately in "preExistingIssues".
 - Find 3-10 specific issues with file names and descriptions.
 - If fewer than 3 issues found, explain why the code quality is exceptional.
-- Be concrete — cite specific code patterns, not vague concerns.`,
+- Be concrete — cite specific code patterns, not vague concerns.
+
+## Output Format (JSON)
+{"passed": true/false, "issues": [...], "preExistingIssues": [{"description": "...", "file": "...", "severity": "high|medium|low"}], "summary": "..."}`,
             projectPath,
           );
           if (codexReview.cost_usd > 0)
@@ -942,6 +959,23 @@ ${changedFiles.join("\n")}
             cost_usd: codexReview.cost_usd,
             duration_ms: Date.now() - reviewStart,
           });
+
+          // Queue pre-existing issues as new tasks
+          const preExisting = codexReview.preExistingIssues ?? [];
+          for (const issue of preExisting) {
+            const desc = issue.file
+              ? `fix: ${issue.description} (${issue.file})`
+              : `fix: ${issue.description}`;
+            const isDuplicate = await this.taskStore.hasRecentlyFailedSimilar(
+              projectPath,
+              desc,
+              48,
+            );
+            if (!isDuplicate) {
+              await this.taskStore.createTask(projectPath, desc, 3);
+              log.info(`Queued pre-existing issue: ${desc.slice(0, 100)}`);
+            }
+          }
         }
       }
 
@@ -984,6 +1018,7 @@ ${changedFiles.join("\n")}
           phase: "done",
         });
         this.endStep("merge", "done", "Merged");
+        this.consecutiveRejections = 0;
         this.eventBus.emit(
           this.makeEvent("merge", "after", {
             merged: true,
@@ -1003,7 +1038,7 @@ ${changedFiles.join("\n")}
         }
       } else {
         await switchBranch(originalBranch, projectPath).catch(() => {});
-        await this.cleanupTaskBranch(branchName);
+        await this.cleanupTaskBranch(branchName, { startCommit });
         log.warn(
           `Task rejected: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`,
         );
@@ -1013,6 +1048,16 @@ ${changedFiles.join("\n")}
         });
         this.endStep("merge", "failed", "Rejected");
         this.eventBus.emit(this.makeEvent("merge", "after", { merged: false }));
+
+        this.consecutiveRejections++;
+        if (this.consecutiveRejections >= 5) {
+          try {
+            await this.pipelineHealthCheck(projectPath);
+          } catch (err) {
+            log.warn("Pipeline health check failed", err);
+          }
+          this.consecutiveRejections = 0;
+        }
       }
 
       // 12. Periodic deep chain review
@@ -1057,7 +1102,7 @@ ${changedFiles.join("\n")}
         phase: "failed",
       });
       await switchBranch(originalBranch, projectPath).catch(() => {});
-      await this.cleanupTaskBranch(branchName);
+      await this.cleanupTaskBranch(branchName, { startCommit });
     } finally {
       await switchBranch(originalBranch, projectPath).catch(() => {});
       this.setCurrentTaskId(null);
@@ -1560,10 +1605,7 @@ Respond with EXACTLY this JSON (no markdown):
       maxTurns: 200,
       cwd: this.config.projectPath,
       timeout: 300_000,
-      model:
-        this.config.values.brain.model === "opus"
-          ? "claude-opus-4-6"
-          : "claude-sonnet-4-6",
+      model: resolveModelId(this.config.values.brain.model),
       disallowedTools: ["Edit", "Write", "NotebookEdit"],
       appendSystemPrompt:
         "You are the brain of an autonomous coding agent. Read CLAUDE.md for context. Do not modify files — only analyze and decide.",
@@ -1609,10 +1651,7 @@ Respond with EXACTLY this JSON (no markdown):
       ),
       cwd: this.config.projectPath,
       timeout: cConfig.timeout,
-      model:
-        this.config.values.claude.model === "opus"
-          ? "claude-opus-4-6"
-          : "claude-sonnet-4-6",
+      model: resolveModelId(this.config.values.claude.model),
       appendSystemPrompt: systemPrompt,
     });
   }
@@ -1695,6 +1734,14 @@ Respond with EXACTLY this JSON (no markdown):
             await this.costTracker.addCost(task.id, fixResult.costUsd);
           currentSessionId = fixResult.sessionId ?? currentSessionId;
 
+          const changedFilesForCommit = await getModifiedAndAddedFiles(
+            this.config.projectPath,
+          ).catch(() => []);
+          await commitAll(
+            "db-coder: fix verification issues",
+            this.config.projectPath,
+            changedFilesForCommit,
+          ).catch(() => {});
           lastVerification = await this.hardVerify(
             opts.baselineErrors,
             opts.startCommit,
@@ -1762,10 +1809,7 @@ Respond with EXACTLY this JSON (no markdown):
         cwd: this.config.projectPath,
         timeout: 600_000,
         resumeSessionId: sessionId,
-        model:
-          this.config.values.claude.model === "opus"
-            ? "claude-opus-4-6"
-            : "claude-sonnet-4-6",
+        model: resolveModelId(this.config.values.claude.model),
       },
     );
   }
@@ -1842,7 +1886,7 @@ ${task.task_description}
 ${acSection}
 ${subtaskList ? `## Subtasks\n${subtaskList}\n` : ""}## Git Diff
 \`\`\`diff
-${diff.slice(0, 15000)}
+${diff}
 \`\`\`
 
 ## Review Checklist (check ALL categories)
@@ -1892,7 +1936,11 @@ Respond with EXACTLY this JSON (no markdown, no extra text):
     });
 
     const parseSpecResult = (text: string) => {
-      const parsed = JSON.parse(text);
+      const parsed = extractJsonFromText(
+        text,
+        (v) => isRecord(v) && Object.prototype.hasOwnProperty.call(v, "passed"),
+      );
+      if (!isRecord(parsed)) return null;
       const res = {
         passed: parsed.passed === true,
         missing: Array.isArray(parsed.missing) ? parsed.missing : [],
@@ -1913,27 +1961,25 @@ Respond with EXACTLY this JSON (no markdown, no extra text):
       return res;
     };
 
-    try {
-      return parseSpecResult(result.text);
-    } catch {
-      // BMAD: parse failure is suspicious — retry once then FAIL
-      log.warn("Spec review returned unparseable JSON, retrying once");
-      const retry = await this.brainThink(prompt);
-      if (retry.costUsd > 0 && task.id) {
-        await this.costTracker.addCost(task.id, retry.costUsd);
-      }
-      try {
-        return parseSpecResult(retry.text);
-      } catch {
-        log.warn("Spec review retry also unparseable — treating as FAIL");
-        return {
-          passed: false,
-          missing: ["spec review parse failure"],
-          extra: [],
-          concerns: [],
-        };
-      }
+    const firstResult = parseSpecResult(result.text);
+    if (firstResult) return firstResult;
+
+    // extractJsonFromText couldn't find valid JSON — retry once then FAIL
+    log.warn("Spec review returned unparseable JSON, retrying once");
+    const retry = await this.brainThink(prompt);
+    if (retry.costUsd > 0 && task.id) {
+      await this.costTracker.addCost(task.id, retry.costUsd);
     }
+    const retryResult = parseSpecResult(retry.text);
+    if (retryResult) return retryResult;
+
+    log.warn("Spec review retry also unparseable — treating as FAIL");
+    return {
+      passed: false,
+      missing: ["spec review parse failure"],
+      extra: [],
+      concerns: [],
+    };
   }
 
   // --- Brain reflection ---
@@ -1986,10 +2032,7 @@ Keep CLAUDE.md concise — only add genuinely useful rules.`;
       maxTurns: 50,
       cwd: projectPath,
       timeout: 300_000,
-      model:
-        this.config.values.brain.model === "opus"
-          ? "claude-opus-4-6"
-          : "claude-sonnet-4-6",
+      model: resolveModelId(this.config.values.brain.model),
       appendSystemPrompt:
         "You are reflecting on a task. You CAN edit CLAUDE.md and use claude-mem. Do not modify source code.",
       allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
@@ -2041,6 +2084,58 @@ Keep CLAUDE.md concise — only add genuinely useful rules.`;
     }
   }
 
+  // --- Pipeline health check (auto-diagnosis) ---
+
+  private async pipelineHealthCheck(projectPath: string): Promise<void> {
+    log.info("Pipeline health check triggered after consecutive rejections");
+
+    const result = await this.brainSession.run(
+      `## Pipeline Health Check
+
+Multiple tasks have been rejected consecutively, suggesting a systemic pipeline issue.
+
+## Instructions
+1. Use the \`get_blocked_summary\` MCP tool to see how many tasks are blocked and their failure patterns
+2. If blocked count < 3, respond "No systemic issue" and stop
+3. Otherwise, use \`get_task_logs\` on a few failed tasks to understand the failure pattern
+4. Use Read, Grep, Bash to investigate the pipeline code if failures point to a code bug
+5. If you find a systemic bug, use \`create_task\` to create fix task(s) with:
+   - Description prefixed with "[PIPELINE-FIX]"
+   - Priority 0 (urgent)
+6. Use \`requeue_blocked_tasks\` if blocked tasks should be retried after the fix
+7. If failures are legitimate (bad task quality, not a bug), do nothing`,
+      {
+        permissionMode: "bypassPermissions",
+        maxTurns: 30,
+        cwd: projectPath,
+        timeout: 600_000,
+        model: resolveModelId(this.config.values.brain.model),
+        allowedTools: [
+          "Read",
+          "Glob",
+          "Grep",
+          "Bash",
+          "mcp__db-coder-system-data__get_blocked_summary",
+          "mcp__db-coder-system-data__get_recent_tasks",
+          "mcp__db-coder-system-data__get_task_detail",
+          "mcp__db-coder-system-data__get_task_logs",
+          "mcp__db-coder-system-data__get_operational_metrics",
+          "mcp__db-coder-system-data__create_task",
+          "mcp__db-coder-system-data__requeue_blocked_tasks",
+        ],
+        appendSystemPrompt:
+          "You are diagnosing pipeline failures. Investigate thoroughly before taking action. Do not modify source files.",
+      },
+    );
+
+    if (result.costUsd > 0) {
+      await this.taskStore.addDailyCost(result.costUsd);
+    }
+    log.info(
+      `Pipeline health check completed (cost: $${result.costUsd.toFixed(3)})`,
+    );
+  }
+
   // --- Deep chain review (periodic) ---
 
   private async deepChainReview(projectPath: string): Promise<void> {
@@ -2060,10 +2155,7 @@ Update CLAUDE.md if you discover new patterns or pitfalls.`,
         maxTurns: 50,
         cwd: projectPath,
         timeout: 3_600_000,
-        model:
-          this.config.values.brain.model === "opus"
-            ? "claude-opus-4-6"
-            : "claude-sonnet-4-6",
+        model: resolveModelId(this.config.values.brain.model),
         allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
         appendSystemPrompt:
           "You are performing a deep code review. You CAN edit CLAUDE.md to add new patterns or pitfalls. Do not modify source code.",
@@ -2101,10 +2193,7 @@ Rules:
         maxTurns: 50,
         cwd: projectPath,
         timeout: 3_600_000,
-        model:
-          this.config.values.brain.model === "opus"
-            ? "claude-opus-4-6"
-            : "claude-sonnet-4-6",
+        model: resolveModelId(this.config.values.brain.model),
         allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
         appendSystemPrompt:
           "You are maintaining CLAUDE.md. You CAN edit CLAUDE.md. Do not modify source code.",
@@ -2298,29 +2387,75 @@ Rules:
     const branches = await listBranches(prefix, projectPath);
     if (branches.length === 0) return;
 
-    const [queued, active] = await Promise.all([
+    const [queued, active, failed, blocked] = await Promise.all([
       this.taskStore.listTasks(projectPath, "queued"),
       this.taskStore.listTasks(projectPath, "active"),
+      this.taskStore.listTasks(projectPath, "failed"),
+      this.taskStore.listTasks(projectPath, "blocked"),
     ]);
+
+    // queued/active branches are always protected
     const activeBranches = new Set(
       [...queued, ...active].map((t) => t.git_branch).filter(Boolean),
     );
 
+    // failed/blocked branches are protected within retention period
+    const retentionMs =
+      this.config.values.git.branchRetentionDays * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const retainedBranches = new Set(
+      [...failed, ...blocked]
+        .filter(
+          (t) =>
+            t.git_branch &&
+            now - new Date(t.updated_at).getTime() < retentionMs,
+        )
+        .map((t) => t.git_branch),
+    );
+
     let cleaned = 0;
+    let preserved = 0;
     for (const branch of branches) {
       if (activeBranches.has(branch)) continue;
-      await this.cleanupTaskBranch(branch);
+      if (retainedBranches.has(branch)) {
+        preserved++;
+        continue;
+      }
+      await this.cleanupTaskBranch(branch, { force: true });
       const stillExists = await branchExists(branch, projectPath).catch(
         () => true,
       );
       if (!stillExists) cleaned++;
     }
+    if (preserved > 0)
+      log.info(
+        `Preserved ${preserved} branch(es) for recent failed/blocked tasks`,
+      );
     if (cleaned > 0) log.info(`Cleaned up ${cleaned} orphaned branch(es)`);
   }
 
-  private async cleanupTaskBranch(branch: string): Promise<void> {
+  private async cleanupTaskBranch(
+    branch: string,
+    opts?: { force?: boolean; startCommit?: string },
+  ): Promise<void> {
     try {
-      await forceDeleteBranch(branch, this.config.projectPath);
+      if (opts?.force) {
+        await forceDeleteBranch(branch, this.config.projectPath);
+        return;
+      }
+      // Compare branch HEAD with startCommit: identical means no worker output
+      if (opts?.startCommit) {
+        const branchHead = await getBranchHeadCommit(
+          branch,
+          this.config.projectPath,
+        );
+        if (branchHead === opts.startCommit) {
+          await forceDeleteBranch(branch, this.config.projectPath);
+          return;
+        }
+      }
+      // Has worker output or cannot determine → preserve
+      log.info(`Preserving branch ${branch} (has worker commits)`);
     } catch (err) {
       log.warn(`Failed to cleanup branch ${branch}: ${err}`);
     }
@@ -2328,100 +2463,6 @@ Rules:
 }
 
 // --- Exported utilities (used by tests and routes) ---
-
-export function mergeReviews(
-  claude: ReviewResult,
-  codex: ReviewResult,
-): MergedReviewResult {
-  const mustFix: ReviewIssue[] = [];
-  const shouldFix: ReviewIssue[] = [];
-
-  for (const ci of claude.issues) {
-    const match = codex.issues.find((xi) => {
-      const fileMatch = !!(xi.file && ci.file && xi.file === ci.file);
-      const descSim = wordJaccard(xi.description, ci.description);
-      return fileMatch && descSim > 0.4;
-    });
-    if (match) {
-      mustFix.push({
-        ...ci,
-        severity: higherSeverity(ci.severity, match.severity),
-      });
-    } else {
-      shouldFix.push(ci);
-    }
-  }
-
-  for (const xi of codex.issues) {
-    const alreadyMerged = mustFix.some(
-      (m) =>
-        wordJaccard(m.description, xi.description) > 0.4 &&
-        (m.file && xi.file ? m.file === xi.file : true),
-    );
-    if (!alreadyMerged) shouldFix.push(xi);
-  }
-
-  const claudeRawFail = !claude.passed && claude.issues.length === 0;
-  const codexRawFail = !codex.passed && codex.issues.length === 0;
-  if (claudeRawFail)
-    shouldFix.push({
-      description:
-        "Claude reviewer explicitly failed without structured issues",
-      severity: "medium",
-      source: "claude",
-    });
-  if (codexRawFail)
-    shouldFix.push({
-      description: "Codex reviewer explicitly failed without structured issues",
-      severity: "medium",
-      source: "codex",
-    });
-
-  const effectiveConfidence = (i: ReviewIssue) => i.confidence ?? 1.0;
-  const hasCriticalMustFix = mustFix.some(
-    (i) =>
-      (i.severity === "critical" || i.severity === "high") &&
-      effectiveConfidence(i) >= 0.8,
-  );
-  const hasRawFail = claudeRawFail || codexRawFail;
-  const passed = !hasRawFail && (mustFix.length === 0 || !hasCriticalMustFix);
-
-  return {
-    passed,
-    mustFix,
-    shouldFix,
-    summary: `Claude: ${claude.summary}\nCodex: ${codex.summary}\nMust fix: ${mustFix.length}, Should fix: ${shouldFix.length}`,
-  };
-}
-
-export function extractIssueCategories(issues: ReviewIssue[]): string[] {
-  const CATEGORY_PATTERNS: Record<string, RegExp> = {
-    "type-error": /type\s*(error|mismatch|incompatible)/i,
-    "null-safety": /null|undefined|optional/i,
-    "error-handling": /error\s*handl|try.catch|exception/i,
-    security: /security|injection|xss|csrf|sanitiz/i,
-    performance: /performance|slow|memory\s*leak|O\(n/i,
-    "code-style": /style|format|naming|convention|lint/i,
-    "logic-error": /logic|incorrect|wrong|bug/i,
-    "missing-test": /test|coverage|assert/i,
-    import: /import|require|module|dependency/i,
-    "api-design": /api|interface|contract|signature/i,
-  };
-
-  const categories = new Set<string>();
-  for (const issue of issues) {
-    const text = `${issue.description} ${issue.suggestion ?? ""}`;
-    let matched = false;
-    for (const [cat, pattern] of Object.entries(CATEGORY_PATTERNS)) {
-      if (pattern.test(text)) {
-        categories.add(cat);
-        matched = true;
-      }
-    }
-    if (!matched) categories.add(`severity-${issue.severity}`);
-  }
-  return [...categories];
-}
 
 export async function countTscErrors(cwd: string): Promise<number> {
   if (!countTscErrorsDeps.existsSync(join(cwd, "tsconfig.json"))) return 0;
@@ -2440,14 +2481,6 @@ export async function countTscErrors(cwd: string): Promise<number> {
     });
     return -1;
   }
-}
-
-function higherSeverity(
-  a: ReviewIssue["severity"],
-  b: ReviewIssue["severity"],
-): ReviewIssue["severity"] {
-  const order = { critical: 0, high: 1, medium: 2, low: 3 };
-  return order[a] <= order[b] ? a : b;
 }
 
 function sleep(ms: number): Promise<void> {

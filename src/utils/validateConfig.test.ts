@@ -1,47 +1,72 @@
-import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import test from 'node:test';
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
 
-import type { DbCoderConfig } from '../config/types.js';
-import { ConfigValidationError, validateConfig } from './validateConfig.js';
+import type { DbCoderConfig } from "../config/types.js";
+import { ConfigValidationError, validateConfig } from "./validateConfig.js";
 
 function createValidConfig(): DbCoderConfig {
   return {
-    apiToken: 'test-token',
-    brain: { model: 'opus', scanInterval: 3600, maxScanBudget: 1.0, claudeMdMaintenanceInterval: 15, claudeMdMaintenanceEnabled: true },
-    claude: { model: 'opus', maxTaskBudget: 2.0, maxTurns: 30 },
-    codex: {
-      model: 'gpt-5.3-codex',
-      sandbox: 'workspace-write',
-      tokenPricing: { inputPerMillion: 2, cachedInputPerMillion: 0.5, outputPerMillion: 8 },
+    apiToken: "test-token",
+    brain: {
+      model: "opus",
+      scanInterval: 3600,
+      maxScanBudget: 1.0,
+      claudeMdMaintenanceInterval: 15,
+      claudeMdMaintenanceEnabled: true,
     },
-    autonomy: { level: 'full', maxRetries: 3, retryBaseDelayMs: 1000, subtaskTimeout: 600 },
+    claude: { model: "opus", maxTaskBudget: 2.0, maxTurns: 30 },
+    codex: {
+      model: "gpt-5.3-codex",
+      sandbox: "workspace-write",
+      tokenPricing: {
+        inputPerMillion: 2,
+        cachedInputPerMillion: 0.5,
+        outputPerMillion: 8,
+      },
+    },
+    autonomy: {
+      level: "full",
+      maxRetries: 3,
+      retryBaseDelayMs: 1000,
+      subtaskTimeout: 600,
+    },
     routing: {
-      scan: 'brain',
-      plan: 'brain',
-      execute_frontend: 'claude',
-      execute_backend: 'codex',
-      reflect: 'brain',
+      scan: "brain",
+      plan: "brain",
+      execute_frontend: "claude",
+      execute_backend: "codex",
+      reflect: "brain",
     },
     budget: { maxPerTask: 5.0, maxPerDay: 200.0, warningThreshold: 0.8 },
     memory: {
-      claudeMemUrl: 'http://localhost:37777',
-      pgConnectionString: 'postgresql://db:db@localhost:5432/db_coder',
+      claudeMemUrl: "http://localhost:37777",
+      pgConnectionString: "postgresql://db:db@localhost:5432/db_coder",
     },
-    git: { branchPrefix: 'db-coder/', protectedBranches: ['main', 'master'] },
-    server: { host: '127.0.0.1', port: 18800 },
+    git: {
+      branchPrefix: "db-coder/",
+      protectedBranches: ["main", "master"],
+      branchRetentionDays: 7,
+    },
+    server: { host: "127.0.0.1", port: 18800 },
     mcp: { enabled: true },
     plugins: {},
     evolution: {
-      goals: [{ description: 'Keep code quality high', priority: 1, status: 'active' }],
+      goals: [
+        {
+          description: "Keep code quality high",
+          priority: 1,
+          status: "active",
+        },
+      ],
     },
   };
 }
 
 function withTempProject(run: (projectPath: string) => void): void {
-  const projectPath = mkdtempSync(join(tmpdir(), 'db-coder-validate-config-'));
+  const projectPath = mkdtempSync(join(tmpdir(), "db-coder-validate-config-"));
   try {
     run(projectPath);
   } finally {
@@ -52,7 +77,7 @@ function withTempProject(run: (projectPath: string) => void): void {
 function assertValidationIssue(fn: () => void, pattern: RegExp): void {
   assert.throws(fn, (err: unknown) => {
     if (!(err instanceof ConfigValidationError)) return false;
-    return err.issues.some(issue => pattern.test(issue));
+    return err.issues.some((issue) => pattern.test(issue));
   });
 }
 
@@ -65,16 +90,16 @@ function getValidationError(fn: () => void): ConfigValidationError {
     }
     throw err;
   }
-  throw new Error('Expected validateConfig to throw ConfigValidationError');
+  throw new Error("Expected validateConfig to throw ConfigValidationError");
 }
 
-test('validateConfig accepts a valid config', () => {
+test("validateConfig accepts a valid config", () => {
   withTempProject((projectPath) => {
     assert.doesNotThrow(() => validateConfig(createValidConfig(), projectPath));
   });
 });
 
-test('validateConfig rejects negative budget values', () => {
+test("validateConfig rejects negative budget values", () => {
   withTempProject((projectPath) => {
     const config = createValidConfig();
     config.budget.maxPerTask = -1;
@@ -86,10 +111,10 @@ test('validateConfig rejects negative budget values', () => {
   });
 });
 
-test('validateConfig rejects empty required strings', () => {
+test("validateConfig rejects empty required strings", () => {
   withTempProject((projectPath) => {
     const config = createValidConfig();
-    config.memory.pgConnectionString = '   ';
+    config.memory.pgConnectionString = "   ";
 
     assertValidationIssue(
       () => validateConfig(config, projectPath),
@@ -98,7 +123,7 @@ test('validateConfig rejects empty required strings', () => {
   });
 });
 
-test('validateConfig rejects invalid server port numbers', () => {
+test("validateConfig rejects invalid server port numbers", () => {
   withTempProject((projectPath) => {
     const config = createValidConfig();
     config.server.port = 70000;
@@ -110,7 +135,7 @@ test('validateConfig rejects invalid server port numbers', () => {
   });
 });
 
-test('validateConfig rejects missing project paths', () => {
+test("validateConfig rejects missing project paths", () => {
   const missingPath = join(tmpdir(), `db-coder-missing-${Date.now()}`);
   assertValidationIssue(
     () => validateConfig(createValidConfig(), missingPath),
@@ -118,10 +143,10 @@ test('validateConfig rejects missing project paths', () => {
   );
 });
 
-test('validateConfig rejects memory URLs with unsupported protocols', () => {
+test("validateConfig rejects memory URLs with unsupported protocols", () => {
   withTempProject((projectPath) => {
     const config = createValidConfig();
-    config.memory.claudeMemUrl = 'ftp://localhost:37777';
+    config.memory.claudeMemUrl = "ftp://localhost:37777";
 
     assertValidationIssue(
       () => validateConfig(config, projectPath),
@@ -130,11 +155,11 @@ test('validateConfig rejects memory URLs with unsupported protocols', () => {
   });
 });
 
-test('validateConfig requires each custom MCP server to define command or url', () => {
+test("validateConfig requires each custom MCP server to define command or url", () => {
   withTempProject((projectPath) => {
     const config = createValidConfig();
     config.mcp.custom = {
-      local: { type: 'stdio' },
+      local: { type: "stdio" },
     };
 
     assertValidationIssue(
@@ -144,11 +169,11 @@ test('validateConfig requires each custom MCP server to define command or url', 
   });
 });
 
-test('validateConfig rejects custom MCP server URLs with unsupported protocols', () => {
+test("validateConfig rejects custom MCP server URLs with unsupported protocols", () => {
   withTempProject((projectPath) => {
     const config = createValidConfig();
     config.mcp.custom = {
-      remote: { url: 'ws://localhost:9999' },
+      remote: { url: "ws://localhost:9999" },
     };
 
     assertValidationIssue(
@@ -158,14 +183,16 @@ test('validateConfig rejects custom MCP server URLs with unsupported protocols',
   });
 });
 
-test('validateConfig rejects evolution goals with invalid status values', () => {
+test("validateConfig rejects evolution goals with invalid status values", () => {
   withTempProject((projectPath) => {
     const config = createValidConfig();
-    config.evolution.goals = [{
-      description: 'Ship a parser',
-      priority: 1,
-      status: 'blocked' as 'active' | 'paused' | 'done',
-    }];
+    config.evolution.goals = [
+      {
+        description: "Ship a parser",
+        priority: 1,
+        status: "blocked" as "active" | "paused" | "done",
+      },
+    ];
 
     assertValidationIssue(
       () => validateConfig(config, projectPath),
@@ -174,14 +201,16 @@ test('validateConfig rejects evolution goals with invalid status values', () => 
   });
 });
 
-test('validateConfig rejects evolution goals with invalid completedAt values', () => {
+test("validateConfig rejects evolution goals with invalid completedAt values", () => {
   withTempProject((projectPath) => {
     const config = createValidConfig();
-    config.evolution.goals = [{
-      description: 'Finish API hardening',
-      priority: 1,
-      completedAt: 'not-a-date',
-    }];
+    config.evolution.goals = [
+      {
+        description: "Finish API hardening",
+        priority: 1,
+        completedAt: "not-a-date",
+      },
+    ];
 
     assertValidationIssue(
       () => validateConfig(config, projectPath),
@@ -190,29 +219,31 @@ test('validateConfig rejects evolution goals with invalid completedAt values', (
   });
 });
 
-test('validateConfig reports issues for empty config objects', () => {
+test("validateConfig reports issues for empty config objects", () => {
   withTempProject((projectPath) => {
-    const error = getValidationError(() => validateConfig({} as DbCoderConfig, projectPath));
+    const error = getValidationError(() =>
+      validateConfig({} as DbCoderConfig, projectPath),
+    );
 
     assert.ok(error.issues.length > 0);
-    assert.ok(error.issues.includes('apiToken must be a non-empty string'));
-    assert.ok(error.issues.includes('brain must be an object'));
+    assert.ok(error.issues.includes("apiToken must be a non-empty string"));
+    assert.ok(error.issues.includes("brain must be an object"));
     assert.match(error.message, /Invalid db-coder configuration:/);
   });
 });
 
-test('ConfigValidationError exposes the provided issues array', () => {
-  const issues = ['alpha', 'beta'];
+test("ConfigValidationError exposes the provided issues array", () => {
+  const issues = ["alpha", "beta"];
   const error = new ConfigValidationError(issues);
 
-  assert.equal(error.name, 'ConfigValidationError');
+  assert.equal(error.name, "ConfigValidationError");
   assert.deepEqual(error.issues, issues);
 });
 
-test('validateConfig does not mutate config when trimming string values', () => {
+test("validateConfig does not mutate config when trimming string values", () => {
   withTempProject((projectPath) => {
     const config = createValidConfig();
-    const originalUrl = '  http://localhost:37777  ';
+    const originalUrl = "  http://localhost:37777  ";
     config.memory.claudeMemUrl = originalUrl;
 
     assert.doesNotThrow(() => validateConfig(config, projectPath));

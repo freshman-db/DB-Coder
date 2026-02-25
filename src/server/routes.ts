@@ -427,6 +427,16 @@ route("GET", "/api/tasks", async (req, res, ctx) => {
   json(res, result);
 });
 
+// --- Task Evaluation (pending review) ---
+// NOTE: This literal route MUST be registered before /api/tasks/:id
+// to avoid the :id wildcard pattern shadowing it.
+route("GET", "/api/tasks/pending-review", async (_req, res, ctx) => {
+  const tasks = await ctx.taskStore.getPendingReviewTasks(
+    ctx.config.projectPath,
+  );
+  json(res, tasks);
+});
+
 route("GET", "/api/tasks/:id", async (_req, res, ctx, params) => {
   const task = await ctx.taskStore.getTask(params.id);
   if (!task) {
@@ -440,14 +450,6 @@ route("GET", "/api/tasks/:id", async (_req, res, ctx, params) => {
 route("DELETE", "/api/tasks/:id", async (_req, res, ctx, params) => {
   await ctx.taskStore.deleteTask(params.id);
   json(res, { ok: true });
-});
-
-// --- Task Evaluation (pending review) ---
-route("GET", "/api/tasks/pending-review", async (_req, res, ctx) => {
-  const tasks = await ctx.taskStore.getPendingReviewTasks(
-    ctx.config.projectPath,
-  );
-  json(res, tasks);
 });
 
 route("POST", "/api/tasks/:id/approve", async (_req, res, ctx, params) => {
