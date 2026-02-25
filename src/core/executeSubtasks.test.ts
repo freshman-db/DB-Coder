@@ -306,7 +306,7 @@ describe("executeSubtasks", () => {
     );
   });
 
-  it("should fail-fast when getTask() returns null after running-status write", async () => {
+  it("should fail-fast when getTask() returns null during running-status write", async () => {
     const subtaskRecords: SubTaskRecord[] = [
       {
         id: "1",
@@ -356,8 +356,8 @@ describe("executeSubtasks", () => {
       "Should return failure when task disappears after running write",
     );
     assert.ok(
-      result.reason?.includes("after running-status write"),
-      `Reason should mention 'after running-status write', got: ${result.reason}`,
+      result.reason?.includes("during running-status write"),
+      `Reason should mention 'during running-status write', got: ${result.reason}`,
     );
     assert.equal(
       workerCalled,
@@ -428,8 +428,8 @@ describe("executeSubtasks", () => {
       "Should return failure when task disappears during error processing",
     );
     assert.ok(
-      result.reason?.includes("subtask error processing"),
-      `Reason should mention 'subtask error processing', got: ${result.reason}`,
+      result.reason?.includes("error-status write"),
+      `Reason should mention 'error-status write', got: ${result.reason}`,
     );
     assert.equal(
       addLogCalls.filter(
@@ -494,8 +494,8 @@ describe("executeSubtasks", () => {
       "Should return failure when task disappears after marking done",
     );
     assert.ok(
-      result.reason?.includes("marking subtask done"),
-      `Reason should mention 'marking subtask done', got: ${result.reason}`,
+      result.reason?.includes("done-status write"),
+      `Reason should mention 'done-status write', got: ${result.reason}`,
     );
     assert.equal(
       addLogCalls.filter(
@@ -599,6 +599,7 @@ describe("executeSubtasks", () => {
     const taskWithSubtask = makeTask(subtaskRecords);
     const taskWithoutSubtask = makeTask([]); // subtask removed externally
     let getTaskCallCount = 0;
+    let updateTaskCallCount = 0;
     let workerCalled = false;
 
     const loop = buildStub({
@@ -610,7 +611,9 @@ describe("executeSubtasks", () => {
           if (getTaskCallCount === 1) return structuredClone(taskWithSubtask);
           return structuredClone(taskWithoutSubtask);
         },
-        updateTask: async () => {},
+        updateTask: async () => {
+          updateTaskCallCount++;
+        },
         addLog: async () => {},
       },
       workerExecute: async () => {
@@ -638,9 +641,19 @@ describe("executeSubtasks", () => {
       `Reason should mention 'not found in task', got: ${result.reason}`,
     );
     assert.equal(
+      result.failureKind,
+      "subtask-not-found",
+      "failureKind should be 'subtask-not-found' for structured error matching",
+    );
+    assert.equal(
       workerCalled,
       false,
       "Worker should NOT execute when subtask disappears before running-status write",
+    );
+    assert.equal(
+      updateTaskCallCount,
+      0,
+      "subtask-not-found should not trigger updateTask — no write occurred",
     );
   });
 });

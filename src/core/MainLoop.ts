@@ -2050,7 +2050,12 @@ Respond with EXACTLY this JSON (no markdown):
       baselineErrors: number;
       startCommit: string;
     },
-  ): Promise<{ success: boolean; sessionId?: string; reason?: string }> {
+  ): Promise<{
+    success: boolean;
+    sessionId?: string;
+    reason?: string;
+    failureKind?: "task-gone" | "subtask-not-found";
+  }> {
     // Re-read task from DB to ensure subtasks array is fresh
     const freshTask = await this.taskStore.getTask(task.id);
     if (!freshTask) {
@@ -2124,10 +2129,10 @@ Respond with EXACTLY this JSON (no markdown):
         if (!result.ok) {
           const reason =
             result.reason === "task-gone"
-              ? `Task ${task.id} disappeared after running-status write`
+              ? `Task ${task.id} disappeared during running-status write`
               : `Subtask ${st.subtaskId} not found in task ${task.id} during running-status write`;
           log.error(reason);
-          return { success: false, reason };
+          return { success: false, reason, failureKind: result.reason };
         }
         task = result.task;
       }
@@ -2168,10 +2173,10 @@ Respond with EXACTLY this JSON (no markdown):
           if (!result.ok) {
             const reason =
               result.reason === "task-gone"
-                ? `Task ${task.id} disappeared during subtask error processing`
-                : `Subtask ${st.subtaskId} not found in task ${task.id} during error processing`;
+                ? `Task ${task.id} disappeared during error-status write`
+                : `Subtask ${st.subtaskId} not found in task ${task.id} during error-status write`;
             log.error(reason);
-            return { success: false, reason };
+            return { success: false, reason, failureKind: result.reason };
           }
           task = result.task;
         } else {
@@ -2267,10 +2272,10 @@ Respond with EXACTLY this JSON (no markdown):
             if (!result.ok) {
               const reason =
                 result.reason === "task-gone"
-                  ? `Task ${task.id} disappeared during verification failure processing`
-                  : `Subtask ${st.subtaskId} not found in task ${task.id} during verification failure processing`;
+                  ? `Task ${task.id} disappeared during verification-failure write`
+                  : `Subtask ${st.subtaskId} not found in task ${task.id} during verification-failure write`;
               log.error(reason);
-              return { success: false, reason };
+              return { success: false, reason, failureKind: result.reason };
             }
             task = result.task;
           }
@@ -2290,10 +2295,10 @@ Respond with EXACTLY this JSON (no markdown):
         if (!result.ok) {
           const reason =
             result.reason === "task-gone"
-              ? `Task ${task.id} disappeared after marking subtask done`
+              ? `Task ${task.id} disappeared during done-status write`
               : `Subtask ${st.subtaskId} not found in task ${task.id} during done-status write`;
           log.error(reason);
-          return { success: false, reason };
+          return { success: false, reason, failureKind: result.reason };
         }
         task = result.task;
       } else {
