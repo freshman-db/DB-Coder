@@ -1097,13 +1097,27 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
               (s) => s.phase === "execute",
             );
             log.warn(
-              "Skipping updateStepStatus for execute: step not found or not finished",
+              "findFinishedStepsByPhase returned null for execute in catch(verifyErr)",
               {
                 exists: execSteps.length > 0,
                 count: execSteps.length,
-                allFinished: execSteps.every((s) => s.finishedAt != null),
+                allFinished:
+                  execSteps.length > 0 &&
+                  execSteps.every((s) => s.finishedAt != null),
               },
             );
+            try {
+              this.updateStepStatus(
+                "execute",
+                "failed",
+                `Verification phase exception: ${errMsg}`,
+              );
+            } catch (statusErr) {
+              log.warn(
+                "updateStepStatus failed in catch(verifyErr) else branch, preserving original error",
+                { statusErr },
+              );
+            }
           }
           throw verifyErr;
         }
