@@ -2014,9 +2014,20 @@ Respond with EXACTLY this JSON (no markdown):
   ): Promise<Task | null> {
     const fresh = await this.taskStore.getTask(taskId);
     if (!fresh) return null;
-    const patched = (fresh.subtasks ?? []).map((s) =>
-      s.id === subtaskId ? { ...s, ...patch } : s,
-    );
+    let matched = false;
+    const patched = (fresh.subtasks ?? []).map((s) => {
+      if (s.id === subtaskId) {
+        matched = true;
+        return { ...s, ...patch };
+      }
+      return s;
+    });
+    if (!matched) {
+      log.warn(
+        `patchSubtask: subtaskId ${subtaskId} not found in task ${taskId}, skipping write`,
+      );
+      return fresh;
+    }
     await this.taskStore.updateTask(taskId, { subtasks: patched });
     return this.taskStore.getTask(taskId);
   }
@@ -2236,10 +2247,16 @@ Respond with EXACTLY this JSON (no markdown):
           }
 
           if (persistedIds.has(st.subtaskId)) {
-            await this.patchSubtask(task.id, st.subtaskId, {
+            const patched = await this.patchSubtask(task.id, st.subtaskId, {
               status: "failed",
               result: lastVerification.reason,
             });
+            if (!patched) {
+              const reason = `Task ${task.id} disappeared during verification failure processing`;
+              log.error(reason);
+              return { success: false, reason };
+            }
+            task = patched;
           }
           const verifyReason = lastVerification.reason || "verification failed";
           const fullReason = subtaskWorkerErrMsg
