@@ -20,30 +20,30 @@ export interface TokenPricing {
 
 export interface CodexConfig {
   model: string;
-  sandbox: 'workspace-write' | 'workspace-read' | 'full-auto';
+  sandbox: "workspace-write" | "workspace-read" | "full-auto";
   tokenPricing?: TokenPricing;
   reviewTimeout?: number; // seconds, default 1800 (30min)
-  planTimeout?: number;   // seconds, default 900 (15min)
+  planTimeout?: number; // seconds, default 900 (15min)
 }
 
 export interface AutonomyConfig {
-  level: 'full' | 'supervised';
+  level: "full" | "supervised";
   maxRetries: number;
   retryBaseDelayMs: number;
   subtaskTimeout: number; // seconds
 }
 
 export interface RoutingConfig {
-  scan: 'brain';
-  plan: 'brain';
-  execute_frontend: 'claude';
-  execute_backend: 'codex';
-  reflect: 'brain';
+  scan: "brain";
+  plan: "brain";
+  execute_frontend: "claude";
+  execute_backend: "codex";
+  reflect: "brain";
 }
 
 export interface BudgetConfig {
   maxPerTask: number; // USD
-  maxPerDay: number;  // USD
+  maxPerDay: number; // USD
   warningThreshold: number; // 0-1
 }
 
@@ -55,14 +55,24 @@ export interface MemoryConfig {
 export interface GitConfig {
   branchPrefix: string;
   protectedBranches: string[];
+  branchRetentionDays: number;
 }
 
 export interface McpConfig {
   enabled: boolean;
-  serverPhases?: Record<string, string[]>;  // override default phase routing
-  disabled?: string[];                       // MCP servers to skip
-  disabledPlugins?: string[];                // plugins to not load into subprocesses
-  custom?: Record<string, { command?: string; args?: string[]; type?: string; url?: string; headers?: Record<string, string> }>;
+  serverPhases?: Record<string, string[]>; // override default phase routing
+  disabled?: string[]; // MCP servers to skip
+  disabledPlugins?: string[]; // plugins to not load into subprocesses
+  custom?: Record<
+    string,
+    {
+      command?: string;
+      args?: string[];
+      type?: string;
+      url?: string;
+      headers?: Record<string, string>;
+    }
+  >;
 }
 
 export interface ServerConfig {
@@ -73,7 +83,7 @@ export interface ServerConfig {
 export interface EvolutionGoal {
   description: string;
   priority: number; // 0-3
-  status?: 'active' | 'paused' | 'done';
+  status?: "active" | "paused" | "done";
   progress?: number; // 0-100, computed from goal_progress table
   completedAt?: string; // ISO date when marked done
 }
@@ -82,12 +92,16 @@ export interface EvolutionConfig {
   goals: EvolutionGoal[];
 }
 
-export type PluginRelevance = 'essential' | 'recommended' | 'optional' | 'irrelevant';
+export type PluginRelevance =
+  | "essential"
+  | "recommended"
+  | "optional"
+  | "irrelevant";
 
 export interface PluginConfig {
-  autoUpdate?: boolean;               // default false — auto-update installed plugins
-  autoInstallRecommended?: boolean;    // default false — auto-install recommended plugins
-  checkInterval?: number;              // default 86400 (24h, seconds)
+  autoUpdate?: boolean; // default false — auto-update installed plugins
+  autoInstallRecommended?: boolean; // default false — auto-install recommended plugins
+  checkInterval?: number; // default 86400 (24h, seconds)
   relevanceOverrides?: Record<string, PluginRelevance>; // manual plugin relevance
 }
 

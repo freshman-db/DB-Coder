@@ -33,6 +33,7 @@ import {
   deleteBranch,
   listBranches,
   forceDeleteBranch,
+  getBranchHeadCommit,
   getDiffStats,
   getDiffSince,
 } from "../utils/git.js";
@@ -129,6 +130,7 @@ export class MainLoop {
   private stoppedPromise: Promise<void> | null = null;
   private stoppedResolve: (() => void) | null = null;
   private tasksCompleted = 0;
+  private consecutiveRejections = 0;
   private brainSession!: ClaudeCodeSession;
   private workerSession!: ClaudeCodeSession;
   private discoveredModules: string[] = [];
@@ -634,11 +636,12 @@ export class MainLoop {
 
     const branchName = `${this.config.values.git.branchPrefix}${task.id.slice(0, BRANCH_ID_LENGTH)}`;
     let originalBranch = "main";
+    let startCommit = "";
 
     try {
       // 4. Prepare git branch
       originalBranch = await getCurrentBranch(projectPath).catch(() => "main");
-      const startCommit = await getHeadCommit(projectPath).catch(() => "");
+      startCommit = await getHeadCommit(projectPath).catch(() => "");
       const baselineErrors = await countTscErrors(projectPath);
 
       if (await branchExists(branchName, projectPath)) {
@@ -671,7 +674,7 @@ export class MainLoop {
           phase: "blocked",
         });
         await switchBranch(originalBranch, projectPath).catch(() => {});
-        await this.cleanupTaskBranch(branchName);
+        await this.cleanupTaskBranch(branchName, { force: true });
         this.setCurrentTaskId(null);
         this.currentTaskDescription = null;
         this.setState("idle");
@@ -1015,6 +1018,7 @@ ${reviewDiff}
           phase: "done",
         });
         this.endStep("merge", "done", "Merged");
+        this.consecutiveRejections = 0;
         this.eventBus.emit(
           this.makeEvent("merge", "after", {
             merged: true,
@@ -1034,7 +1038,7 @@ ${reviewDiff}
         }
       } else {
         await switchBranch(originalBranch, projectPath).catch(() => {});
-        await this.cleanupTaskBranch(branchName);
+        await this.cleanupTaskBranch(branchName, { startCommit });
         log.warn(
           `Task rejected: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`,
         );
@@ -1044,6 +1048,16 @@ ${reviewDiff}
         });
         this.endStep("merge", "failed", "Rejected");
         this.eventBus.emit(this.makeEvent("merge", "after", { merged: false }));
+
+        this.consecutiveRejections++;
+        if (this.consecutiveRejections >= 5) {
+          try {
+            await this.pipelineHealthCheck(projectPath);
+          } catch (err) {
+            log.warn("Pipeline health check failed", err);
+          }
+          this.consecutiveRejections = 0;
+        }
       }
 
       // 12. Periodic deep chain review
@@ -1088,7 +1102,7 @@ ${reviewDiff}
         phase: "failed",
       });
       await switchBranch(originalBranch, projectPath).catch(() => {});
-      await this.cleanupTaskBranch(branchName);
+      await this.cleanupTaskBranch(branchName, { startCommit });
     } finally {
       await switchBranch(originalBranch, projectPath).catch(() => {});
       this.setCurrentTaskId(null);
@@ -2070,6 +2084,58 @@ Keep CLAUDE.md concise — only add genuinely useful rules.`;
     }
   }
 
+  // --- Pipeline health check (auto-diagnosis) ---
+
+  private async pipelineHealthCheck(projectPath: string): Promise<void> {
+    log.info("Pipeline health check triggered after consecutive rejections");
+
+    const result = await this.brainSession.run(
+      `## Pipeline Health Check
+
+Multiple tasks have been rejected consecutively, suggesting a systemic pipeline issue.
+
+## Instructions
+1. Use the \`get_blocked_summary\` MCP tool to see how many tasks are blocked and their failure patterns
+2. If blocked count < 3, respond "No systemic issue" and stop
+3. Otherwise, use \`get_task_logs\` on a few failed tasks to understand the failure pattern
+4. Use Read, Grep, Bash to investigate the pipeline code if failures point to a code bug
+5. If you find a systemic bug, use \`create_task\` to create fix task(s) with:
+   - Description prefixed with "[PIPELINE-FIX]"
+   - Priority 0 (urgent)
+6. Use \`requeue_blocked_tasks\` if blocked tasks should be retried after the fix
+7. If failures are legitimate (bad task quality, not a bug), do nothing`,
+      {
+        permissionMode: "bypassPermissions",
+        maxTurns: 30,
+        cwd: projectPath,
+        timeout: 600_000,
+        model: resolveModelId(this.config.values.brain.model),
+        allowedTools: [
+          "Read",
+          "Glob",
+          "Grep",
+          "Bash",
+          "mcp__db-coder-system-data__get_blocked_summary",
+          "mcp__db-coder-system-data__get_recent_tasks",
+          "mcp__db-coder-system-data__get_task_detail",
+          "mcp__db-coder-system-data__get_task_logs",
+          "mcp__db-coder-system-data__get_operational_metrics",
+          "mcp__db-coder-system-data__create_task",
+          "mcp__db-coder-system-data__requeue_blocked_tasks",
+        ],
+        appendSystemPrompt:
+          "You are diagnosing pipeline failures. Investigate thoroughly before taking action. Do not modify source files.",
+      },
+    );
+
+    if (result.costUsd > 0) {
+      await this.taskStore.addDailyCost(result.costUsd);
+    }
+    log.info(
+      `Pipeline health check completed (cost: $${result.costUsd.toFixed(3)})`,
+    );
+  }
+
   // --- Deep chain review (periodic) ---
 
   private async deepChainReview(projectPath: string): Promise<void> {
@@ -2321,29 +2387,75 @@ Rules:
     const branches = await listBranches(prefix, projectPath);
     if (branches.length === 0) return;
 
-    const [queued, active] = await Promise.all([
+    const [queued, active, failed, blocked] = await Promise.all([
       this.taskStore.listTasks(projectPath, "queued"),
       this.taskStore.listTasks(projectPath, "active"),
+      this.taskStore.listTasks(projectPath, "failed"),
+      this.taskStore.listTasks(projectPath, "blocked"),
     ]);
+
+    // queued/active branches are always protected
     const activeBranches = new Set(
       [...queued, ...active].map((t) => t.git_branch).filter(Boolean),
     );
 
+    // failed/blocked branches are protected within retention period
+    const retentionMs =
+      this.config.values.git.branchRetentionDays * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const retainedBranches = new Set(
+      [...failed, ...blocked]
+        .filter(
+          (t) =>
+            t.git_branch &&
+            now - new Date(t.updated_at).getTime() < retentionMs,
+        )
+        .map((t) => t.git_branch),
+    );
+
     let cleaned = 0;
+    let preserved = 0;
     for (const branch of branches) {
       if (activeBranches.has(branch)) continue;
-      await this.cleanupTaskBranch(branch);
+      if (retainedBranches.has(branch)) {
+        preserved++;
+        continue;
+      }
+      await this.cleanupTaskBranch(branch, { force: true });
       const stillExists = await branchExists(branch, projectPath).catch(
         () => true,
       );
       if (!stillExists) cleaned++;
     }
+    if (preserved > 0)
+      log.info(
+        `Preserved ${preserved} branch(es) for recent failed/blocked tasks`,
+      );
     if (cleaned > 0) log.info(`Cleaned up ${cleaned} orphaned branch(es)`);
   }
 
-  private async cleanupTaskBranch(branch: string): Promise<void> {
+  private async cleanupTaskBranch(
+    branch: string,
+    opts?: { force?: boolean; startCommit?: string },
+  ): Promise<void> {
     try {
-      await forceDeleteBranch(branch, this.config.projectPath);
+      if (opts?.force) {
+        await forceDeleteBranch(branch, this.config.projectPath);
+        return;
+      }
+      // Compare branch HEAD with startCommit: identical means no worker output
+      if (opts?.startCommit) {
+        const branchHead = await getBranchHeadCommit(
+          branch,
+          this.config.projectPath,
+        );
+        if (branchHead === opts.startCommit) {
+          await forceDeleteBranch(branch, this.config.projectPath);
+          return;
+        }
+      }
+      // Has worker output or cannot determine → preserve
+      log.info(`Preserving branch ${branch} (has worker commits)`);
     } catch (err) {
       log.warn(`Failed to cleanup branch ${branch}: ${err}`);
     }

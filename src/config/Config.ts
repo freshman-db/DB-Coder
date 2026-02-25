@@ -47,7 +47,11 @@ const DEFAULTS: DbCoderConfig = {
     claudeMemUrl: "http://localhost:37777",
     pgConnectionString: "postgresql://db:db@localhost:5432/db_coder",
   },
-  git: { branchPrefix: "db-coder/", protectedBranches: ["main", "master"] },
+  git: {
+    branchPrefix: "db-coder/",
+    protectedBranches: ["main", "master"],
+    branchRetentionDays: 7,
+  },
   server: { port: 18800, host: "127.0.0.1" },
   mcp: { enabled: true },
   plugins: {},
