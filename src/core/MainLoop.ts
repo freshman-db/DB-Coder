@@ -1133,7 +1133,17 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
             singleVerify.reason,
           );
           if (!singleVerify.passed) {
-            this.updateStepStatus("execute", "failed", singleVerify.reason);
+            const executeStep = this.cycleSteps.find(
+              (s) => s.phase === "execute",
+            );
+            if (executeStep?.startedAt) {
+              this.updateStepStatus("execute", "failed", singleVerify.reason);
+            } else {
+              log.info("Skipping execute step status update: step not active", {
+                hasStep: !!executeStep,
+                hasStartedAt: !!executeStep?.startedAt,
+              });
+            }
           }
         } catch (verifyErr) {
           const errMsg =
