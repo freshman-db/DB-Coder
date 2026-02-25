@@ -257,13 +257,15 @@ describe("executeSubtasks", () => {
 
     const currentTask = makeTask(subtaskRecords);
     let workerCalled = false;
+    const addLogCalls: unknown[] = [];
 
     const loop = buildStub({
       taskStore: {
-        // First getTask (entry re-read) returns null — task disappeared
         getTask: async () => null,
         updateTask: async () => {},
-        addLog: async () => {},
+        addLog: async (entry: unknown) => {
+          addLogCalls.push(entry);
+        },
       },
       workerExecute: async () => {
         workerCalled = true;
@@ -286,14 +288,19 @@ describe("executeSubtasks", () => {
       "Should return failure when task disappears at entry",
     );
     assert.ok(
-      result.reason?.includes("disappeared") || result.reason?.includes("null"),
-      `Reason should mention task disappearance, got: ${result.reason}`,
+      result.reason?.includes("before subtask execution"),
+      `Reason should mention 'before subtask execution', got: ${result.reason}`,
     );
     assert.equal(
       workerCalled,
       false,
       "Worker should NOT be called when task is null",
     );
+    // Verify error was logged to taskStore
+    const errorLog = addLogCalls.find(
+      (c) => (c as Record<string, unknown>).phase === "error",
+    );
+    assert.ok(errorLog, "taskStore.addLog should be called with phase='error'");
   });
 
   it("should fail-fast when getTask() returns null after running-status write", async () => {
@@ -310,17 +317,19 @@ describe("executeSubtasks", () => {
     const currentTask = makeTask(subtaskRecords);
     let getTaskCallCount = 0;
     let workerCalled = false;
+    const addLogCalls: unknown[] = [];
 
     const loop = buildStub({
       taskStore: {
         getTask: async () => {
           getTaskCallCount++;
-          // First call (entry re-read) returns task; second call (after running write) returns null
           if (getTaskCallCount === 1) return structuredClone(currentTask);
           return null;
         },
         updateTask: async () => {},
-        addLog: async () => {},
+        addLog: async (entry: unknown) => {
+          addLogCalls.push(entry);
+        },
       },
       workerExecute: async () => {
         workerCalled = true;
@@ -343,13 +352,146 @@ describe("executeSubtasks", () => {
       "Should return failure when task disappears after running write",
     );
     assert.ok(
-      result.reason?.includes("disappeared") || result.reason?.includes("null"),
-      `Reason should mention task disappearance, got: ${result.reason}`,
+      result.reason?.includes("after running-status write"),
+      `Reason should mention 'after running-status write', got: ${result.reason}`,
     );
     assert.equal(
       workerCalled,
       false,
       "Worker should NOT execute after task disappears",
     );
+    const errorLog = addLogCalls.find(
+      (c) => (c as Record<string, unknown>).phase === "error",
+    );
+    assert.ok(errorLog, "taskStore.addLog should be called with phase='error'");
+  });
+
+  it("should fail-fast when getTask() returns null after workerError write", async () => {
+    const subtaskRecords: SubTaskRecord[] = [
+      {
+        id: "1",
+        description: "only subtask",
+        executor: "claude",
+        status: "pending",
+        order: 1,
+      },
+    ];
+
+    let currentTask = makeTask(subtaskRecords);
+    let getTaskCallCount = 0;
+    const addLogCalls: unknown[] = [];
+
+    const loop = buildStub({
+      taskStore: {
+        getTask: async () => {
+          getTaskCallCount++;
+          // 1: entry re-read → ok
+          // 2: after running-status write → ok
+          // 3: after workerError write → null
+          if (getTaskCallCount <= 2) return structuredClone(currentTask);
+          return null;
+        },
+        updateTask: async (_id, updates) => {
+          if (updates.subtasks) {
+            currentTask = {
+              ...currentTask,
+              subtasks: updates.subtasks as SubTaskRecord[],
+            };
+          }
+        },
+        addLog: async (entry: unknown) => {
+          addLogCalls.push(entry);
+        },
+      },
+      workerExecute: async () =>
+        makeSessionResult({ isError: true, errors: ["compile error"] }),
+      hardVerify: async () => ({ passed: true }),
+      costTracker: { addCost: async () => {} },
+    });
+
+    const result = await (loop as unknown as Record<string, Function>)[
+      "executeSubtasks"
+    ](currentTask, [{ description: "only subtask", order: 1 }], {
+      baselineErrors: 0,
+      startCommit: "abc123",
+    });
+
+    assert.equal(
+      result.success,
+      false,
+      "Should return failure when task disappears during error processing",
+    );
+    assert.ok(
+      result.reason?.includes("subtask error processing"),
+      `Reason should mention 'subtask error processing', got: ${result.reason}`,
+    );
+    const errorLog = addLogCalls.find(
+      (c) => (c as Record<string, unknown>).phase === "error",
+    );
+    assert.ok(errorLog, "taskStore.addLog should be called with phase='error'");
+  });
+
+  it("should fail-fast when getTask() returns null after marking subtask done", async () => {
+    const subtaskRecords: SubTaskRecord[] = [
+      {
+        id: "1",
+        description: "only subtask",
+        executor: "claude",
+        status: "pending",
+        order: 1,
+      },
+    ];
+
+    let currentTask = makeTask(subtaskRecords);
+    let getTaskCallCount = 0;
+    const addLogCalls: unknown[] = [];
+
+    const loop = buildStub({
+      taskStore: {
+        getTask: async () => {
+          getTaskCallCount++;
+          // 1: entry re-read → ok
+          // 2: after running-status write → ok
+          // 3: after done write → null
+          if (getTaskCallCount <= 2) return structuredClone(currentTask);
+          return null;
+        },
+        updateTask: async (_id, updates) => {
+          if (updates.subtasks) {
+            currentTask = {
+              ...currentTask,
+              subtasks: updates.subtasks as SubTaskRecord[],
+            };
+          }
+        },
+        addLog: async (entry: unknown) => {
+          addLogCalls.push(entry);
+        },
+      },
+      workerExecute: async () => makeSessionResult(),
+      hardVerify: async () => ({ passed: true }),
+      costTracker: { addCost: async () => {} },
+    });
+
+    const result = await (loop as unknown as Record<string, Function>)[
+      "executeSubtasks"
+    ](currentTask, [{ description: "only subtask", order: 1 }], {
+      baselineErrors: 0,
+      startCommit: "abc123",
+    });
+
+    assert.equal(
+      result.success,
+      false,
+      "Should return failure when task disappears after marking done",
+    );
+    assert.ok(
+      result.reason?.includes("marking subtask done"),
+      `Reason should mention 'marking subtask done', got: ${result.reason}`,
+    );
+    const errorLog = addLogCalls.find(
+      (c) => (c as Record<string, unknown>).phase === "error",
+    );
+    assert.ok(errorLog, "taskStore.addLog should be called with phase='error'");
   });
 });

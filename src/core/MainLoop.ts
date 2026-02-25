@@ -2018,10 +2018,18 @@ Respond with EXACTLY this JSON (no markdown):
     // Re-read task from DB to ensure subtasks array is fresh
     const freshTask = await this.taskStore.getTask(task.id);
     if (!freshTask) {
-      return {
-        success: false,
-        reason: `Task ${task.id} disappeared before subtask execution`,
-      };
+      const reason = `Task ${task.id} disappeared before subtask execution`;
+      log.error(reason);
+      await this.taskStore.addLog({
+        task_id: task.id,
+        phase: "error",
+        agent: "system",
+        input_summary: "executeSubtasks entry re-read",
+        output_summary: reason,
+        cost_usd: 0,
+        duration_ms: 0,
+      });
+      return { success: false, reason };
     }
     task = freshTask;
 
@@ -2090,10 +2098,18 @@ Respond with EXACTLY this JSON (no markdown):
         // Re-read to prevent stale-state regression in error path (line ~2115)
         const refreshedAfterRunning = await this.taskStore.getTask(task.id);
         if (!refreshedAfterRunning) {
-          return {
-            success: false,
-            reason: `Task ${task.id} disappeared after running-status write`,
-          };
+          const reason = `Task ${task.id} disappeared after running-status write`;
+          log.error(reason);
+          await this.taskStore.addLog({
+            task_id: task.id,
+            phase: "error",
+            agent: "system",
+            input_summary: "executeSubtasks running-status re-read",
+            output_summary: reason,
+            cost_usd: 0,
+            duration_ms: 0,
+          });
+          return { success: false, reason };
         }
         task = refreshedAfterRunning;
       }
@@ -2140,10 +2156,18 @@ Respond with EXACTLY this JSON (no markdown):
         // Re-read task so in-memory subtasks include the workerError just persisted
         const refreshedAfterError = await this.taskStore.getTask(task.id);
         if (!refreshedAfterError) {
-          return {
-            success: false,
-            reason: `Task ${task.id} disappeared during subtask error processing`,
-          };
+          const reason = `Task ${task.id} disappeared during subtask error processing`;
+          log.error(reason);
+          await this.taskStore.addLog({
+            task_id: task.id,
+            phase: "error",
+            agent: "system",
+            input_summary: "executeSubtasks error-path re-read",
+            output_summary: reason,
+            cost_usd: 0,
+            duration_ms: 0,
+          });
+          return { success: false, reason };
         }
         task = refreshedAfterError;
       }
@@ -2254,10 +2278,18 @@ Respond with EXACTLY this JSON (no markdown):
       // Re-read task for updated subtask state
       const refreshedAfterDone = await this.taskStore.getTask(task.id);
       if (!refreshedAfterDone) {
-        return {
-          success: false,
-          reason: `Task ${task.id} disappeared after marking subtask done`,
-        };
+        const reason = `Task ${task.id} disappeared after marking subtask done`;
+        log.error(reason);
+        await this.taskStore.addLog({
+          task_id: task.id,
+          phase: "error",
+          agent: "system",
+          input_summary: "executeSubtasks done-status re-read",
+          output_summary: reason,
+          cost_usd: 0,
+          duration_ms: 0,
+        });
+        return { success: false, reason };
       }
       task = refreshedAfterDone;
 
