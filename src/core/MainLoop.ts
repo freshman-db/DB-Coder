@@ -9,6 +9,15 @@ import {
   type SessionResult,
 } from "../bridges/ClaudeCodeSession.js";
 import type { SdkExtras } from "../bridges/buildSdkOptions.js";
+import type { ReviewResult } from "../bridges/CodingAgent.js";
+import {
+  ClaudeWorkerAdapter,
+  CodexWorkerAdapter,
+  ClaudeReviewAdapter,
+  CodexReviewAdapter,
+  type WorkerAdapter,
+  type ReviewAdapter,
+} from "./WorkerAdapter.js";
 import type { Task, SubTaskRecord } from "../memory/types.js";
 import type {
   LoopState,
@@ -135,6 +144,8 @@ export class MainLoop {
   private workerSession!: ClaudeCodeSession;
   private chainScanner: ChainScanner;
   private personaLoader: PersonaLoader;
+  private worker: WorkerAdapter;
+  private reviewer: ReviewAdapter;
 
   constructor(
     private config: Config,
@@ -144,6 +155,8 @@ export class MainLoop {
     private costTracker: CostTracker,
     private eventBus: CycleEventBus = CycleEventBus.noop(),
     private sdkExtras?: SdkExtras,
+    workerAdapter?: WorkerAdapter,
+    reviewAdapter?: ReviewAdapter,
   ) {
     const hash = createHash("md5")
       .update(config.projectPath)
@@ -158,6 +171,21 @@ export class MainLoop {
     this.brainSession = new ClaudeCodeSession(sdkExtras);
     this.workerSession = new ClaudeCodeSession(sdkExtras);
     this.chainScanner = new ChainScanner(this.brainSession, taskStore, config);
+
+    // Wire up WorkerAdapter + ReviewAdapter (defaults from config if not injected)
+    if (workerAdapter && reviewAdapter) {
+      this.worker = workerAdapter;
+      this.reviewer = reviewAdapter;
+    } else {
+      const workerType = config.values.autonomy.worker;
+      if (workerType === "codex") {
+        this.worker = new CodexWorkerAdapter(codex);
+        this.reviewer = new ClaudeReviewAdapter(this.brainSession);
+      } else {
+        this.worker = new ClaudeWorkerAdapter(this.workerSession);
+        this.reviewer = new CodexReviewAdapter(codex);
+      }
+    }
   }
 
   private makeEvent(
@@ -654,6 +682,49 @@ export class MainLoop {
         start_commit: startCommit,
       });
 
+      // 4.5 Analysis phase (M/L/XL only) — produce and review a plan before coding
+      const complexity = brainOpts?.complexity ?? "M";
+      const needsAnalysis = complexity !== "S";
+      let approvedPlan: string | undefined;
+
+      if (needsAnalysis) {
+        this.beginStep("analyze");
+        this.setState("planning");
+        await this.taskStore.updateTask(task.id, { phase: "analyzing" });
+
+        // Worker produces a concrete change proposal (read-only)
+        const { proposal } = await this.workerAnalyze(task, brainOpts);
+
+        // Reviewer evaluates the proposal (mutually exclusive with worker)
+        const planReview = await this.reviewPlan(proposal, task);
+
+        // Brain synthesizes proposal + feedback into final plan
+        const synthesis = await this.brainSynthesizePlan(
+          proposal,
+          planReview,
+          task,
+        );
+
+        if (!synthesis.approved) {
+          log.warn("Brain rejected analysis plan — blocking task");
+          this.endStep("analyze", "failed", "Plan rejected by brain");
+          this.skipRemainingSteps("analyze");
+          await this.taskStore.updateTask(task.id, {
+            status: "blocked",
+            phase: "blocked",
+          });
+          await switchBranch(originalBranch, projectPath).catch(() => {});
+          await this.cleanupTaskBranch(branchName, { force: true });
+          this.setCurrentTaskId(null);
+          this.currentTaskDescription = null;
+          this.setState("idle");
+          return false;
+        }
+
+        approvedPlan = synthesis.finalPlan;
+        this.endStep("analyze", "done");
+      }
+
       // 5. Execute (subtask loop or single shot)
       this.beginStep("execute");
       this.setState("executing");
@@ -710,8 +781,11 @@ export class MainLoop {
           }),
         );
       } else {
-        // Single-shot execution (existing flow)
-        const workerResult = await this.workerExecute(task, brainOpts);
+        // Single-shot execution (with optional approved plan)
+        const workerResult = await this.workerExecute(task, {
+          ...brainOpts,
+          approvedPlan,
+        });
         if (workerResult.costUsd > 0)
           await this.costTracker.addCost(task.id, workerResult.costUsd);
 
@@ -832,162 +906,166 @@ export class MainLoop {
         );
       }
 
-      // 7.5 Spec compliance review (Stage 1)
-      let specReviewPassed = true;
+      // 7. Code review (reviewer auto-selects based on worker config — mutual exclusion)
+      this.beginStep("review");
+      let shouldMerge = false;
+
       if (workerPassed) {
         this.setState("reviewing");
-        const spec = await this.specReview(
+        const reviewResult = await this.codeReview(
           task,
           startCommit,
           projectPath,
-          brainOpts?.workInstructions,
         );
-        specReviewPassed = spec.passed;
-        if (!specReviewPassed) {
-          log.info(
-            `Spec review: FAIL — missing: ${spec.missing.join(", ")}, extra: ${spec.extra.join(", ")}`,
-          );
+
+        // Store review results for traceability
+        await this.taskStore.updateTask(task.id, {
+          review_results: reviewResult.issues ?? [],
+        });
+
+        if (!reviewResult.passed) {
+          log.info(`Code review: FAIL — ${reviewResult.summary}`, {
+            issues: (reviewResult.issues ?? []).length,
+            reviewer: this.reviewer.name,
+          });
         } else {
-          log.info(
-            `Spec review: PASS${spec.concerns.length > 0 ? ` (concerns: ${spec.concerns.join(", ")})` : ""}`,
-          );
+          log.info(`Code review: PASS — ${reviewResult.summary}`);
         }
-      }
 
-      // 8. Codex review (only if worker + spec passed)
-      this.beginStep("review");
-      let codexReviewPassed = true;
-      if (workerPassed && specReviewPassed) {
-        const changedFiles = await getChangedFilesSince(
-          startCommit,
-          projectPath,
-        ).catch(() => []);
-        if (changedFiles.length > 0) {
-          const reviewStart = Date.now();
-          const reviewDiff = await getDiffSince(startCommit, projectPath, {
-            ignoreWhitespace: true,
-          }).catch(() => "(diff unavailable)");
-          const codexReview = await this.codex.review(
-            `You are an adversarial code reviewer. Review ONLY the changes in this diff.
-
-## Task
-${task.task_description}
-
-## Changed Files
-${changedFiles.join("\n")}
-
-## Git Diff
-\`\`\`diff
-${reviewDiff}
-\`\`\`
-
-## Review Focus Areas (apply ONLY to the diff above, not pre-existing code)
-
-### 1. Bugs & Logic Errors
-- Off-by-one errors, null dereference, race conditions
-- Missing await on async calls, unhandled promise rejections
-- Incorrect boolean logic, missing break/return statements
-
-### 2. Security
-- Unvalidated input, injection vectors (SQL, command, XSS)
-- Sensitive data in logs, hardcoded credentials
-- Missing authentication/authorization checks
-
-### 3. Error Handling
-- Catch blocks that swallow errors silently
-- Missing error propagation in async chains
-- Default return values hiding failures
-
-### 4. Type Safety
-- New \`any\` types introduced
-- Unsafe type assertions (as unknown as T)
-- Missing null checks on optional values
-
-### 5. Scope Creep
-- Changes unrelated to the stated purpose
-- "While I'm here" improvements mixed with the main change
-
-## Rules
-- ONLY report issues introduced or worsened by THIS diff in the "issues" array.
-- If you notice pre-existing bugs/issues in touched files (NOT introduced by this diff), list them separately in "preExistingIssues".
-- Find 3-10 specific issues with file names and descriptions.
-- If fewer than 3 issues found, explain why the code quality is exceptional.
-- Be concrete — cite specific code patterns, not vague concerns.
-
-## Output Format (JSON)
-{"passed": true/false, "issues": [...], "preExistingIssues": [{"description": "...", "file": "...", "severity": "high|medium|low"}], "summary": "..."}`,
-            projectPath,
+        // 8. Brain decision phase
+        if (workerPassed && reviewResult.passed) {
+          // Both verify and review passed → merge
+          shouldMerge = true;
+        } else if (workerPassed) {
+          // Verify passed but review failed → brain decides
+          const decision = await this.brainReviewDecision(
+            task,
+            reviewResult,
+            reviewResult.reviewDiff,
+            false,
           );
-          if (codexReview.cost_usd > 0)
-            await this.costTracker.addCost(task.id, codexReview.cost_usd);
-          codexReviewPassed = codexReview.passed;
+          log.info(
+            `Brain decision: ${decision.decision} — ${decision.reasoning}`,
+          );
 
-          // Store review results and log for traceability
-          const reviewIssues = codexReview.issues ?? [];
-          await this.taskStore.updateTask(task.id, {
-            review_results: reviewIssues,
-          });
-          if (!codexReview.passed) {
-            log.info(`Codex review: FAIL — ${codexReview.summary}`, {
-              issues: reviewIssues.length,
-              summary: codexReview.summary,
-            });
-          } else {
-            log.info(`Codex review: PASS — ${codexReview.summary}`);
-          }
-          // Warn on suspicious parse failure (no issues but failed = likely parse error)
-          if (!codexReview.passed && reviewIssues.length === 0) {
-            log.warn(
-              "Codex review returned passed=false with zero issues — likely output parse failure, treating as PASS",
-            );
-            codexReviewPassed = true;
-          }
+          switch (decision.decision) {
+            case "ignore":
+              shouldMerge = true;
+              break;
 
-          await this.taskStore.addLog({
-            task_id: task.id,
-            phase: "review",
-            agent: "codex",
-            input_summary: `files: ${changedFiles.join(", ").slice(0, SUMMARY_PREVIEW_LEN)}`,
-            output_summary:
-              `${codexReviewPassed ? "PASS" : "FAIL"}: ${codexReview.summary ?? ""}`.slice(
-                0,
-                SUMMARY_PREVIEW_LEN,
-              ),
-            cost_usd: codexReview.cost_usd,
-            duration_ms: Date.now() - reviewStart,
-          });
+            case "block":
+              // Leave shouldMerge = false
+              break;
 
-          // Queue pre-existing issues as new tasks
-          const preExisting = codexReview.preExistingIssues ?? [];
-          for (const issue of preExisting) {
-            const desc = issue.file
-              ? `fix: ${issue.description} (${issue.file})`
-              : `fix: ${issue.description}`;
-            const isDuplicate = await this.taskStore.hasRecentlyFailedSimilar(
-              projectPath,
-              desc,
-              48,
-            );
-            if (!isDuplicate) {
-              await this.taskStore.createTask(projectPath, desc, 3);
-              log.info(`Queued pre-existing issue: ${desc.slice(0, 100)}`);
+            case "split": {
+              shouldMerge = true; // merge current work
+              // Create new tasks for unresolved issues
+              if (decision.newTasks) {
+                for (const newTaskDesc of decision.newTasks) {
+                  await this.taskStore.createTask(projectPath, newTaskDesc, 2);
+                  log.info(
+                    `Split: created follow-up task: ${truncate(newTaskDesc, 100)}`,
+                  );
+                }
+              }
+              break;
+            }
+
+            case "fix":
+            case "rewrite": {
+              // Fix/rewrite loop (at most maxReviewFixes rounds)
+              const maxFixes = this.config.values.autonomy.maxReviewFixes;
+              let fixSessionId: string | undefined;
+
+              for (let fixRound = 0; fixRound < maxFixes; fixRound++) {
+                const fixResult = await this.workerReviewFix(
+                  task,
+                  decision.fixInstructions ?? decision.reasoning,
+                  fixSessionId,
+                );
+                fixSessionId = fixResult.sessionId;
+
+                // Commit fix changes
+                const changedFilesForCommit = await getModifiedAndAddedFiles(
+                  projectPath,
+                ).catch(() => []);
+                await commitAll(
+                  "db-coder: fix review issues",
+                  projectPath,
+                  changedFilesForCommit,
+                ).catch(() => {});
+
+                // Re-verify
+                const reVerify = await this.hardVerify(
+                  baselineErrors,
+                  startCommit,
+                  projectPath,
+                );
+                if (!reVerify.passed) {
+                  log.warn(
+                    `Review fix: hardVerify failed — ${reVerify.reason}`,
+                  );
+                  break; // Will fall through to block
+                }
+
+                // Re-review
+                const reReview = await this.codeReview(
+                  task,
+                  startCommit,
+                  projectPath,
+                );
+                if (reReview.passed) {
+                  shouldMerge = true;
+                  break;
+                }
+
+                // Still failing — brain makes final decision (only ignore/block/split)
+                const finalDecision = await this.brainReviewDecision(
+                  task,
+                  reReview,
+                  reReview.reviewDiff,
+                  true, // isRetry: restricts to ignore/block/split
+                );
+                log.info(
+                  `Brain final decision: ${finalDecision.decision} — ${finalDecision.reasoning}`,
+                );
+
+                if (finalDecision.decision === "ignore") {
+                  shouldMerge = true;
+                } else if (finalDecision.decision === "split") {
+                  shouldMerge = true;
+                  if (finalDecision.newTasks) {
+                    for (const newTaskDesc of finalDecision.newTasks) {
+                      await this.taskStore.createTask(
+                        projectPath,
+                        newTaskDesc,
+                        2,
+                      );
+                      log.info(
+                        `Split: created follow-up task: ${truncate(newTaskDesc, 100)}`,
+                      );
+                    }
+                  }
+                }
+                // else: block (shouldMerge stays false)
+                break; // Only 1 retry round in the loop
+              }
+              break;
             }
           }
         }
       }
 
-      // 9. Decide: merge or discard
-      const shouldMerge = workerPassed && specReviewPassed && codexReviewPassed;
       this.endStep(
         "review",
         shouldMerge ? "done" : "failed",
         shouldMerge ? "PASS" : "Review rejected",
       );
       this.eventBus.emit(
-        this.makeEvent("review", "after", { passed: codexReviewPassed }),
+        this.makeEvent("review", "after", { passed: shouldMerge }),
       );
 
-      // 10. Brain reflects and learns
+      // 9. Brain reflects and learns
       this.beginStep("reflect");
       this.setState("reflecting");
       const outcome = shouldMerge ? "success" : "failed";
@@ -1001,7 +1079,7 @@ ${reviewDiff}
       this.eventBus.emit(this.makeEvent("reflect", "after"));
       this.endStep("reflect", "done");
 
-      // 11. Merge or cleanup
+      // 10. Merge or cleanup
       this.beginStep("merge");
       if (shouldMerge) {
         await switchBranch(originalBranch, projectPath);
@@ -1583,17 +1661,22 @@ Respond with EXACTLY this JSON (no markdown):
       complexity?: string;
       subtaskDescription?: string;
       workInstructions?: WorkInstructions;
+      approvedPlan?: string;
     },
   ): Promise<SessionResult> {
     const description = opts?.subtaskDescription ?? task.task_description;
-    const { prompt, systemPrompt } = await this.personaLoader.buildWorkerPrompt(
-      {
+    const { prompt: basePrompt, systemPrompt } =
+      await this.personaLoader.buildWorkerPrompt({
         taskDescription: description,
         personaName: opts?.persona,
         taskType: opts?.taskType,
         workInstructions: opts?.workInstructions,
-      },
-    );
+      });
+
+    // If an approved plan exists, prepend it to the worker prompt
+    const prompt = opts?.approvedPlan
+      ? `${basePrompt}\n\n## Approved Implementation Plan\nFollow this plan that was reviewed and approved:\n\n${opts.approvedPlan}`
+      : basePrompt;
 
     const complexity =
       opts?.complexity ??
@@ -1808,8 +1891,9 @@ Respond with EXACTLY this JSON (no markdown):
     return { passed: true };
   }
 
-  // --- Spec compliance review ---
+  // --- Spec compliance review (DEPRECATED: replaced by codeReview + brainReviewDecision) ---
 
+  /** @deprecated Replaced by codeReview() + brainReviewDecision() in the new pipeline. */
   private async specReview(
     task: Task,
     startCommit: string,
@@ -1940,6 +2024,477 @@ Respond with EXACTLY this JSON (no markdown, no extra text):
       extra: [],
       concerns: [],
     };
+  }
+
+  // --- Analysis phase (M/L/XL only) ---
+
+  /**
+   * Worker analyzes code in read-only mode to produce a concrete change proposal.
+   * Uses the WorkerAdapter.analyze() method (read-only).
+   */
+  private async workerAnalyze(
+    task: Task,
+    brainOpts?: {
+      persona?: string;
+      taskType?: string;
+      complexity?: string;
+      workInstructions?: WorkInstructions;
+    },
+  ): Promise<{ proposal: string; costUsd: number }> {
+    const { prompt: basePrompt } = await this.personaLoader.buildWorkerPrompt({
+      taskDescription: task.task_description,
+      personaName: brainOpts?.persona,
+      taskType: brainOpts?.taskType,
+      workInstructions: brainOpts?.workInstructions,
+    });
+
+    const analyzePrompt = `## Analysis Mode (Read-Only)
+
+You are analyzing code to produce a detailed change proposal. Do NOT modify any files.
+
+${basePrompt}
+
+## Required Output
+
+Produce a structured proposal with:
+1. **Files to modify** — exact file paths and what changes are needed
+2. **New files to create** — path, purpose, key interfaces/classes
+3. **Dependencies** — imports to add, packages needed
+4. **Risk assessment** — what could go wrong, edge cases
+5. **Test strategy** — what tests to add/modify
+
+Be specific: include function signatures, type definitions, and concrete code snippets where helpful.`;
+
+    const complexity = brainOpts?.complexity ?? "M";
+    const cConfig = COMPLEXITY_CONFIG[complexity];
+
+    const result = await this.worker.analyze(analyzePrompt, {
+      cwd: this.config.projectPath,
+      maxTurns: Math.min(cConfig.maxTurns, 100),
+      maxBudget: Math.min(cConfig.maxBudget, 5.0),
+      timeout: Math.min(cConfig.timeout, 600_000),
+      model: resolveModelId(this.config.values.claude.model),
+    });
+
+    if (result.costUsd > 0) {
+      await this.costTracker.addCost(task.id, result.costUsd);
+    }
+
+    await this.taskStore.addLog({
+      task_id: task.id,
+      phase: "analyzing",
+      agent: this.worker.name,
+      input_summary: truncate(task.task_description, SUMMARY_PREVIEW_LEN),
+      output_summary: result.text.slice(0, SUMMARY_PREVIEW_LEN),
+      cost_usd: result.costUsd,
+      duration_ms: result.durationMs,
+    });
+
+    return { proposal: result.text, costUsd: result.costUsd };
+  }
+
+  /**
+   * Review a change proposal (reviewer is automatically the opposite of worker).
+   * Uses the ReviewAdapter to ensure mutual exclusion.
+   */
+  private async reviewPlan(
+    proposal: string,
+    task: Task,
+  ): Promise<ReviewResult> {
+    const prompt = `You are reviewing a proposed code change plan. Assess feasibility and correctness.
+
+## Task
+${task.task_description}
+
+## Proposed Changes
+${proposal}
+
+## Review Focus
+1. **Feasibility** — Can these changes be made without breaking existing functionality?
+2. **Completeness** — Does the proposal address all requirements?
+3. **Architecture** — Are the proposed changes well-structured?
+4. **Risk** — Are there unaddressed edge cases or breaking changes?
+5. **Scope** — Does the proposal stay within the task's scope?
+
+## Output Format (JSON)
+{"passed": true/false, "issues": [{"severity": "critical|high|medium|low", "description": "..."}], "summary": "..."}`;
+
+    const result = await this.reviewer.review(prompt, this.config.projectPath);
+
+    if (result.cost_usd > 0) {
+      await this.costTracker.addCost(task.id, result.cost_usd);
+    }
+
+    await this.taskStore.addLog({
+      task_id: task.id,
+      phase: "plan-review",
+      agent: this.reviewer.name,
+      input_summary: "Plan review",
+      output_summary:
+        `${result.passed ? "PASS" : "FAIL"}: ${result.summary ?? ""}`.slice(
+          0,
+          SUMMARY_PREVIEW_LEN,
+        ),
+      cost_usd: result.cost_usd,
+      duration_ms: 0,
+    });
+
+    return result;
+  }
+
+  /**
+   * Brain synthesizes the proposal + review feedback into a final approved plan.
+   * Returns approved=true with the final plan, or approved=false to block.
+   */
+  private async brainSynthesizePlan(
+    proposal: string,
+    planReview: ReviewResult,
+    task: Task,
+  ): Promise<{ approved: boolean; finalPlan?: string; costUsd: number }> {
+    const reviewSummary = planReview.passed
+      ? `Review PASSED: ${planReview.summary}`
+      : `Review FAILED:\n${planReview.issues.map((i) => `- [${i.severity}] ${i.description}`).join("\n")}\nSummary: ${planReview.summary}`;
+
+    const prompt = `You are the brain of an autonomous coding agent. Decide whether to approve this plan.
+
+## Task
+${task.task_description}
+
+## Worker Proposal
+${proposal.slice(0, 10000)}
+
+## Reviewer Feedback
+${reviewSummary}
+
+## Your Decision
+If the plan is good (reviewer concerns are minor or addressed), output:
+APPROVED
+[final plan incorporating any reviewer fixes]
+
+If the plan has fundamental issues, output:
+REJECTED
+[reason for rejection]
+
+Be decisive. Minor reviewer concerns should not block a good plan.`;
+
+    const result = await this.brainThink(prompt);
+
+    if (result.costUsd > 0) {
+      await this.costTracker.addCost(task.id, result.costUsd);
+    }
+
+    const text = result.text.trim();
+    const approved = text.startsWith("APPROVED") || text.includes("\nAPPROVED");
+
+    await this.taskStore.addLog({
+      task_id: task.id,
+      phase: "plan-review",
+      agent: "brain",
+      input_summary: "Plan synthesis",
+      output_summary: `${approved ? "APPROVED" : "REJECTED"}: ${text.slice(0, 200)}`,
+      cost_usd: result.costUsd,
+      duration_ms: result.durationMs,
+    });
+
+    if (approved) {
+      // Extract plan text after "APPROVED" line
+      const planStart = text.indexOf("\n", text.indexOf("APPROVED"));
+      const finalPlan =
+        planStart >= 0 ? text.slice(planStart).trim() : proposal;
+      return { approved: true, finalPlan, costUsd: result.costUsd };
+    }
+
+    return { approved: false, costUsd: result.costUsd };
+  }
+
+  // --- Decision phase (post-review) ---
+
+  /**
+   * Brain makes a 5-way decision after code review fails.
+   * When isRetry=true, only ignore/block/split are allowed.
+   */
+  private async brainReviewDecision(
+    task: Task,
+    reviewResult: ReviewResult,
+    diff: string,
+    isRetry: boolean,
+  ): Promise<{
+    decision: "fix" | "ignore" | "block" | "rewrite" | "split";
+    reasoning: string;
+    fixInstructions?: string;
+    newTasks?: string[];
+  }> {
+    const reviewSummary = reviewResult.issues
+      .map(
+        (i) =>
+          `- [${i.severity}] ${i.description}${i.file ? ` (${i.file})` : ""}`,
+      )
+      .join("\n");
+
+    const allowedDecisions = isRetry
+      ? '"ignore", "block", "split"'
+      : '"fix", "ignore", "block", "rewrite", "split"';
+
+    const prompt = `You are the brain of an autonomous coding agent. A code review found issues.
+
+## Task
+${task.task_description}
+
+## Review Results
+${reviewSummary}
+Summary: ${reviewResult.summary}
+
+## Code Diff (truncated)
+\`\`\`diff
+${diff.slice(0, 8000)}
+\`\`\`
+
+## Available Decisions: ${allowedDecisions}
+- **fix**: Send specific fix instructions to the worker (resume context)
+- **ignore**: Issues are minor/false-positive, merge as-is
+- **block**: Issues are severe, discard this work
+- **rewrite**: Fundamental approach is wrong, provide new instructions
+- **split**: Merge what works, create new tasks for unresolved issues
+
+${isRetry ? "This is a RETRY — the worker already attempted one fix. Only ignore/block/split are available." : ""}
+
+## Output (JSON only)
+{"decision": "...", "reasoning": "...", "fixInstructions": "...", "newTasks": ["..."]}`;
+
+    const result = await this.brainThink(prompt);
+
+    if (result.costUsd > 0) {
+      await this.costTracker.addCost(task.id, result.costUsd);
+    }
+
+    await this.taskStore.addLog({
+      task_id: task.id,
+      phase: "reviewing",
+      agent: "brain-decision",
+      input_summary: `Review decision (retry=${isRetry})`,
+      output_summary: result.text.slice(0, SUMMARY_PREVIEW_LEN),
+      cost_usd: result.costUsd,
+      duration_ms: result.durationMs,
+    });
+
+    // Parse decision
+    const parsed = extractJsonFromText(
+      result.text,
+      (v) =>
+        isRecord(v) &&
+        typeof (v as Record<string, unknown>).decision === "string",
+    );
+
+    if (isRecord(parsed)) {
+      const decision = String(parsed.decision) as
+        | "fix"
+        | "ignore"
+        | "block"
+        | "rewrite"
+        | "split";
+
+      // Validate retry constraints
+      const validRetryDecisions = ["ignore", "block", "split"];
+      const validDecisions = ["fix", "ignore", "block", "rewrite", "split"];
+      const allowed = isRetry ? validRetryDecisions : validDecisions;
+
+      if (allowed.includes(decision)) {
+        return {
+          decision,
+          reasoning: String(parsed.reasoning ?? ""),
+          fixInstructions:
+            typeof parsed.fixInstructions === "string"
+              ? parsed.fixInstructions
+              : undefined,
+          newTasks: Array.isArray(parsed.newTasks)
+            ? parsed.newTasks.map(String)
+            : undefined,
+        };
+      }
+    }
+
+    // Parse failure — default to block
+    log.warn("Brain review decision unparseable, defaulting to block");
+    return {
+      decision: "block",
+      reasoning: "Decision parse failure — blocking for safety",
+    };
+  }
+
+  /**
+   * Worker fixes issues found in code review.
+   * For Claude worker: resumes the original session for context continuity.
+   * For Codex worker: starts fresh with full context.
+   */
+  private async workerReviewFix(
+    task: Task,
+    fixInstructions: string,
+    sessionId?: string,
+  ): Promise<{ costUsd: number; sessionId?: string; isError: boolean }> {
+    const prompt = `The code review found issues that need fixing.
+
+## Original Task
+${task.task_description}
+
+## Fix Instructions
+${fixInstructions}
+
+Fix these issues. Do not make unrelated changes.`;
+
+    const result = await this.worker.fix(prompt, {
+      cwd: this.config.projectPath,
+      maxTurns: 100,
+      maxBudget: this.config.values.claude.maxTaskBudget,
+      timeout: 600_000,
+      model: resolveModelId(this.config.values.claude.model),
+      resumeSessionId: sessionId,
+    });
+
+    if (result.costUsd > 0) {
+      await this.costTracker.addCost(task.id, result.costUsd);
+    }
+
+    await this.taskStore.addLog({
+      task_id: task.id,
+      phase: "executing",
+      agent: `${this.worker.name}-review-fix`,
+      input_summary: "Review fix",
+      output_summary: result.text.slice(0, SUMMARY_PREVIEW_LEN),
+      cost_usd: result.costUsd,
+      duration_ms: result.durationMs,
+    });
+
+    return {
+      costUsd: result.costUsd,
+      sessionId: result.sessionId,
+      isError: result.isError,
+    };
+  }
+
+  /**
+   * Unified code review entry point.
+   * Automatically selects the reviewer that is mutually exclusive with the worker.
+   * worker=claude → codex reviews; worker=codex → claude reviews.
+   */
+  private async codeReview(
+    task: Task,
+    startCommit: string,
+    projectPath: string,
+  ): Promise<ReviewResult & { reviewDiff: string }> {
+    const changedFiles = await getChangedFilesSince(
+      startCommit,
+      projectPath,
+    ).catch(() => []);
+
+    if (changedFiles.length === 0) {
+      return {
+        passed: true,
+        issues: [],
+        summary: "No changed files to review",
+        cost_usd: 0,
+        reviewDiff: "",
+      };
+    }
+
+    const reviewDiff = await getDiffSince(startCommit, projectPath, {
+      ignoreWhitespace: true,
+    }).catch(() => "(diff unavailable)");
+
+    const prompt = `You are an adversarial code reviewer. Review ONLY the changes in this diff.
+
+## Task
+${task.task_description}
+
+## Changed Files
+${changedFiles.join("\n")}
+
+## Git Diff
+\`\`\`diff
+${reviewDiff}
+\`\`\`
+
+## Review Focus Areas (apply ONLY to the diff above, not pre-existing code)
+
+### 1. Bugs & Logic Errors
+- Off-by-one errors, null dereference, race conditions
+- Missing await on async calls, unhandled promise rejections
+- Incorrect boolean logic, missing break/return statements
+
+### 2. Security
+- Unvalidated input, injection vectors (SQL, command, XSS)
+- Sensitive data in logs, hardcoded credentials
+- Missing authentication/authorization checks
+
+### 3. Error Handling
+- Catch blocks that swallow errors silently
+- Missing error propagation in async chains
+- Default return values hiding failures
+
+### 4. Type Safety
+- New \`any\` types introduced
+- Unsafe type assertions (as unknown as T)
+- Missing null checks on optional values
+
+### 5. Scope Creep
+- Changes unrelated to the stated purpose
+- "While I'm here" improvements mixed with the main change
+
+## Rules
+- ONLY report issues introduced or worsened by THIS diff in the "issues" array.
+- If you notice pre-existing bugs/issues in touched files (NOT introduced by this diff), list them separately in "preExistingIssues".
+- Find 3-10 specific issues with file names and descriptions.
+- If fewer than 3 issues found, explain why the code quality is exceptional.
+- Be concrete — cite specific code patterns, not vague concerns.
+
+## Output Format (JSON)
+{"passed": true/false, "issues": [...], "preExistingIssues": [{"description": "...", "file": "...", "severity": "high|medium|low"}], "summary": "..."}`;
+
+    const result = await this.reviewer.review(prompt, projectPath);
+
+    if (result.cost_usd > 0) {
+      await this.costTracker.addCost(task.id, result.cost_usd);
+    }
+
+    // Warn on suspicious parse failure
+    if (!result.passed && (result.issues ?? []).length === 0) {
+      log.warn(
+        "Code review returned passed=false with zero issues — likely output parse failure, treating as PASS",
+      );
+      return { ...result, passed: true, reviewDiff };
+    }
+
+    await this.taskStore.addLog({
+      task_id: task.id,
+      phase: "review",
+      agent: this.reviewer.name,
+      input_summary: `files: ${changedFiles.join(", ").slice(0, SUMMARY_PREVIEW_LEN)}`,
+      output_summary:
+        `${result.passed ? "PASS" : "FAIL"}: ${result.summary ?? ""}`.slice(
+          0,
+          SUMMARY_PREVIEW_LEN,
+        ),
+      cost_usd: result.cost_usd,
+      duration_ms: 0,
+    });
+
+    // Queue pre-existing issues as new tasks
+    const preExisting = result.preExistingIssues ?? [];
+    for (const issue of preExisting) {
+      const desc = issue.file
+        ? `fix: ${issue.description} (${issue.file})`
+        : `fix: ${issue.description}`;
+      const isDuplicate = await this.taskStore.hasRecentlyFailedSimilar(
+        projectPath,
+        desc,
+        48,
+      );
+      if (!isDuplicate) {
+        await this.taskStore.createTask(projectPath, desc, 3);
+        log.info(`Queued pre-existing issue: ${desc.slice(0, 100)}`);
+      }
+    }
+
+    return { ...result, reviewDiff };
   }
 
   // --- Brain reflection ---

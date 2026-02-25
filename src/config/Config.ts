@@ -41,6 +41,8 @@ const DEFAULTS: DbCoderConfig = {
     maxRetries: 3,
     retryBaseDelayMs: 1000,
     subtaskTimeout: 600,
+    worker: "claude",
+    maxReviewFixes: 1,
   },
   routing: {
     scan: "brain",

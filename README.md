@@ -8,12 +8,13 @@
 
 ## Overview
 
-DB-Coder is a fully autonomous AI coding system that continuously improves target projects through a **brain → execute → verify → review → reflect** loop. It uses two independent Claude Code CLI sessions — a read-only "brain" for decision-making and a read-write "worker" for execution — with Codex CLI as a cross-reviewer.
+DB-Coder is a fully autonomous AI coding system that continuously improves target projects through a **brain → analyze → execute → verify → review → decide → reflect** loop. It uses a read-only "brain" session for decision-making, a switchable worker (Claude Code or Codex) for execution, and an automatically selected cross-reviewer (mutually exclusive with the worker) for quality gating.
 
 ### Core Capabilities
 
-- **Autonomous Patrol** — Full brain decide → worker execute → hard verify → codex review → brain reflect cycle, started/stopped via Web UI
-- **Dual Review** — Claude Code + Codex CLI review in parallel; intersection issues are must-fix
+- **Autonomous Patrol** — Full brain decide → [analyze M/L/XL] → worker execute → hard verify → code review → brain decision → reflect cycle, started/stopped via Web UI
+- **Switchable Worker** — Claude Code or Codex as executor (`autonomy.worker` config); reviewer auto-selected as the other model (mutual exclusion)
+- **Brain Decision** — 5-way decision after review (fix / ignore / block / rewrite / split) replaces binary pass/fail
 - **Hard Verification** — TypeScript error count comparison against baseline prevents merging degraded code
 - **Natural Evolution** — Brain reflects by editing CLAUDE.md (rules/status) and writing to claude-mem (experience), no numeric scoring
 - **Web UI** — Real-time task monitoring, log streaming, cost tracking, patrol control
@@ -22,21 +23,21 @@ DB-Coder is a fully autonomous AI coding system that continuously improves targe
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                  MainLoop Orchestrator                   │
-│     brainDecide → workerExecute → hardVerify            │
-│       → codexReview → brainReflect → merge              │
-├─────────────┬─────────────────────────┬─────────────────┤
-│ Brain Session│    Worker Session      │   Codex CLI     │
-│ (read-only) │    (read-write)        │   (review)      │
-│ Claude Code │    Claude Code         │  gpt-5.3-codex  │
-├─────────────┴─────────────────────────┴─────────────────┤
-│  CLAUDE.md + claude-mem        TaskStore (PostgreSQL)   │
-│  (rules / experience)         (tasks / logs / costs)    │
-├─────────────────────────────────────────────────────────┤
-│              HTTP Server (:18800)                        │
-│       REST API + Web SPA + SSE Streaming                │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    MainLoop Orchestrator                      │
+│  brainDecide → [analyze M/L/XL] → workerExecute → hardVerify │
+│    → codeReview → brainReviewDecision → [fix loop] → merge   │
+├──────────────┬──────────────────────┬────────────────────────┤
+│ Brain Session│   WorkerAdapter      │    ReviewAdapter        │
+│ (read-only   │   (switchable)       │    (mutual exclusion)  │
+│  + decision) │ Claude ↔ Codex       │    Codex ↔ Claude      │
+├──────────────┴──────────────────────┴────────────────────────┤
+│  CLAUDE.md + claude-mem          TaskStore (PostgreSQL)       │
+│  (rules / experience)           (tasks / logs / costs)       │
+├──────────────────────────────────────────────────────────────┤
+│                HTTP Server (:18800)                           │
+│         REST API + Web SPA + SSE Streaming                   │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ## Project Structure
@@ -45,7 +46,8 @@ DB-Coder is a fully autonomous AI coding system that continuously improves targe
 src/
 ├── index.ts                         # CLI entry (commander)
 ├── core/
-│   ├── MainLoop.ts                  # Orchestration loop (~2400 lines)
+│   ├── MainLoop.ts                  # Orchestration loop (~3200 lines)
+│   ├── WorkerAdapter.ts             # WorkerAdapter + ReviewAdapter interfaces & implementations
 │   ├── PersonaLoader.ts             # Persona loading + skill mapping + worker prompt building
 │   ├── CycleEventBus.ts             # Typed event bus for cycle lifecycle
 │   ├── ModeManager.ts               # PatrolManager (patrol start/stop)
@@ -117,6 +119,7 @@ Global config: `~/.db-coder/config.json`
   "brain": { "model": "opus", "scanInterval": 300 },
   "claude": { "model": "opus", "maxTaskBudget": 10.0, "maxTurns": 200 },
   "codex": { "model": "gpt-5.3-codex", "tokenPricing": { "inputPerMillion": 1.75, "cachedInputPerMillion": 0.175, "outputPerMillion": 14 } },
+  "autonomy": { "worker": "claude", "maxReviewFixes": 1 },
   "budget": { "maxPerTask": 20.0, "maxPerDay": 300.0 },
   "memory": {
     "pgConnectionString": "postgresql://db:db@localhost:5432/db_coder"
@@ -194,19 +197,23 @@ The server runs on `http://127.0.0.1:18800`. All APIs require Bearer Token authe
 
 ## How It Works
 
-### Brain + Worker Pattern
+### Brain + Worker + Reviewer Pattern
 
-The orchestrator (MainLoop) drives two independent Claude Code CLI sessions:
+The orchestrator (MainLoop) drives a brain session, a switchable worker, and a mutually exclusive reviewer:
 
-1. **Brain Session** (read-only) — Reads CLAUDE.md and queries claude-mem to understand project state, then decides which task to work on. Outputs structured JSON decisions.
+1. **Brain Session** (read-only) — Reads CLAUDE.md and queries claude-mem to understand project state, then decides which task to work on. Outputs structured JSON decisions including persona, complexity, and subtasks.
 
-2. **Worker Session** (read-write) — Executes the chosen task on an isolated Git branch. Uses Claude Code's full tool set to read, write, and test code.
+2. **Analysis Phase** (M/L/XL tasks only) — Worker performs read-only code analysis → Reviewer checks the proposal → Brain synthesizes and approves/rejects the plan. S tasks skip this phase.
 
-3. **Hard Verification** — Runs `tsc` and compares error count against baseline. New errors trigger a fix cycle via the worker's session continuation.
+3. **Worker Execution** (switchable: Claude Code or Codex) — Executes the task (with approved plan if analysis phase ran) on an isolated Git branch. Worker type is configured via `autonomy.worker`.
 
-4. **Codex Review** — Codex CLI reviews the git diff independently. Results are cross-validated with the brain's assessment using confidence-based filtering.
+4. **Hard Verification** — Runs `tsc` and compares error count against baseline. New errors trigger a fix cycle via session continuation (Claude) or new session (Codex).
 
-5. **Brain Reflection** — Brain analyzes outcomes, edits CLAUDE.md with new rules/lessons, and saves experience to claude-mem for future reference.
+5. **Code Review** (mutual exclusion) — Reviewer is automatically selected as the opposite model from the worker (worker=Claude → Codex reviews, worker=Codex → Claude reviews).
+
+6. **Brain Decision** — Brain analyzes review results and makes a 5-way decision: **fix** (send to worker for repair), **ignore** (merge despite issues), **block** (stop), **rewrite** (new approach), or **split** (merge partial + create follow-up tasks). Fix/rewrite triggers at most one retry round.
+
+7. **Brain Reflection** — Brain analyzes outcomes, edits CLAUDE.md with new rules/lessons, and saves experience to claude-mem for future reference.
 
 ### Natural Evolution
 
@@ -221,8 +228,9 @@ Instead of numeric scoring (which proved ineffective in v1), the system evolves 
 | Component | Technology |
 |-----------|-----------|
 | Language | TypeScript / Node.js (ESM) |
-| Brain / Worker | Claude Code CLI (`--output-format stream-json`) |
-| Reviewer | Codex CLI (`gpt-5.3-codex`) |
+| Brain | Claude Code CLI (`--output-format stream-json`, read-only) |
+| Worker | Claude Code or Codex CLI (switchable via `autonomy.worker` config) |
+| Reviewer | Auto-selected opposite of worker (mutual exclusion) |
 | Database | PostgreSQL + `pg_trgm` via `postgres` (porsager) |
 | Experience | CLAUDE.md + claude-mem HTTP API |
 | Web UI | Vanilla HTML/CSS/JS SPA + marked.js |

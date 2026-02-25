@@ -11,25 +11,28 @@
 
 ### High-Level Flow
 ```
-MainLoop (編排器, ~1450 lines)
-├── Brain Session (只讀, 決策+反思)
+MainLoop (編排器, ~3200 lines)
+├── Brain Session (只讀, 決策+反思+方案汇总+審查裁決)
 │   ├── brainDecide() → 1 task + metadata (persona, taskType, subtasks)
 │   ├── brainDecideDirective() → fallback when no task
 │   ├── brainReflect() → learn, update CLAUDE.md, evolve personas
-│   ├── specReview() → Stage 1 compliance check
+│   ├── brainSynthesizePlan() → approve/reject analysis proposals
+│   ├── brainReviewDecision() → 5-way decision after review failure
 │   ├── chainScanner.scanNext() → periodic (every N tasks)
 │   └── claudeMdMaintenance() → periodic (every 15 tasks)
 │
-├── Worker Session (读写, 執行任務)
-│   ├── workerExecute(task) → run prompt with persona + skills
-│   ├── executeSubtasks() → per-subtask loop with HALT retry
-│   └── workerFix(sessionId) → systematic debugging retry
+├── WorkerAdapter (统一接口, Claude/Codex 可切换)
+│   ├── ClaudeWorkerAdapter (ClaudeCodeSession, 支持 resume)
+│   └── CodexWorkerAdapter (CodexBridge, 无 resume)
+│   Methods: execute(), fix(), analyze()
+│
+├── ReviewAdapter (审查接口, 自动与 Worker 互斥)
+│   ├── ClaudeReviewAdapter (只读 session 审查)
+│   └── CodexReviewAdapter (codex exec 审查)
+│   Method: review()
 │
 ├── Hard Verify (tsc 错误计数对比)
 │   └── countTscErrors() → pure function, exported for testing
-│
-├── Codex Review (GPT-5.3-codex diff审查)
-│   └── CodexBridge.review() → adversarial review
 │
 ├── Guard System (前置检查)
 │   ├── ConcurrencyGuard
@@ -39,7 +42,7 @@ MainLoop (編排器, ~1450 lines)
 │   └── WorkerFixResultGuard
 │
 └── State Transitions
-    idle → scanning → planning → executing → reviewing → reflecting → idle/paused
+    idle → scanning → planning → analyzing → plan-review → executing → reviewing → reflecting → idle/paused
 ```
 
 ### Session Configuration
@@ -183,7 +186,7 @@ Disabled: /api/plans/* (all return 503, awaiting rewrite)
 ## Strengths
 
 ✅ Clear Brain/Worker separation  
-✅ 3-layer verification gate (hard verify + spec + codex)  
+✅ Pipeline review + brain decision (hardVerify → codeReview(mutual exclusion) → brainReviewDecision(5-way))  
 ✅ Self-improving (persona evolution + CLAUDE.md maintenance)  
 ✅ Cost-aware (budget checks, daily limits)  
 ✅ Testable (pure functions exported, mockable sessions)  

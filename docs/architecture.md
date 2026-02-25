@@ -11,7 +11,7 @@
 | 语言 | TypeScript (ESM) |
 | 大脑 | Claude Code CLI (stream-json, 只读 session) |
 | 工人 | Claude Code CLI (stream-json, 读写 session) |
-| 审查 | Claude Code + Codex CLI (双重并行) |
+| 审查 | 自动互斥 (worker=Claude→Codex审查, worker=Codex→Claude审查) |
 | 硬验证 | tsc 错误计数对比基线 |
 | 经验积累 | CLAUDE.md (规则/状态) + claude-mem (语义搜索) |
 | 任务存储 | PostgreSQL (Docker) |
@@ -26,19 +26,19 @@
 │              db-coder 服务 (systemd, 24h 运行)           │
 │                                                         │
 │  ┌───────────────────────────────────────────────────┐  │
-│  │            Main Loop 编排器 (~2400行)              │  │
-│  │  brainDecide → workerExecute → hardVerify         │  │
-│  │      → codexReview → brainReflect → merge         │  │
-│  │     ↑                                │             │  │
-│  │     └────────────── 下一轮 ←──────────┘             │  │
+│  │            Main Loop 编排器 (~3200行)              │  │
+│  │  brainDecide → [analyze M/L/XL] → workerExecute   │  │
+│  │  → hardVerify → codeReview → brainDecision → merge │  │
+│  │     ↑                                  │           │  │
+│  │     └──────────── 下一轮 ←──────────────┘           │  │
 │  └───────────────────────────────────────────────────┘  │
 │         │               │              │                 │
 │         ▼               ▼              ▼                 │
-│  ┌────────────┐  ┌────────────┐  ┌──────────────┐      │
-│  │ 大脑 session │  │ 工人 session │  │  Codex CLI   │      │
-│  │ (只读+决策)  │  │ (读写+执行)  │  │  (审查)      │      │
-│  │ Claude Code │  │ Claude Code │  │ gpt-5.3-codex│      │
-│  └────────────┘  └────────────┘  └──────────────┘      │
+│  ┌────────────┐  ┌──────────────┐  ┌──────────────┐    │
+│  │ 大脑 session │  │ WorkerAdapter │  │ ReviewAdapter │    │
+│  │ (决策+反思)  │  │ (可切换执行)  │  │ (自动互斥)    │    │
+│  │ Claude Code │  │ Claude/Codex │  │ Codex/Claude  │    │
+│  └────────────┘  └──────────────┘  └──────────────┘    │
 │                                                         │
 │  ┌───────────────┐  ┌──────────────────┐               │
 │  │  HTTP Server  │  │   CLAUDE.md      │               │
@@ -53,29 +53,39 @@
 └─────────────────────────────────────────────────────────┘
 ```
 
-## 大脑+工人架构
+## 大脑+Worker+Reviewer 架构
 
-### 大脑 Session (ClaudeCodeSession, 只读)
+### 大脑 Session (ClaudeCodeSession, 只读+决策)
 
-- 职责: 项目扫描、任务决策、执行后反思、经验积累
+- 职责: 项目扫描、任务决策、方案汇总批准、审查裁决、执行后反思、经验积累
 - 工具: 只读 (disallowedTools: Edit, Write, NotebookEdit)
-- 输入: 自动读取 CLAUDE.md (项目状态/规则/链路定义) + claude-mem (相关经验)
+- 输入: 自动读取 CLAUDE.md + claude-mem
 - 输出: JSON 结构化决策 (通过 --json-schema 约束)
+- 方案汇总: brainSynthesizePlan() 批准/否决 Worker 分析方案
+- 审查裁决: brainReviewDecision() 5选1 (fix/ignore/block/rewrite/split)
 - 反思时: 切换为可编辑模式，直接更新 CLAUDE.md + 写入 claude-mem
 
-### 工人 Session (ClaudeCodeSession, 读写)
+### WorkerAdapter (可切换执行者)
 
-- 职责: 具体编码任务执行
-- 工具: 完整工具集 (bypassPermissions)
-- 特点: 自动读取 CLAUDE.md 获取环境规则和项目上下文
-- 输出: SessionResult (包含 sessionId, 用于 workerFix 续传)
+通过 `autonomy.worker` 配置选择 Claude Code 或 Codex 作为执行者:
 
-### Codex CLI 审查
+| 实现 | 底层 | Session 续传 | CLAUDE.md |
+|------|------|-------------|-----------|
+| ClaudeWorkerAdapter | ClaudeCodeSession | resumeSessionId ✅ | 自动加载 ✅ |
+| CodexWorkerAdapter | CodexBridge | 无 ❌ | 不加载 ❌ |
 
-- 职责: diff 级别的代码审查
-- 工具: codex exec --full-auto
-- 与大脑 session 审查结果**交叉验证**: 两者都标记的问题为 mustFix，仅一方标记的为 shouldFix
-- 只有 critical/high 级别的 mustFix 才阻止合并
+统一接口: `execute()` (执行任务), `fix()` (修复审查问题), `analyze()` (只读分析)
+
+### ReviewAdapter (自动互斥审查者)
+
+执行者和审查者必须是不同模型，自动选择:
+
+| Worker (执行) | Reviewer (审查) |
+|--------------|----------------|
+| Claude Code | Codex |
+| Codex | Claude Code |
+
+适用于方案审查 (reviewPlan) 和代码审查 (codeReview)
 
 ## 自主运行循环
 
@@ -83,30 +93,44 @@
 brainDecide (大脑 session, 只读)
   - 读取 CLAUDE.md + 查询 claude-mem
   - 分析项目当前状态，选择最有价值的任务
-  - 输出: 任务描述 + 优先级 + 审查指令
+  - 输出: 任务描述 + 优先级 + persona + 复杂度 + subtasks
   ▼
-workerExecute (工人 session, 读写)
+[方案阶段] (仅 M/L/XL 任务, S 任务跳过)
+  - workerAnalyze: Worker 只读分析代码，输出具体变更方案
+  - reviewPlan: 互斥审查者审查方案 (worker=Claude→Codex审, worker=Codex→Claude审)
+  - brainSynthesizePlan: 大脑汇总批准/否决方案
+  - 否决 → 任务 blocked
+  ▼
+workerExecute (WorkerAdapter, 读写)
   - 在 Git 分支 db-coder/<task-id> 上执行
-  - 自动读取 CLAUDE.md 获取环境规则
-  - 编码 + git commit，返回 SessionResult
+  - 如有已批准方案，方案内容注入 prompt
+  - 编码 + git commit，返回 WorkerResult
   ▼
 hardVerify (shell: tsc)
   - 对比 tsc 错误计数: 执行后 vs 基线
-  - 新增错误 → workerFix (续传 session 修复)
+  - 新增错误 → workerFix (Claude 续传/Codex 新 session)
   - 检查 git diff 是否有实际变更
   ▼
-codexReview (Codex CLI)
-  - codex exec 审查 git diff
-  - 与 Claude 审查结果交叉验证
-  - 置信度过滤分类 mustFix / shouldFix
+codeReview (ReviewAdapter, 自动互斥)
+  - 审查者自动与执行者互斥
+  - 审查 git diff，返回 ReviewResult
+  ▼
+brainReviewDecision (大脑 5 选 1)
+  - fix: 将审查问题发给 Worker 修复 → 重新验证+审查 → 最终裁决
+  - ignore: 忽略审查问题，直接合并
+  - block: 标记 blocked
+  - rewrite: 大脑重写方案 → Worker 重新执行
+  - split: 当前代码合并 + 未解决问题创建为新任务
+  - 修复轮次由 maxReviewFixes 控制 (默认 1)
   ▼
 brainReflect (大脑 session, 可编辑)
   - 分析任务结果、审查反馈
   - 更新 CLAUDE.md (新增/修改规则)
   - 写入 claude-mem (经验教训)
   ▼
-mergeBranch (验证通过时)
+mergeBranch (决策允许时)
   - 合并到 main，清理分支
+  - split 时同时创建后续任务入队
   - 继续下一个任务
 ```
 
@@ -226,8 +250,9 @@ review_events, goal_progress, prompt_versions, config_proposals
 src/
 ├── index.ts                         # CLI 入口 (commander)
 ├── core/
-│   ├── MainLoop.ts                  # 核心编排循环 (~2400行)
+│   ├── MainLoop.ts                  # 核心编排循环 (~3200行, 含方案阶段+审查决策+修复循环)
 │   ├── MainLoop.test.ts             # 纯函数测试 (countTscErrors 等)
+│   ├── WorkerAdapter.ts             # WorkerAdapter + ReviewAdapter 接口 + 4个实现 (~210行)
 │   ├── ChainScanner.ts              # 链路扫描器 (自动入口发现+边界验证)
 │   ├── chain-scanner-types.ts       # ChainScanner 类型定义
 │   ├── PersonaLoader.ts             # Persona 加载 + Skill 映射 + Worker Prompt 构建
@@ -314,6 +339,7 @@ src/
   "brain": { "model": "opus", "scanInterval": 300 },
   "claude": { "model": "opus", "maxTaskBudget": 10.0, "maxTurns": 200 },
   "codex": { "model": "gpt-5.3-codex", "tokenPricing": { "inputPerMillion": 1.75, "cachedInputPerMillion": 0.175, "outputPerMillion": 14 } },
+  "autonomy": { "worker": "claude", "maxReviewFixes": 1 },
   "budget": { "maxPerTask": 20.0, "maxPerDay": 300.0 },
   "memory": {
     "pgConnectionString": "postgresql://db:db@localhost:5432/db_coder"

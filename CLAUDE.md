@@ -5,17 +5,21 @@
 ## 架构
 
 ```
-编排器 (MainLoop, ~2400行)
-  ├── 大脑 session (Agent SDK query(), 只读+记忆, 决策+反思)
-  ├── 工人 session (Agent SDK query(), 读写, 编码执行)
+编排器 (MainLoop, ~3200行)
+  ├── 大脑 session (Agent SDK query(), 只读+记忆, 决策+反思+方案汇总+审查裁决)
+  ├── WorkerAdapter (统一接口, Claude/Codex 可切换)
+  │   ├── ClaudeWorkerAdapter (ClaudeCodeSession, 支持 resume)
+  │   └── CodexWorkerAdapter (CodexBridge, 无 resume)
+  ├── ReviewAdapter (审查接口, 自动与 Worker 互斥)
+  │   ├── ClaudeReviewAdapter (只读 session 审查)
+  │   └── CodexReviewAdapter (codex exec 审查)
   ├── 程序化 Hooks (PreToolUse/PostToolUse 观察)
   ├── 插件自动发现 (~/.claude/plugins/cache)
   ├── 硬验证 (tsc 错误计数对比)
-  ├── Codex 审查 (codex exec, diff 级审查, 置信度过滤)
   └── Web UI + API (SPA :18800)
 ```
 
-核心循环: `brainDecide() → workerExecute() → hardVerify() → specReview() → codexReview() → brainReflect() → mergeBranch() → [chainScan] → [claudeMdMaintenance]`
+核心循环: `brainDecide() → [workerAnalyze → reviewPlan → brainSynthesizePlan (M/L/XL)] → workerExecute() → hardVerify() → codeReview() → brainReviewDecision() → [workerReviewFix 循环] → brainReflect() → mergeBranch() → [chainScan] → [claudeMdMaintenance]`
 
 ## 当前状态
 
@@ -27,7 +31,7 @@
 - [x] 费用追踪 (daily_costs 表 + CostTracker)
 - [x] Git 分支管理 (自动创建/合并/清理/孤儿分支清理)
 - [x] 硬验证 (tsc 错误计数对比基线)
-- [x] 三阶段审查 (hardVerify → specReview(Brain) → codexReview(Codex))
+- [x] 流水线审查+决策 (hardVerify → codeReview(互斥) → brainReviewDecision(5选1) → [workerReviewFix])
 - [x] 自修改重启 (safeBuild + exit code 75)
 - [x] 计划对话 (PlanChatManager + ClaudeCodeSession)
 - [x] 始终进化模式 (大脑反思驱动, CLAUDE.md + claude-mem)
@@ -35,6 +39,9 @@
 - [x] 链路扫描 (ChainScanner, 自动推导入口+边界验证, 轮转+记忆)
 - [x] CycleEventBus (guards + observers 事件驱动架构)
 - [x] Persona 专业化 (PersonaLoader + personas 表 + 统计)
+- [x] Worker 可切换 (WorkerAdapter 抽象, claude/codex 配置切换, 审查者自动互斥)
+- [x] 方案阶段 (M/L/XL 任务: workerAnalyze → reviewPlan → brainSynthesizePlan)
+- [x] 大脑审查决策 (brainReviewDecision, 5选1: fix/ignore/block/rewrite/split)
 
 ## 环境
 
@@ -81,14 +88,26 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 
 ### 自主循环
 入口: `MainLoop.runCycle()`
-路径: [queue-pickup | brainDecide → createTask] → workerExecute(分支) → hardVerify → [workerFix 重试] → specReview(Brain) → codexReview(Codex) → brainReflect → [merge | cleanup] → [chainScan 每N任务] → [claudeMdMaintenance 每15任务]
-关注: 错误向上冒泡, 验证失败阻止合并, 费用追踪完整
+路径: [queue-pickup | brainDecide → createTask] → [方案阶段 M/L/XL: workerAnalyze → reviewPlan → brainSynthesizePlan] → workerExecute(分支) → hardVerify → [workerFix 重试] → codeReview(互斥审查) → brainReviewDecision(5选1) → [workerReviewFix → hardVerify → codeReview → brainFinalDecision (最多1轮)] → brainReflect → [merge | block | split] → [chainScan 每N任务] → [claudeMdMaintenance 每15任务]
+关注: 错误向上冒泡, 验证失败阻止合并, 费用追踪完整, Worker/Reviewer 自动互斥
 已知缺陷: merge 失败丢弃有效工作 (无 rebase 重试); brainReflect 在 merge 前运行 (失败丢弃已验证代码); 成功路径 switch/merge/delete 无独立异常隔离; catch/finally 中 switchBranch 在 dirty state 下静默失败
 
+### 方案阶段 (M/L/XL 任务)
+入口: runCycle() 内, `complexity !== "S"` 时触发
+路径: workerAnalyze(只读分析) → reviewPlan(互斥审查者审查方案) → brainSynthesizePlan(大脑汇总批准/否决)
+关注: 方案否决直接 blocked; S 任务跳过此阶段; 审查者自动与 worker 互斥 (worker=claude→codex审查, worker=codex→claude审查)
+
+### 大脑审查决策
+入口: `brainReviewDecision(task, reviewResult, diff, isRetry)`
+路径: 收到代码审查结果+diff → 大脑分析 → 5选1 决策 {fix, ignore, block, rewrite, split}
+行为: fix→workerReviewFix; ignore→直接合并; block→标记blocked; rewrite→大脑重写方案+重新执行; split→合并当前+创建新任务
+约束: isRetry=true 时仅允许 ignore/block/split (防止无限修复循环)
+关注: maxReviewFixes 配置控制最大修复轮次 (默认1)
+
 ### 任务执行
-入口: `workerExecute(task)`
-路径: ClaudeCodeSession.run(prompt) → Agent SDK query() → 编码 → git commit → 返回 SessionResult
-关注: timeout 处理, 成本追踪, sessionId 用于 workerFix 续传, complexity 分级控制资源 (S/M/L/XL)
+入口: `workerExecute(task, approvedPlan?)`
+路径: WorkerAdapter.execute(prompt) → [Claude: ClaudeCodeSession.run() | Codex: CodexBridge.execute()] → 编码 → git commit → 返回 WorkerResult
+关注: timeout 处理, 成本追踪, approvedPlan 在方案阶段后传入, sessionId 用于 workerFix 续传 (仅 Claude), complexity 分级控制资源 (S/M/L/XL)
 已知缺陷: workerExecute 返回后不检查 isError; workerFix 的 sessionId="" 导致重试循环提前退出
 
 ### 硬验证
@@ -97,11 +116,15 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 关注: 基线错误数必须可靠, tsc 失败返回 -1 时不阻止合并
 已知缺陷: getDiffStats 结果仅用于 warn, 未用于 pass/fail (空 diff 检查未实现); baselineErrors 在 runCycle call site 不验证 <0, 崩溃 baseline 导致验证自动 pass
 
-### 规格审查
-入口: `specReview(task, startCommit, projectPath, workInstructions?)`
-路径: getDiffSince(startCommit) → 构建 prompt (含 diff + task + subtasks + acceptanceCriteria) → brainThink → JSON.parse → 返回 {passed, missing, extra, concerns}
-关注: diff 截断 (15000 字符) 无标记, JSON 解析失败重试一次后 FAIL, startCommit="" 时 diff 不可用但仍执行
-已知缺陷: parseSpecResult 用 JSON.parse 而非 extractJsonFromText; diff.slice(0,15000) 无截断标记; startCommit="" 时浪费全部审查费用
+### 统一代码审查
+入口: `codeReview(task, startCommit, projectPath)`
+路径: getDiffSince(startCommit) → 构建 prompt → this.reviewer.review() (自动互斥: worker=claude 时用 Codex 审查, worker=codex 时用 Claude 审查) → 返回 ReviewResult
+关注: 审查者与执行者自动互斥, 无需手动配置; 预存问题过滤
+
+### 规格审查 (已废弃)
+入口: `specReview(task, startCommit, projectPath, workInstructions?)` — @deprecated, 已被 codeReview + brainReviewDecision 替代
+路径: getDiffSince(startCommit) → brainThink → JSON.parse → {passed, missing, extra, concerns}
+说明: 不再在 runCycle 中调用, 保留代码供参考
 
 ### 反思
 入口: `brainReflect(task, outcome, verification, projectPath, personaName?)`
@@ -163,3 +186,5 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 - startCommit 空字符串回退误导 diff 计算: getHeadCommit 失败返回 "" 传给 git diff 行为不可预测, 应 fail-fast [已修复 d3dd899, 未合并]
 - MainLoop 无测试 harness: ~2400 行核心编排逻辑无测试基础设施, 需先建立 mock 层
 - getNextTask 无原子拾取保护: SELECT 无 FOR UPDATE SKIP LOCKED, 文件锁仅单机有效
+- `JSON.parse() as T` 无运行时验证: 外部数据 (config file/API response) 解析后用 `as` 断言, 畸形值 (port: "abc") 直接透传导致运行时静默失败。必须 typeof 检查每个字段
+- specReview 非确定性: 相同代码两次审查结论可能不同 (PASS vs FAIL), Brain LLM 审查天然非确定, 关键质量门禁不应仅依赖单次 LLM 判断

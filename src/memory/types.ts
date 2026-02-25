@@ -1,6 +1,6 @@
-import type { MemoryCategory } from '../types/constants.js';
+import type { MemoryCategory } from "../types/constants.js";
 
-export type { MemoryCategory } from '../types/constants.js';
+export type { MemoryCategory } from "../types/constants.js";
 
 export interface Memory {
   id: number;
@@ -14,8 +14,26 @@ export interface Memory {
   updated_at: Date;
 }
 
-export type TaskPhase = 'init' | 'scanning' | 'planning' | 'executing' | 'reviewing' | 'reflecting' | 'done' | 'failed' | 'blocked';
-export type TaskStatus = 'queued' | 'active' | 'done' | 'failed' | 'blocked' | 'skipped' | 'pending_review';
+export type TaskPhase =
+  | "init"
+  | "scanning"
+  | "planning"
+  | "analyzing"
+  | "plan-review"
+  | "executing"
+  | "reviewing"
+  | "reflecting"
+  | "done"
+  | "failed"
+  | "blocked";
+export type TaskStatus =
+  | "queued"
+  | "active"
+  | "done"
+  | "failed"
+  | "blocked"
+  | "skipped"
+  | "pending_review";
 
 export interface Task {
   id: string;
@@ -39,8 +57,8 @@ export interface Task {
 export interface SubTaskRecord {
   id: string;
   description: string;
-  executor: 'claude' | 'codex';
-  status: 'pending' | 'running' | 'done' | 'failed';
+  executor: "claude" | "codex";
+  status: "pending" | "running" | "done" | "failed";
   result?: string;
 }
 
@@ -113,7 +131,7 @@ export interface ScanResult {
   id: number;
   project_path: string;
   commit_hash: string;
-  depth: 'quick' | 'normal' | 'deep';
+  depth: "quick" | "normal" | "deep";
   result: ProjectAnalysis;
   health_score: number | null;
   cost_usd: number | null;
@@ -153,19 +171,25 @@ export interface ProjectAnalysis {
 
 export interface AnalysisItem {
   type: string;
-  severity: 'critical' | 'high' | 'medium' | 'low';
+  severity: "critical" | "high" | "medium" | "low";
   description: string;
   file?: string;
   line?: number;
   suggestion?: string;
 }
 
-export type PlanReviewStatus = 'draft' | 'approved' | 'rejected' | 'expired';
-export type ChatStatus = 'chatting' | 'researching' | 'generating' | 'ready' | 'error' | 'closed';
+export type PlanReviewStatus = "draft" | "approved" | "rejected" | "expired";
+export type ChatStatus =
+  | "chatting"
+  | "researching"
+  | "generating"
+  | "ready"
+  | "error"
+  | "closed";
 
 export interface PlanDraftAnnotation {
   task_index: number;
-  action: 'approve' | 'reject' | 'modify';
+  action: "approve" | "reject" | "modify";
   comment: string;
   modified_description?: string;
 }
@@ -173,24 +197,24 @@ export interface PlanDraftAnnotation {
 export interface PlanDraft {
   id: number;
   project_path: string;
-  plan: unknown;           // TaskPlan JSON
+  plan: unknown; // TaskPlan JSON
   analysis_summary: string;
   reasoning: string;
-  markdown: string;        // human-readable plan
+  markdown: string; // human-readable plan
   status: PlanReviewStatus;
   annotations: PlanDraftAnnotation[];
   scan_id: number | null;
   cost_usd: number;
-  chat_session_id: string | null;   // Agent SDK session ID (for resume)
-  chat_status: ChatStatus | null;   // chat lifecycle status
+  chat_session_id: string | null; // Agent SDK session ID (for resume)
+  chat_status: ChatStatus | null; // chat lifecycle status
   created_at: Date;
   reviewed_at: Date | null;
 }
 
 export interface ChatMessage {
   id: number;
-  session_id: number;      // references plan_drafts.id
-  role: 'user' | 'assistant' | 'system';
+  session_id: number; // references plan_drafts.id
+  role: "user" | "assistant" | "system";
   content: string;
   metadata: Record<string, unknown>;
   created_at: Date;
