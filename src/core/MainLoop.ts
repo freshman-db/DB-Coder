@@ -167,7 +167,7 @@ export function failAllActiveSteps(
   const ts = now ?? Date.now();
   return steps.map((s) => {
     if (s.status !== "active") return s;
-    const durationMs = s.startedAt ? ts - s.startedAt : undefined;
+    const durationMs = s.startedAt != null ? ts - s.startedAt : undefined;
     return {
       ...s,
       status: "failed" as CycleStepStatus,

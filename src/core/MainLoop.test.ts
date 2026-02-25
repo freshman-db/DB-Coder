@@ -248,4 +248,13 @@ describe("failAllActiveSteps", () => {
     assert.equal(result[0].finishedAt, 999);
     assert.equal(result[0].durationMs, undefined);
   });
+
+  it("computes durationMs correctly when startedAt is 0", () => {
+    const steps: CycleStep[] = [
+      { phase: "execute", status: "active", startedAt: 0 },
+    ];
+    const result = failAllActiveSteps(steps, "crash", 500);
+    assert.equal(result[0].status, "failed");
+    assert.equal(result[0].durationMs, 500);
+  });
 });
