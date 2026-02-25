@@ -136,7 +136,7 @@ function findFinishedStepsByPhase(
   return matched;
 }
 
-/** Pure logic for updateStepStatus — exported for testing. */
+/** Pure logic for applyStepStatusUpdate — exported for testing. */
 export function applyStepStatusUpdate(
   steps: CycleStep[],
   phase: StepPhase,
@@ -148,11 +148,11 @@ export function applyStepStatusUpdate(
     const exists = steps.some((s) => s.phase === phase);
     if (!exists) {
       throw new Error(
-        `updateStepStatus: phase "${phase}" not found in cycleSteps`,
+        `applyStepStatusUpdate: phase "${phase}" not found in cycleSteps`,
       );
     }
     throw new Error(
-      `updateStepStatus: step "${phase}" has no finishedAt — only finished steps can be updated`,
+      `applyStepStatusUpdate: step "${phase}" has no finishedAt — only finished steps can be updated`,
     );
   }
   return steps.map((s) => (s.phase === phase ? { ...s, status, summary } : s));
