@@ -326,7 +326,8 @@ describe("executeSubtasks", () => {
       taskStore: {
         getTask: async () => {
           getTaskCallCount++;
-          if (getTaskCallCount === 1) return structuredClone(currentTask);
+          // entry=1, patchSubtask(running) pre-read=2 → ok; post-read=3 → null
+          if (getTaskCallCount <= 2) return structuredClone(currentTask);
           return null;
         },
         updateTask: async () => {},
@@ -391,10 +392,9 @@ describe("executeSubtasks", () => {
       taskStore: {
         getTask: async () => {
           getTaskCallCount++;
-          // 1: entry re-read → ok
-          // 2: after running-status write → ok
-          // 3: after workerError write → null
-          if (getTaskCallCount <= 2) return structuredClone(currentTask);
+          // 1: entry, 2: patchSubtask(running) pre, 3: post, 4: patchSubtask(workerError) pre → ok
+          // 5: patchSubtask(workerError) post → null
+          if (getTaskCallCount <= 4) return structuredClone(currentTask);
           return null;
         },
         updateTask: async (_id, updates) => {
@@ -459,10 +459,9 @@ describe("executeSubtasks", () => {
       taskStore: {
         getTask: async () => {
           getTaskCallCount++;
-          // 1: entry re-read → ok
-          // 2: after running-status write → ok
-          // 3: after done write → null
-          if (getTaskCallCount <= 2) return structuredClone(currentTask);
+          // 1: entry, 2: patchSubtask(running) pre, 3: post, 4: patchSubtask(done) pre → ok
+          // 5: patchSubtask(done) post → null
+          if (getTaskCallCount <= 4) return structuredClone(currentTask);
           return null;
         },
         updateTask: async (_id, updates) => {
@@ -504,6 +503,82 @@ describe("executeSubtasks", () => {
       ).length,
       0,
       "addLog must NOT be called with phase='error' when task is deleted — FK constraint would fail",
+    );
+  });
+
+  it("should read fresh from DB before each subtask write, not from stale memory", async () => {
+    // Verifies patchSubtask reads current DB state before writing.
+    // An external modification injected via getTask at call 4 (patchSubtask(done) pre-read)
+    // must be preserved in the "done" write — proving the write reads fresh, not stale memory.
+    const subtaskRecords: SubTaskRecord[] = [
+      {
+        id: "1",
+        description: "only subtask",
+        executor: "claude",
+        status: "pending",
+        order: 1,
+      },
+    ];
+
+    let currentTask = makeTask(subtaskRecords);
+    let getTaskCallCount = 0;
+    const updateCalls: Array<{ subtasks: SubTaskRecord[] }> = [];
+
+    const loop = buildStub({
+      taskStore: {
+        getTask: async () => {
+          getTaskCallCount++;
+          // 1: entry, 2: patchSubtask(running) pre, 3: post
+          // 4: patchSubtask(done) pre — inject external modification here
+          if (getTaskCallCount === 4) {
+            currentTask = {
+              ...currentTask,
+              subtasks: currentTask.subtasks.map((s) =>
+                s.id === "1" ? { ...s, result: "externally-injected" } : s,
+              ),
+            };
+          }
+          return structuredClone(currentTask);
+        },
+        updateTask: async (_id, updates) => {
+          if (updates.subtasks) {
+            updateCalls.push({ subtasks: updates.subtasks as SubTaskRecord[] });
+            currentTask = {
+              ...currentTask,
+              subtasks: updates.subtasks as SubTaskRecord[],
+            };
+          }
+        },
+        addLog: async () => {},
+      },
+      workerExecute: async () => makeSessionResult(),
+      hardVerify: async () => ({ passed: true }),
+      costTracker: { addCost: async () => {} },
+    });
+
+    const result = await (loop as unknown as Record<string, Function>)[
+      "executeSubtasks"
+    ](currentTask, [{ description: "only subtask", order: 1 }], {
+      baselineErrors: 0,
+      startCommit: "abc123",
+    });
+
+    assert.ok(result.success, "executeSubtasks should succeed");
+
+    // The "done" write (last updateTask call) must include the externally-injected result,
+    // proving patchSubtask reads fresh from DB before writing
+    const doneWrite = updateCalls[updateCalls.length - 1].subtasks.find(
+      (s) => s.id === "1",
+    );
+    assert.equal(
+      doneWrite?.status,
+      "done",
+      "Last write should set status to done",
+    );
+    assert.equal(
+      doneWrite?.result,
+      "externally-injected",
+      "patchSubtask must read from DB before each write, preserving concurrent modifications",
     );
   });
 });
