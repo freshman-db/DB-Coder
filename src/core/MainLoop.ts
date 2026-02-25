@@ -1430,10 +1430,19 @@ Write your analysis as a natural language report.`;
       );
     }
 
+    const phase1SessionId =
+      !phase1Result.isError && phase1Result.exitCode === 0
+        ? phase1Result.sessionId
+        : undefined;
     const analysisReport = phase1Result.text.slice(0, 12000);
 
     // --- Phase 2: Structured output (jsonSchema, converts analysis to tasks) ---
-    const structuredPrompt = `Based on the analysis below, produce 1-5 prioritized tasks for the worker to execute.
+    const structuredPrompt = phase1SessionId
+      ? `--- PHASE 2: STRUCTURED DECISION ---
+Based on YOUR exploration above, produce 1-5 prioritized tasks for the worker to execute.
+
+## OUTPUT RULES:`
+      : `Based on the analysis below, produce 1-5 prioritized tasks for the worker to execute.
 
 ## Analysis Report
 ${analysisReport}
@@ -1511,6 +1520,7 @@ ${analysisReport}
 
     const phase2Result = await this.brainThink(structuredPrompt, {
       jsonSchema: brainDecideSchema,
+      resumeSessionId: phase1SessionId,
     });
     totalCost += phase2Result.costUsd;
     log.info(
@@ -1791,19 +1801,32 @@ Respond with EXACTLY this JSON (no markdown):
 
   private async brainThink(
     prompt: string,
-    opts?: { jsonSchema?: object },
+    opts?: { jsonSchema?: object; resumeSessionId?: string },
   ): Promise<SessionResult> {
-    return this.brainSession.run(prompt, {
+    const isResume = !!opts?.resumeSessionId;
+    const result = await this.brainSession.run(prompt, {
       permissionMode: "bypassPermissions",
       maxTurns: 200,
       cwd: this.config.projectPath,
       timeout: 300_000,
       model: resolveModelId(this.config.values.brain.model),
       disallowedTools: ["Edit", "Write", "NotebookEdit"],
-      appendSystemPrompt:
-        "You are the brain of an autonomous coding agent. Read CLAUDE.md for context. Do not modify files — only analyze and decide.",
+      appendSystemPrompt: isResume
+        ? undefined
+        : "You are the brain of an autonomous coding agent. Read CLAUDE.md for context. Do not modify files — only analyze and decide.",
       jsonSchema: opts?.jsonSchema,
+      resumeSessionId: opts?.resumeSessionId,
     });
+
+    if (isResume) {
+      const u = result.usage;
+      const total = u.inputTokens || 1;
+      log.info(
+        `brainThink resume cache: read=${u.cacheReadInputTokens}/${total} (${((u.cacheReadInputTokens / total) * 100).toFixed(0)}%)`,
+      );
+    }
+
+    return result;
   }
 
   // --- Worker session ---
@@ -1817,6 +1840,7 @@ Respond with EXACTLY this JSON (no markdown):
       subtaskDescription?: string;
       workInstructions?: WorkInstructions;
       approvedPlan?: string;
+      resumeSessionId?: string;
     },
   ): Promise<SessionResult> {
     const description = opts?.subtaskDescription ?? task.task_description;
@@ -1828,10 +1852,14 @@ Respond with EXACTLY this JSON (no markdown):
         workInstructions: opts?.workInstructions,
       });
 
+    const isResume = !!opts?.resumeSessionId;
+
     // If an approved plan exists, prepend it to the worker prompt
-    const prompt = opts?.approvedPlan
-      ? `${basePrompt}\n\n## Approved Implementation Plan\nFollow this plan that was reviewed and approved:\n\n${opts.approvedPlan}`
-      : basePrompt;
+    const prompt = isResume
+      ? `--- NEXT SUBTASK ---\n${description}\n\n${opts?.approvedPlan ? `## Approved Plan\n${opts.approvedPlan}\n\n` : ""}Continue working in this session.`
+      : opts?.approvedPlan
+        ? `${basePrompt}\n\n## Approved Implementation Plan\nFollow this plan that was reviewed and approved:\n\n${opts.approvedPlan}`
+        : basePrompt;
 
     const complexity =
       opts?.complexity ??
@@ -1840,7 +1868,7 @@ Respond with EXACTLY this JSON (no markdown):
         | undefined);
     const cConfig = COMPLEXITY_CONFIG[complexity ?? "M"];
 
-    return this.workerSession.run(prompt, {
+    const result = await this.workerSession.run(prompt, {
       permissionMode: "bypassPermissions",
       maxTurns: cConfig.maxTurns,
       maxBudget: Math.min(
@@ -1850,8 +1878,19 @@ Respond with EXACTLY this JSON (no markdown):
       cwd: this.config.projectPath,
       timeout: cConfig.timeout,
       model: resolveModelId(this.config.values.claude.model),
-      appendSystemPrompt: systemPrompt,
+      appendSystemPrompt: isResume ? undefined : systemPrompt,
+      resumeSessionId: opts?.resumeSessionId,
     });
+
+    if (isResume) {
+      const u = result.usage;
+      const total = u.inputTokens || 1;
+      log.info(
+        `workerExecute resume cache: read=${u.cacheReadInputTokens}/${total} (${((u.cacheReadInputTokens / total) * 100).toFixed(0)}%)`,
+      );
+    }
+
+    return result;
   }
 
   private async executeSubtasks(
@@ -1876,6 +1915,8 @@ Respond with EXACTLY this JSON (no markdown):
     }));
     const sorted = withId.sort((a, b) => a.order - b.order);
 
+    let lastSuccessfulSessionId: string | undefined;
+
     for (let i = 0; i < sorted.length; i++) {
       const st = sorted[i];
       log.info(
@@ -1888,13 +1929,14 @@ Respond with EXACTLY this JSON (no markdown):
       );
       await this.taskStore.updateTask(task.id, { subtasks: currentSubtasks });
 
-      // Execute in fresh worker session
+      // Execute worker — resume from previous subtask if available
       const result = await this.workerExecute(task, {
         persona: opts.persona,
         taskType: opts.taskType,
         complexity: opts.complexity,
         workInstructions: opts.workInstructions,
         subtaskDescription: st.description,
+        resumeSessionId: lastSuccessfulSessionId,
       });
 
       if (result.costUsd > 0)
@@ -2034,6 +2076,9 @@ Respond with EXACTLY this JSON (no markdown):
       await this.taskStore.updateTask(task.id, { subtasks: doneSubtasks });
       // Re-read task for updated subtask state
       task = (await this.taskStore.getTask(task.id))!;
+
+      // Capture session for next subtask resume (only on success)
+      lastSuccessfulSessionId = result.sessionId;
     }
 
     return { success: true };

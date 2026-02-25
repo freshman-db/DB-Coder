@@ -515,7 +515,7 @@ def process_order(order_id):
             }),
           );
         }
-        if (prompt.includes("boundary contract auditor")) {
+        if (prompt.includes("boundary contract auditor") || prompt.includes("BOUNDARY VERIFICATION")) {
           return makeResult(JSON.stringify({ findings: [finding] }));
         }
         return makeResult("[]"); // AI refinement
@@ -571,7 +571,7 @@ def process_order(order_id):
             }),
           );
         }
-        if (prompt.includes("boundary contract auditor")) {
+        if (prompt.includes("boundary contract auditor") || prompt.includes("BOUNDARY VERIFICATION")) {
           callCount++;
           const mismatch =
             callCount === 1 ? "mismatch-alpha" : "mismatch-beta";

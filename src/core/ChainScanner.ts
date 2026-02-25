@@ -378,7 +378,7 @@ export class ChainScanner {
       }
 
       try {
-        const { chain, cost: traceCost } = await this.traceChain(
+        const { chain, cost: traceCost, sessionId } = await this.traceChain(
           entry,
           projectPath,
         );
@@ -388,6 +388,7 @@ export class ChainScanner {
           const { findings, cost: verifyCost } = await this.verifyBoundaries(
             chain,
             projectPath,
+            sessionId,
           );
           totalCost += verifyCost;
           allFindings.push(...findings);
@@ -565,7 +566,7 @@ export class ChainScanner {
   private async traceChain(
     entry: EntryPoint,
     projectPath: string,
-  ): Promise<{ chain: TracedChain; cost: number }> {
+  ): Promise<{ chain: TracedChain; cost: number; sessionId?: string }> {
     const prompt = `Given this entry point: "${entry.name}" in ${entry.file}:${entry.line} (kind: ${entry.kind})
 
 Task: Trace the execution chain from this entry point.
@@ -629,6 +630,10 @@ Output ONLY a JSON object with this structure:
         boundaries: parsed.boundaries,
       },
       cost: result.costUsd,
+      sessionId:
+        !result.isError && result.exitCode === 0
+          ? result.sessionId
+          : undefined,
     };
   }
 
@@ -637,10 +642,39 @@ Output ONLY a JSON object with this structure:
   private async verifyBoundaries(
     chain: TracedChain,
     projectPath: string,
+    resumeSessionId?: string,
   ): Promise<{ findings: BoundaryFinding[]; cost: number }> {
     const boundariesJson = JSON.stringify(chain.boundaries, null, 2);
 
-    const prompt = `You are a boundary contract auditor. Verify the following cross-module boundaries.
+    const prompt = resumeSessionId
+      ? `--- BOUNDARY VERIFICATION ---
+Now verify the boundaries you found in the chain above.
+
+For each boundary:
+1. Read the PRODUCER code — what does it actually return in ALL paths (normal, error, timeout)?
+2. Read the CONSUMER code — what does it assume about the input? How does it handle null, "", 0, -1?
+3. Compare contracts:
+   - null vs "" vs undefined (these behave differently with ||, ??, &&)
+   - -1 vs 0 (error sentinel vs valid value)
+   - || vs ?? (|| treats "" and 0 as falsy; ?? only treats null/undefined)
+   - .catch(()=>{}) silently swallowing vs propagating errors
+   - Promise<T> where T might be undefined but consumer doesn't check
+4. ONLY report REAL mismatches where data can actually flow incorrectly.
+
+Output ONLY a JSON object:
+{
+  "findings": [
+    {
+      "boundary": { "crossing": "A → B", "producerFile": "...", "consumerFile": "...", "dataFlowing": "...", "producerContract": "...", "consumerAssumption": "..." },
+      "mismatch": "specific description of what's wrong",
+      "severity": "critical|high|medium",
+      "failureScenario": "what concrete problem this causes"
+    }
+  ]
+}
+
+If all boundaries are clean, return: { "findings": [] }`
+      : `You are a boundary contract auditor. Verify the following cross-module boundaries.
 
 ## Chain: ${chain.entryPoint.name} (${chain.entryPoint.file})
 ## Call path: ${chain.callPath.join(" → ")}
@@ -681,8 +715,10 @@ If all boundaries are clean, return: { "findings": [] }`;
       timeout: 600_000,
       model: resolveModelId(this.config.values.brain.model),
       disallowedTools: ["Edit", "Write", "NotebookEdit"],
-      appendSystemPrompt:
-        "You are auditing boundary contracts. Read both producer and consumer code. Only report verified mismatches. Output ONLY valid JSON.",
+      appendSystemPrompt: resumeSessionId
+        ? undefined
+        : "You are auditing boundary contracts. Read both producer and consumer code. Only report verified mismatches. Output ONLY valid JSON.",
+      resumeSessionId,
     });
 
     const parsed = extractJsonFromText(result.text, (v) => {
