@@ -204,7 +204,7 @@ db-coder pause / resume      # 暂停/恢复
 
 3. **硬验证** — 运行 `tsc` 并对比基线错误计数。新增错误会触发工人 session 续传修复。
 
-4. **Codex 审查** — Codex CLI 独立审查 git diff。结果通过 `mergeReviews()` 与大脑评估交叉验证。
+4. **Codex 审查** — Codex CLI 独立审查 git diff。结果通过置信度过滤与大脑评估交叉验证。
 
 5. **大脑反思** — 大脑分析任务结果，编辑 CLAUDE.md 添加新规则/教训，并将经验保存到 claude-mem 供未来参考。
 

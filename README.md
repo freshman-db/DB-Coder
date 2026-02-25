@@ -204,7 +204,7 @@ The orchestrator (MainLoop) drives two independent Claude Code CLI sessions:
 
 3. **Hard Verification** — Runs `tsc` and compares error count against baseline. New errors trigger a fix cycle via the worker's session continuation.
 
-4. **Codex Review** — Codex CLI reviews the git diff independently. Results are cross-validated with the brain's assessment using `mergeReviews()`.
+4. **Codex Review** — Codex CLI reviews the git diff independently. Results are cross-validated with the brain's assessment using confidence-based filtering.
 
 5. **Brain Reflection** — Brain analyzes outcomes, edits CLAUDE.md with new rules/lessons, and saves experience to claude-mem for future reference.
 

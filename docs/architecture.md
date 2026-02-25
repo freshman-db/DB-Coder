@@ -98,7 +98,7 @@ hardVerify (shell: tsc)
 codexReview (Codex CLI)
   - codex exec 审查 git diff
   - 与 Claude 审查结果交叉验证
-  - mergeReviews() 分类 mustFix / shouldFix
+  - 置信度过滤分类 mustFix / shouldFix
   ▼
 brainReflect (大脑 session, 可编辑)
   - 分析任务结果、审查反馈
@@ -120,7 +120,7 @@ mergeBranch (验证通过时)
 - 待办优先级
 - 环境规则 (构建命令、DB 连接等)
 - DB Schema
-- 功能链路定义 (深度审查用)
+- 功能链路定义 (ChainScanner 自动推导补充)
 - 踩过的坑 (经验教训)
 
 大脑反思时直接编辑 CLAUDE.md，规则自然演化，diff 即进化历史。
@@ -152,6 +152,11 @@ task_logs: id(serial), task_id(fk), phase, agent, input_summary,
 
 -- 每日费用
 daily_costs: date(pk), total_cost_usd, task_count
+
+-- 链路扫描状态
+chain_scan_state: project_path(pk), next_index, entry_points(jsonb),
+                  known_fingerprints(jsonb), last_discovery_at,
+                  last_scan_at, scan_count, updated_at
 
 -- 计划草案 (v2 中 chat 相关字段暂停使用)
 plan_drafts: id(serial), project_path, plan(jsonb), status,
@@ -222,7 +227,9 @@ src/
 ├── index.ts                         # CLI 入口 (commander)
 ├── core/
 │   ├── MainLoop.ts                  # 核心编排循环 (~2400行)
-│   ├── MainLoop.test.ts             # 纯函数测试 (mergeReviews, countTscErrors 等)
+│   ├── MainLoop.test.ts             # 纯函数测试 (countTscErrors 等)
+│   ├── ChainScanner.ts              # 链路扫描器 (自动入口发现+边界验证)
+│   ├── chain-scanner-types.ts       # ChainScanner 类型定义
 │   ├── PersonaLoader.ts             # Persona 加载 + Skill 映射 + Worker Prompt 构建
 │   ├── CycleEventBus.ts             # 类型化事件总线 (循环生命周期)
 │   ├── CycleEvents.ts               # 循环事件类型定义

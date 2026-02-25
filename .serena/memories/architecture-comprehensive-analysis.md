@@ -17,7 +17,7 @@ MainLoop (編排器, ~1450 lines)
 │   ├── brainDecideDirective() → fallback when no task
 │   ├── brainReflect() → learn, update CLAUDE.md, evolve personas
 │   ├── specReview() → Stage 1 compliance check
-│   ├── deepChainReview() → periodic (every 5 tasks)
+│   ├── chainScanner.scanNext() → periodic (every N tasks)
 │   └── claudeMdMaintenance() → periodic (every 15 tasks)
 │
 ├── Worker Session (读写, 執行任務)
@@ -88,7 +88,7 @@ MainLoop (編排器, ~1450 lines)
 9. **Merge Decision**: all three passed? → merge + log + self-build (if self-project)
 10. **Reflect Phase**: brainReflect (learn + update CLAUDE.md + evolve persona)
 11. **Periodic Tasks**:
-    - Every 5 tasks: deepChainReview
+    - Every N tasks: chainScanner.scanNext() (ChainScanner)
     - Every 15 tasks: claudeMdMaintenance
 
 ### 4. **Task Store** (1200+ lines, PostgreSQL CRUD)
