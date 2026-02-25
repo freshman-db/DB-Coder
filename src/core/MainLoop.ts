@@ -809,11 +809,25 @@ export class MainLoop {
         );
 
         // isError is a warning, not a gate — hardVerify makes the final call
+        let workerErrMsg: string | undefined;
         if (workerResult.isError) {
-          const errMsg = `Worker reported error: ${workerResult.errors.join("; ") || "unknown error"}`;
-          log.warn(errMsg);
+          workerErrMsg = `Worker reported error: ${workerResult.errors.join("; ") || "unknown error"}`;
+          log.warn(workerErrMsg);
+          await this.taskStore.addLog({
+            task_id: task.id,
+            phase: "execute",
+            agent: "worker",
+            input_summary: "worker reported isError",
+            output_summary: workerErrMsg,
+            cost_usd: 0,
+            duration_ms: 0,
+          });
         }
-        this.endStep("execute", "done");
+        this.endStep(
+          "execute",
+          workerResult.isError ? "failed" : "done",
+          workerErrMsg,
+        );
 
         // Hard verification — always runs regardless of workerResult.isError
         this.beginStep("verify");
@@ -1784,9 +1798,15 @@ Respond with EXACTLY this JSON (no markdown):
       });
 
       // isError is a warning, not a gate — hardVerify makes the final call
+      let subtaskWorkerErrMsg: string | undefined;
       if (result.isError) {
-        const errMsg = `Subtask ${i + 1} worker reported error: ${result.errors.join("; ") || "unknown error"}`;
-        log.warn(errMsg);
+        subtaskWorkerErrMsg = `Subtask ${i + 1} worker reported error: ${result.errors.join("; ") || "unknown error"}`;
+        log.warn(subtaskWorkerErrMsg);
+        // Persist worker error in subtask history
+        const updatedSubtasks = (task.subtasks ?? []).map((s, idx) =>
+          idx === i ? { ...s, workerError: subtaskWorkerErrMsg } : s,
+        );
+        await this.taskStore.updateTask(task.id, { subtasks: updatedSubtasks });
       }
 
       // Per-subtask hard verify with HALT retry loop — always runs
@@ -1871,7 +1891,11 @@ Respond with EXACTLY this JSON (no markdown):
           await this.taskStore.updateTask(task.id, {
             subtasks: failedSubtasks,
           });
-          return { success: false };
+          const verifyReason = lastVerification.reason || "verification failed";
+          const fullReason = subtaskWorkerErrMsg
+            ? `${verifyReason} (worker also reported: ${result.errors.join("; ") || "unknown error"})`
+            : verifyReason;
+          return { success: false, reason: fullReason };
         }
       }
 

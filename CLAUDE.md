@@ -90,7 +90,8 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 入口: `MainLoop.runCycle()`
 路径: [queue-pickup | brainDecide → createTask] → [方案阶段 M/L/XL: workerAnalyze → reviewPlan → brainSynthesizePlan] → workerExecute(分支) → hardVerify → [workerFix 重试] → codeReview(互斥审查) → brainReviewDecision(5选1) → [workerReviewFix → hardVerify → codeReview → brainFinalDecision (最多1轮)] → brainReflect → [merge | block | split] → [chainScan 每N任务] → [claudeMdMaintenance 每15任务]
 关注: 错误向上冒泡, 验证失败阻止合并, 费用追踪完整, Worker/Reviewer 自动互斥
-已知缺陷: merge 失败丢弃有效工作 (无 rebase 重试); brainReflect 在 merge 前运行 (失败丢弃已验证代码); 成功路径 switch/merge/delete 无独立异常隔离; catch/finally 中 switchBranch 在 dirty state 下静默失败
+已知缺陷: merge 失败丢弃有效工作 (无 rebase 重试); catch/finally 中 switchBranch 在 dirty state 下静默失败
+已修复 (8968d95): brainReflect 独立 try/catch 不阻止合并; deleteBranch 独立 try/catch; workerResult.isError 检查; commitAll 错误可见
 
 ### 方案阶段 (M/L/XL 任务)
 入口: runCycle() 内, `complexity !== "S"` 时触发
@@ -108,7 +109,8 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 入口: `workerExecute(task, approvedPlan?)`
 路径: WorkerAdapter.execute(prompt) → [Claude: ClaudeCodeSession.run() | Codex: CodexBridge.execute()] → 编码 → git commit → 返回 WorkerResult
 关注: timeout 处理, 成本追踪, approvedPlan 在方案阶段后传入, sessionId 用于 workerFix 续传 (仅 Claude), complexity 分级控制资源 (S/M/L/XL)
-已知缺陷: workerExecute 返回后不检查 isError; workerFix 的 sessionId="" 导致重试循环提前退出
+已知缺陷: workerFix 的 sessionId="" 导致重试循环提前退出
+已修复 (8968d95): workerExecute 返回后检查 isError (单任务+子任务路径)
 
 ### 硬验证
 入口: `hardVerify(baselineErrors, startCommit, projectPath)`
@@ -129,8 +131,9 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 ### 反思
 入口: `brainReflect(task, outcome, verification, projectPath, personaName?)`
 路径: brainSession.run(反思 prompt, allowedTools=[Edit,Write...]) → 解析 PERSONA_UPDATE 块 → 更新 persona 统计
-关注: 运行在任务分支上, 可编辑 CLAUDE.md 和 persona, 失败会导致整个任务 failed
-已知缺陷: 在任务分支上执行导致 reject 时丢失编辑; 成功时未提交编辑泄漏到 main; 在 merge 前运行, 失败阻止已验证任务合并
+关注: 运行在任务分支上, 可编辑 CLAUDE.md 和 persona, 失败不阻止合并 (独立 try/catch)
+已知缺陷: 在任务分支上执行导致 reject 时丢失编辑; 成功时未提交编辑泄漏到 main
+已修复 (8968d95): 失败不再阻止已验证任务合并 (独立 try/catch, 降为 warn)
 
 ## 设计原则
 
@@ -170,9 +173,9 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 - 流水线中断后任务状态残留: specReview 后若 codexReview 异常或服务重启, 任务永停 active/executing。需 cycle 级 try/catch 保证最终状态一致
 - CLI 命令错误处理不一致: 旧命令无 try/catch (自然冒泡), 新增命令 try/catch 吞错误。应统一
 - hardVerify 多重缺陷: (1) 空 diff 只 warn 不 fail [已修复 9258ac2, 未合并]; (2) baselineErrors=-1 时短路自动 pass [已修复 9258ac2, 未合并]; (3) countTscErrors 超时返回 0 误认编译成功 [已修复 a19ca93, 未合并]
-- 成功路径异常隔离缺失: merge 冲突/dirty git state/deleteBranch 失败都走外层 catch, 已验证代码被 cleanup 永久丢失。switchBranch 前需 git reset --hard; 三步应各自 try/catch; deleteBranch 失败不应标 failed
-- worker 执行/重试缺陷: (1) workerExecute 不检查 isError, 失败 session 继续 hardVerify [已修复 6fd4106, 未合并]; (2) makeErrorResult sessionId="" 导致 while 循环提前退出 [已修复 6fd4106, 未合并]; (3) commitAll .catch(()=>{}) 致验证在旧代码上运行 [已修复 6fd4106, 未合并]; (4) subtask 路径同样不检查 isError
-- brainReflect 三重问题: (1) 在任务分支上运行, reject 时丢失学习; (2) 未 commit 编辑泄漏到 main 或在分支差异时报错丢代码; (3) 失败标 failed 阻止已验证任务合并, 应独立 try/catch 或移到 merge 之后
+- 成功路径异常隔离缺失: merge 冲突/dirty git state/deleteBranch 失败都走外层 catch, 已验证代码被 cleanup 永久丢失。switchBranch 前需 git reset --hard [已修复 8968d95: deleteBranch 独立 try/catch, brainReflect 独立 try/catch; 未修复: switchBranch/mergeBranch 仍无独立隔离]
+- worker 执行/重试缺陷: (1) workerExecute 不检查 isError [已修复 8968d95, 单任务+子任务]; (2) makeErrorResult sessionId="" 导致 while 循环提前退出 [未修复]; (3) commitAll .catch(()=>{}) 致验证在旧代码上运行 [已修复 8968d95, 3处]; (4) subtask 路径同样不检查 isError [已修复 8968d95]
+- brainReflect 三重问题: (1) 在任务分支上运行, reject 时丢失学习 [未修复]; (2) 未 commit 编辑泄漏到 main 或在分支差异时报错丢代码 [未修复]; (3) 失败标 failed 阻止已验证任务合并 [已修复 8968d95, 独立 try/catch]
 - specReview 多重缺陷: (1) diff 截断无标记 [已修复 90bd756, 未合并]; (2) diff 按字母序排, .test.ts 占满截断后核心变更不可见; (3) parseSpecResult 用 JSON.parse 而非 extractJsonFromText [重试浪费 ~$0.5-2]; (4) startCommit="" 时浪费全部审查费用
 - CostTracker 系统性绕过: chainScan/claudeMdMaintenance/brainDecide 等 7+ 调用点直接用 taskStore.addDailyCost() 绕过 CostTracker.addCost(), sessionCost 仅反映 worker+verify+review。进程崩溃后 sessionCost 归零与 DB 不一致
 - makeErrorResult 返回 sessionId="" 而非 null: 调用方无法区分"无 session"和"有 session 但出错"
@@ -188,3 +191,4 @@ evaluation_events, review_events, goal_progress, prompt_versions, config_proposa
 - getNextTask 无原子拾取保护: SELECT 无 FOR UPDATE SKIP LOCKED, 文件锁仅单机有效
 - `JSON.parse() as T` 无运行时验证: 外部数据 (config file/API response) 解析后用 `as` 断言, 畸形值 (port: "abc") 直接透传导致运行时静默失败。必须 typeof 检查每个字段
 - specReview 非确定性: 相同代码两次审查结论可能不同 (PASS vs FAIL), Brain LLM 审查天然非确定, 关键质量门禁不应仅依赖单次 LLM 判断
+- 新增 error path 时必须审计所有状态通道: eventBus.emit/taskStore.addLog/返回值/控制标志, 遗漏任一会导致监控盲区或状态不一致 (8968d95 审查暴露 5 处遗漏)
