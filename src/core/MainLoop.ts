@@ -201,9 +201,20 @@ function normalizeSubtasks(
     ) {
       valid.push(item as Record<string, unknown>);
     } else {
+      const descPreview =
+        typeof item === "object" &&
+        item !== null &&
+        typeof (item as Record<string, unknown>).description === "string"
+          ? ((item as Record<string, unknown>).description as string)
+          : undefined;
       log.warn(
         "normalizeSubtasks: dropping invalid subtask item (missing string description)",
-        { item },
+        {
+          type: typeof item,
+          descriptionPreview: descPreview
+            ? descPreview.slice(0, 120)
+            : undefined,
+        },
       );
     }
   }
@@ -1685,7 +1696,7 @@ ${analysisReport}
                   type: "object",
                   properties: {
                     description: { type: "string" },
-                    order: { type: "number" },
+                    order: { type: "integer", minimum: 1 },
                   },
                   required: ["description", "order"],
                 },
