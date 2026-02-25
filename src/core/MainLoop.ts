@@ -926,6 +926,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
             ? normalizedSubtasks.map((st, i) => ({ ...st, order: i + 1 }))
             : normalizedSubtasks;
         // Subtask execution loop
+        const executeStart = Date.now();
         const result = await this.executeSubtasks(task, subtasksForExec, {
           persona: brainOpts.persona,
           taskType: brainOpts.taskType,
@@ -938,7 +939,14 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
         verification.passed = result.success;
         if (!result.success)
           verification.reason = result.reason || "Subtask verification failed";
-        this.endStep("execute", result.success ? "done" : "failed");
+        const executeDurationMs =
+          Date.now() - executeStart - result.totalVerifyMs;
+        this.endStep(
+          "execute",
+          result.success ? "done" : "failed",
+          undefined,
+          Math.max(0, executeDurationMs),
+        );
         this.eventBus.emit(
           this.makeEvent("execute", "after", {
             startCommit,

@@ -1,4 +1,4 @@
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 
 import { MainLoop } from "./MainLoop.js";
@@ -21,6 +21,12 @@ function buildStub(overrides: {
   ) => Promise<SessionResult>;
   hardVerify: () => Promise<{ passed: boolean; reason?: string }>;
   costTracker: { addCost: (...args: unknown[]) => Promise<void> };
+  workerFix?: (
+    sessionId: string,
+    errors: string,
+    task: Task,
+  ) => Promise<SessionResult>;
+  maxRetries?: number;
 }) {
   // Bypass constructor completely
   const loop = Object.create(MainLoop.prototype) as InstanceType<
@@ -33,12 +39,15 @@ function buildStub(overrides: {
   any.costTracker = overrides.costTracker;
   any.config = {
     projectPath: "/tmp/test",
-    values: { autonomy: { maxRetries: 0 } },
+    values: { autonomy: { maxRetries: overrides.maxRetries ?? 0 } },
   };
 
   // Replace private methods
   any.workerExecute = overrides.workerExecute;
   any.hardVerify = overrides.hardVerify;
+  if (overrides.workerFix) {
+    any.workerFix = overrides.workerFix;
+  }
 
   return loop;
 }
@@ -624,13 +633,9 @@ describe("executeSubtasks", () => {
     ];
 
     let currentTask = makeTask(subtaskRecords);
-
-    // Stub Date.now to simulate verify taking 50ms per call
-    const realDateNow = Date.now;
-    let fakeTime = 1000;
     let hardVerifyCalls = 0;
-    Date.now = () => fakeTime;
 
+    mock.timers.enable({ apis: ["Date"] });
     try {
       const loop = buildStub({
         taskStore: {
@@ -649,7 +654,7 @@ describe("executeSubtasks", () => {
         hardVerify: async () => {
           hardVerifyCalls++;
           // Advance time by 50ms during each verify call
-          fakeTime += 50;
+          mock.timers.tick(50);
           return { passed: true };
         },
         costTracker: { addCost: async () => {} },
@@ -681,7 +686,7 @@ describe("executeSubtasks", () => {
         "totalVerifyMs should be sum of per-subtask verify durations (50 + 50 = 100)",
       );
     } finally {
-      Date.now = realDateNow;
+      mock.timers.reset();
     }
   });
 
@@ -722,6 +727,77 @@ describe("executeSubtasks", () => {
       0,
       "totalVerifyMs should be 0 when no verify ran",
     );
+  });
+
+  it("should accumulate totalVerifyMs across retry verify calls (not workerFix time)", async () => {
+    // First hardVerify fails → workerFix → commitAll throws (no git in test)
+    // → loop breaks. totalVerifyMs should include the failed verify duration
+    // but NOT the workerFix duration.
+    const subtaskRecords: SubTaskRecord[] = [
+      {
+        id: "1",
+        description: "only subtask",
+        executor: "claude",
+        status: "pending",
+        order: 1,
+      },
+    ];
+
+    let currentTask = makeTask(subtaskRecords);
+    let hardVerifyCalls = 0;
+
+    mock.timers.enable({ apis: ["Date"] });
+    try {
+      const loop = buildStub({
+        taskStore: {
+          getTask: async () => structuredClone(currentTask),
+          updateTask: async (_id, updates) => {
+            if (updates.subtasks) {
+              currentTask = {
+                ...currentTask,
+                subtasks: updates.subtasks as SubTaskRecord[],
+              };
+            }
+          },
+          addLog: async () => {},
+        },
+        workerExecute: async () => makeSessionResult(),
+        hardVerify: async () => {
+          hardVerifyCalls++;
+          // Advance time by 30ms per verify call
+          mock.timers.tick(30);
+          return { passed: false, reason: "errors increased" };
+        },
+        workerFix: async () => {
+          // Advance time by 200ms for fix work — should NOT count in totalVerifyMs
+          mock.timers.tick(200);
+          return makeSessionResult();
+        },
+        costTracker: { addCost: async () => {} },
+        maxRetries: 1,
+      });
+
+      const result = await (loop as unknown as Record<string, Function>)[
+        "executeSubtasks"
+      ](currentTask, [{ description: "only subtask", order: 1 }], {
+        baselineErrors: 0,
+        startCommit: "abc123",
+      });
+
+      assert.equal(result.success, false, "Should fail after HALT");
+      assert.ok(
+        hardVerifyCalls >= 1,
+        "hardVerify should be called at least once",
+      );
+      // Initial verify = 30ms. Retry verify may or may not run (commitAll throws),
+      // but workerFix's 200ms must NOT be included.
+      assert.ok(
+        result.totalVerifyMs >= 30 && result.totalVerifyMs <= 60,
+        `totalVerifyMs should be 30-60ms (verify only, no workerFix time), got: ${result.totalVerifyMs}`,
+      );
+    } finally {
+      mock.timers.reset();
+    }
   });
 
   it("should fail when patchSubtask pre-read returns task without matching subtask", async () => {
