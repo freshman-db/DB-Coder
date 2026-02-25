@@ -1064,20 +1064,28 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
         } catch (verifyErr) {
           const errMsg =
             verifyErr instanceof Error ? verifyErr.message : String(verifyErr);
-          const execStep = this.cycleSteps.find((s) => s.phase === "execute");
+          const execStep = this.cycleSteps.findLast(
+            (s) => s.phase === "execute",
+          );
           if (execStep && execStep.finishedAt != null) {
-            this.updateStepStatus(
-              "execute",
-              "failed",
-              `Verification phase exception: ${errMsg}`,
-            );
+            try {
+              this.updateStepStatus(
+                "execute",
+                "failed",
+                `Verification phase exception: ${errMsg}`,
+              );
+            } catch (statusErr) {
+              log.warn(
+                "updateStepStatus failed in catch(verifyErr), preserving original error",
+                { statusErr },
+              );
+            }
           } else {
             log.warn(
               "Skipping updateStepStatus for execute: step not found or not finished",
               {
                 exists: !!execStep,
                 finishedAt: execStep?.finishedAt,
-                verifyErr: errMsg,
               },
             );
           }
