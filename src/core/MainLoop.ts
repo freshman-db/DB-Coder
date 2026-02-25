@@ -2020,15 +2020,6 @@ Respond with EXACTLY this JSON (no markdown):
     if (!freshTask) {
       const reason = `Task ${task.id} disappeared before subtask execution`;
       log.error(reason);
-      await this.taskStore.addLog({
-        task_id: task.id,
-        phase: "error",
-        agent: "system",
-        input_summary: "executeSubtasks entry re-read",
-        output_summary: reason,
-        cost_usd: 0,
-        duration_ms: 0,
-      });
       return { success: false, reason };
     }
     task = freshTask;
@@ -2100,15 +2091,6 @@ Respond with EXACTLY this JSON (no markdown):
         if (!refreshedAfterRunning) {
           const reason = `Task ${task.id} disappeared after running-status write`;
           log.error(reason);
-          await this.taskStore.addLog({
-            task_id: task.id,
-            phase: "error",
-            agent: "system",
-            input_summary: "executeSubtasks running-status re-read",
-            output_summary: reason,
-            cost_usd: 0,
-            duration_ms: 0,
-          });
           return { success: false, reason };
         }
         task = refreshedAfterRunning;
@@ -2158,15 +2140,6 @@ Respond with EXACTLY this JSON (no markdown):
         if (!refreshedAfterError) {
           const reason = `Task ${task.id} disappeared during subtask error processing`;
           log.error(reason);
-          await this.taskStore.addLog({
-            task_id: task.id,
-            phase: "error",
-            agent: "system",
-            input_summary: "executeSubtasks error-path re-read",
-            output_summary: reason,
-            cost_usd: 0,
-            duration_ms: 0,
-          });
           return { success: false, reason };
         }
         task = refreshedAfterError;
@@ -2280,15 +2253,6 @@ Respond with EXACTLY this JSON (no markdown):
       if (!refreshedAfterDone) {
         const reason = `Task ${task.id} disappeared after marking subtask done`;
         log.error(reason);
-        await this.taskStore.addLog({
-          task_id: task.id,
-          phase: "error",
-          agent: "system",
-          input_summary: "executeSubtasks done-status re-read",
-          output_summary: reason,
-          cost_usd: 0,
-          duration_ms: 0,
-        });
         return { success: false, reason };
       }
       task = refreshedAfterDone;

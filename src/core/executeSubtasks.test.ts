@@ -296,11 +296,14 @@ describe("executeSubtasks", () => {
       false,
       "Worker should NOT be called when task is null",
     );
-    // Verify error was logged to taskStore
-    const errorLog = addLogCalls.find(
-      (c) => (c as Record<string, unknown>).phase === "error",
+    // addLog must NOT be called when task is deleted — FK constraint would fail
+    assert.equal(
+      addLogCalls.filter(
+        (c) => (c as Record<string, unknown>).phase === "error",
+      ).length,
+      0,
+      "addLog must NOT be called with phase='error' when task is deleted — FK constraint would fail",
     );
-    assert.ok(errorLog, "taskStore.addLog should be called with phase='error'");
   });
 
   it("should fail-fast when getTask() returns null after running-status write", async () => {
@@ -360,10 +363,13 @@ describe("executeSubtasks", () => {
       false,
       "Worker should NOT execute after task disappears",
     );
-    const errorLog = addLogCalls.find(
-      (c) => (c as Record<string, unknown>).phase === "error",
+    assert.equal(
+      addLogCalls.filter(
+        (c) => (c as Record<string, unknown>).phase === "error",
+      ).length,
+      0,
+      "addLog must NOT be called with phase='error' when task is deleted — FK constraint would fail",
     );
-    assert.ok(errorLog, "taskStore.addLog should be called with phase='error'");
   });
 
   it("should fail-fast when getTask() returns null after workerError write", async () => {
@@ -425,10 +431,13 @@ describe("executeSubtasks", () => {
       result.reason?.includes("subtask error processing"),
       `Reason should mention 'subtask error processing', got: ${result.reason}`,
     );
-    const errorLog = addLogCalls.find(
-      (c) => (c as Record<string, unknown>).phase === "error",
+    assert.equal(
+      addLogCalls.filter(
+        (c) => (c as Record<string, unknown>).phase === "error",
+      ).length,
+      0,
+      "addLog must NOT be called with phase='error' when task is deleted — FK constraint would fail",
     );
-    assert.ok(errorLog, "taskStore.addLog should be called with phase='error'");
   });
 
   it("should fail-fast when getTask() returns null after marking subtask done", async () => {
@@ -489,9 +498,12 @@ describe("executeSubtasks", () => {
       result.reason?.includes("marking subtask done"),
       `Reason should mention 'marking subtask done', got: ${result.reason}`,
     );
-    const errorLog = addLogCalls.find(
-      (c) => (c as Record<string, unknown>).phase === "error",
+    assert.equal(
+      addLogCalls.filter(
+        (c) => (c as Record<string, unknown>).phase === "error",
+      ).length,
+      0,
+      "addLog must NOT be called with phase='error' when task is deleted — FK constraint would fail",
     );
-    assert.ok(errorLog, "taskStore.addLog should be called with phase='error'");
   });
 });
