@@ -62,7 +62,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { safeBuild } from "../utils/safeBuild.js";
 import { CycleEventBus } from "./CycleEventBus.js";
 import type { CycleEvent, CyclePhase, CycleTiming } from "./CycleEvents.js";
@@ -2029,17 +2029,23 @@ Respond with EXACTLY this JSON (no markdown):
         }
       }
     }
+    const persistedIds = new Set((task.subtasks ?? []).map((s) => s.id));
     const withId = subtasks.map((st, i) => {
       const matchedId = orderToId.get(st.order);
-      if (!matchedId) {
-        log.warn(
-          `No persisted subtask found for order=${st.order}, using fallback id`,
-        );
+      if (matchedId) {
+        return { ...st, subtaskId: matchedId };
       }
-      return {
-        ...st,
-        subtaskId: matchedId ?? String(i + 1),
-      };
+      const fallback = String(i + 1);
+      if (persistedIds.has(fallback)) {
+        log.warn(
+          `No persisted subtask found for order=${st.order}, using fallback id=${fallback}`,
+        );
+        return { ...st, subtaskId: fallback };
+      }
+      log.warn(
+        `No persisted subtask for order=${st.order}, fallback=${fallback} not in persisted subtasks, using sentinel`,
+      );
+      return { ...st, subtaskId: `__sentinel_${randomUUID()}` };
     });
     const sorted = withId.sort((a, b) => a.order - b.order);
 
@@ -2052,10 +2058,13 @@ Respond with EXACTLY this JSON (no markdown):
       );
 
       // Update subtask status to running — match by id, not loop index
-      const currentSubtasks = (task.subtasks ?? []).map((s) =>
-        s.id === st.subtaskId ? { ...s, status: "running" as const } : s,
-      );
-      await this.taskStore.updateTask(task.id, { subtasks: currentSubtasks });
+      // Skip DB update for sentinel IDs that don't match any persisted subtask
+      if (persistedIds.has(st.subtaskId)) {
+        const currentSubtasks = (task.subtasks ?? []).map((s) =>
+          s.id === st.subtaskId ? { ...s, status: "running" as const } : s,
+        );
+        await this.taskStore.updateTask(task.id, { subtasks: currentSubtasks });
+      }
 
       // Execute worker — resume from previous subtask if available
       const result = await this.workerExecute(task, {
@@ -2085,13 +2094,17 @@ Respond with EXACTLY this JSON (no markdown):
       if (result.isError) {
         subtaskWorkerErrMsg = `Subtask ${i + 1} worker reported error: ${result.errors.join("; ") || "unknown error"}`;
         log.warn(subtaskWorkerErrMsg);
-        // Persist worker error in subtask history
-        const updatedSubtasks = (task.subtasks ?? []).map((s) =>
-          s.id === st.subtaskId
-            ? { ...s, workerError: subtaskWorkerErrMsg }
-            : s,
-        );
-        await this.taskStore.updateTask(task.id, { subtasks: updatedSubtasks });
+        // Persist worker error in subtask history — skip for sentinel IDs
+        if (persistedIds.has(st.subtaskId)) {
+          const updatedSubtasks = (task.subtasks ?? []).map((s) =>
+            s.id === st.subtaskId
+              ? { ...s, workerError: subtaskWorkerErrMsg }
+              : s,
+          );
+          await this.taskStore.updateTask(task.id, {
+            subtasks: updatedSubtasks,
+          });
+        }
         // Re-read task so in-memory subtasks include the workerError just persisted
         const refreshed = await this.taskStore.getTask(task.id);
         if (!refreshed) {
@@ -2177,18 +2190,20 @@ Respond with EXACTLY this JSON (no markdown):
             });
           }
 
-          const failedSubtasks = (task.subtasks ?? []).map((s) =>
-            s.id === st.subtaskId
-              ? {
-                  ...s,
-                  status: "failed" as const,
-                  result: lastVerification.reason,
-                }
-              : s,
-          );
-          await this.taskStore.updateTask(task.id, {
-            subtasks: failedSubtasks,
-          });
+          if (persistedIds.has(st.subtaskId)) {
+            const failedSubtasks = (task.subtasks ?? []).map((s) =>
+              s.id === st.subtaskId
+                ? {
+                    ...s,
+                    status: "failed" as const,
+                    result: lastVerification.reason,
+                  }
+                : s,
+            );
+            await this.taskStore.updateTask(task.id, {
+              subtasks: failedSubtasks,
+            });
+          }
           const verifyReason = lastVerification.reason || "verification failed";
           const fullReason = subtaskWorkerErrMsg
             ? `${verifyReason} (worker also reported: ${result.errors.join("; ") || "unknown error"})`
@@ -2197,11 +2212,13 @@ Respond with EXACTLY this JSON (no markdown):
         }
       }
 
-      // Mark subtask done
-      const doneSubtasks = (task.subtasks ?? []).map((s) =>
-        s.id === st.subtaskId ? { ...s, status: "done" as const } : s,
-      );
-      await this.taskStore.updateTask(task.id, { subtasks: doneSubtasks });
+      // Mark subtask done — skip for sentinel IDs
+      if (persistedIds.has(st.subtaskId)) {
+        const doneSubtasks = (task.subtasks ?? []).map((s) =>
+          s.id === st.subtaskId ? { ...s, status: "done" as const } : s,
+        );
+        await this.taskStore.updateTask(task.id, { subtasks: doneSubtasks });
+      }
       // Re-read task for updated subtask state
       task = (await this.taskStore.getTask(task.id))!;
 
