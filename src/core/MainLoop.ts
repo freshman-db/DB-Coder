@@ -158,6 +158,26 @@ export function applyStepStatusUpdate(
   return steps.map((s) => (s.phase === phase ? { ...s, status, summary } : s));
 }
 
+/** Marks ALL active steps as failed in one pass. Only touches status==="active". */
+export function failAllActiveSteps(
+  steps: CycleStep[],
+  errorMsg: string,
+  now?: number,
+): CycleStep[] {
+  const ts = now ?? Date.now();
+  return steps.map((s) => {
+    if (s.status !== "active") return s;
+    const durationMs = s.startedAt != null ? ts - s.startedAt : undefined;
+    return {
+      ...s,
+      status: "failed" as CycleStepStatus,
+      finishedAt: ts,
+      durationMs,
+      summary: errorMsg,
+    };
+  });
+}
+
 function coerceSubtaskOrder(value: unknown, fallback: number): number {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 1 || !Number.isInteger(n)) return fallback;
@@ -1438,11 +1458,9 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
       }
     } catch (err) {
       log.error("Task execution error", err);
-      // Mark the currently active step as failed and skip the rest
-      const activeStep = this.cycleSteps.find((s) => s.status === "active");
-      if (activeStep) {
-        this.endStep(activeStep.phase, "failed", String(err));
-      }
+      // Mark ALL active steps as failed (not just the first one)
+      this.cycleSteps = failAllActiveSteps(this.cycleSteps, String(err));
+      this.broadcastStatus();
       this.skipRemainingSteps();
       this.eventBus.emit(
         this.makeEvent("execute", "error", { error: String(err) }),

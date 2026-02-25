@@ -5,6 +5,7 @@ import {
   countTscErrors,
   setCountTscErrorsDepsForTests,
   applyStepStatusUpdate,
+  failAllActiveSteps,
 } from "./MainLoop.js";
 import type { CycleStep } from "./types.js";
 
@@ -177,5 +178,83 @@ describe("applyStepStatusUpdate", () => {
     assert.equal(result[0].durationMs, 1000);
     // Original not mutated
     assert.equal(steps[0].status, "done");
+  });
+});
+
+// --- failAllActiveSteps ---
+
+describe("failAllActiveSteps", () => {
+  it("marks all active steps as failed", () => {
+    const steps: CycleStep[] = [
+      {
+        phase: "decide",
+        status: "done",
+        startedAt: 100,
+        finishedAt: 200,
+        durationMs: 100,
+      },
+      { phase: "execute", status: "active", startedAt: 300 },
+      { phase: "verify", status: "active", startedAt: 400 },
+    ];
+    const result = failAllActiveSteps(steps, "boom", 500);
+    assert.equal(result[0].status, "done");
+    assert.equal(result[1].status, "failed");
+    assert.equal(result[1].summary, "boom");
+    assert.equal(result[1].finishedAt, 500);
+    assert.equal(result[1].durationMs, 200);
+    assert.equal(result[2].status, "failed");
+    assert.equal(result[2].summary, "boom");
+    assert.equal(result[2].finishedAt, 500);
+    assert.equal(result[2].durationMs, 100);
+    // Original not mutated
+    assert.equal(steps[1].status, "active");
+  });
+
+  it("is a no-op when no active steps exist", () => {
+    const steps: CycleStep[] = [
+      {
+        phase: "decide",
+        status: "done",
+        startedAt: 100,
+        finishedAt: 200,
+        durationMs: 100,
+      },
+      { phase: "execute", status: "skipped" },
+    ];
+    const result = failAllActiveSteps(steps, "error", 500);
+    assert.deepStrictEqual(result, steps);
+  });
+
+  it("does not touch non-active steps with same phase", () => {
+    const steps: CycleStep[] = [
+      {
+        phase: "execute",
+        status: "done",
+        startedAt: 100,
+        finishedAt: 200,
+        durationMs: 100,
+      },
+      { phase: "execute", status: "pending" },
+    ];
+    const result = failAllActiveSteps(steps, "error", 500);
+    assert.equal(result[0].status, "done");
+    assert.equal(result[1].status, "pending");
+  });
+
+  it("sets durationMs to undefined when startedAt is missing", () => {
+    const steps: CycleStep[] = [{ phase: "execute", status: "active" }];
+    const result = failAllActiveSteps(steps, "crash", 999);
+    assert.equal(result[0].status, "failed");
+    assert.equal(result[0].finishedAt, 999);
+    assert.equal(result[0].durationMs, undefined);
+  });
+
+  it("computes durationMs correctly when startedAt is 0", () => {
+    const steps: CycleStep[] = [
+      { phase: "execute", status: "active", startedAt: 0 },
+    ];
+    const result = failAllActiveSteps(steps, "crash", 500);
+    assert.equal(result[0].status, "failed");
+    assert.equal(result[0].durationMs, 500);
   });
 });
