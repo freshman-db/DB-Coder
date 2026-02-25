@@ -158,6 +158,12 @@ export function applyStepStatusUpdate(
   return steps.map((s) => (s.phase === phase ? { ...s, status, summary } : s));
 }
 
+function coerceSubtaskOrder(value: unknown, fallback: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 1 || !Number.isInteger(n)) return fallback;
+  return n;
+}
+
 type StatusListener = (status: StatusSnapshot) => void;
 
 export class MainLoop {
@@ -621,15 +627,20 @@ export class MainLoop {
           updates.plan = { complexity: decision.complexity };
         }
         if (decision.subtasks && decision.subtasks.length > 0) {
-          const rawOrders = decision.subtasks.map((st, i) => st.order ?? i + 1);
+          const rawOrders = decision.subtasks.map((st, i) =>
+            coerceSubtaskOrder(st.order, i + 1),
+          );
           const hasGaps = new Set(rawOrders).size !== rawOrders.length;
-          updates.subtasks = decision.subtasks.map((st, i) => ({
-            id: String(i + 1),
-            description: st.description,
-            executor: "claude" as const,
-            status: "pending" as const,
-            order: hasGaps ? i + 1 : (st.order ?? i + 1),
-          }));
+          updates.subtasks = decision.subtasks.map((st, i) => {
+            const coerced = coerceSubtaskOrder(st.order, i + 1);
+            return {
+              id: String(i + 1),
+              description: st.description,
+              executor: "claude" as const,
+              status: "pending" as const,
+              order: hasGaps ? i + 1 : coerced,
+            };
+          });
         }
         await this.taskStore.updateTask(task.id, updates);
       }
@@ -901,7 +912,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
         // Normalize orders to match persisted subtasks
         const normalizedSubtasks = brainOpts.subtasks.map((st, i) => ({
           ...st,
-          order: typeof st.order === "number" ? st.order : i + 1,
+          order: coerceSubtaskOrder(st.order, i + 1),
         }));
         // Deduplicate: if any orders collide, fall back to sequential
         const orderSet = new Set(normalizedSubtasks.map((s) => s.order));
@@ -2018,7 +2029,7 @@ Respond with EXACTLY this JSON (no markdown):
         }
       }
     }
-    const withId = subtasks.map((st) => {
+    const withId = subtasks.map((st, i) => {
       const matchedId = orderToId.get(st.order);
       if (!matchedId) {
         log.warn(
@@ -2027,7 +2038,7 @@ Respond with EXACTLY this JSON (no markdown):
       }
       return {
         ...st,
-        subtaskId: matchedId ?? String(st.order),
+        subtaskId: matchedId ?? String(i + 1),
       };
     });
     const sorted = withId.sort((a, b) => a.order - b.order);
