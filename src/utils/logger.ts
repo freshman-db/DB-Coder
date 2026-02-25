@@ -107,6 +107,12 @@ export class Logger {
     return LEVEL_PRIORITY[level] >= LEVEL_PRIORITY[this.minLevel];
   }
 
+  /** Check whether a message at the given level would be emitted.
+   *  Use to guard expensive argument construction before calling log methods. */
+  isEnabled(level: LogLevel): boolean {
+    return this.shouldLog(level);
+  }
+
   private writeConsole(entry: LogEntry): void {
     const color = LEVEL_COLORS[entry.level];
     const prefix = `${color}[${entry.timestamp}] [${entry.level.toUpperCase()}]${RESET}`;
