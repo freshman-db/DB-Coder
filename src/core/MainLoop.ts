@@ -201,9 +201,16 @@ function normalizeSubtasks(
     ) {
       valid.push(item as Record<string, unknown>);
     } else {
+      const descPreview =
+        typeof item === "object" && item !== null && "description" in item
+          ? String((item as Record<string, unknown>).description).slice(0, 120)
+          : undefined;
       log.warn(
         "normalizeSubtasks: dropping invalid subtask item (missing string description)",
-        { item },
+        {
+          type: typeof item,
+          descriptionPreview: descPreview,
+        },
       );
     }
   }
@@ -1685,7 +1692,7 @@ ${analysisReport}
                   type: "object",
                   properties: {
                     description: { type: "string" },
-                    order: { type: "number" },
+                    order: { type: "integer", minimum: 1 },
                   },
                   required: ["description", "order"],
                 },
