@@ -844,16 +844,6 @@ export class MainLoop {
           cost_usd: workerResult.costUsd,
           duration_ms: workerResult.durationMs,
         });
-        this.eventBus.emit(
-          this.makeEvent("execute", "after", {
-            startCommit,
-            result: {
-              costUsd: workerResult.costUsd,
-              durationMs: workerResult.durationMs,
-            },
-          }),
-        );
-
         // isError is a warning, not a gate — hardVerify makes the final call
         let workerErrMsg: string | undefined;
         if (workerResult.isError) {
@@ -873,6 +863,15 @@ export class MainLoop {
           "execute",
           workerResult.isError ? "failed" : "done",
           workerErrMsg,
+        );
+        this.eventBus.emit(
+          this.makeEvent("execute", "after", {
+            startCommit,
+            result: {
+              costUsd: workerResult.costUsd,
+              durationMs: workerResult.durationMs,
+            },
+          }),
         );
 
         // Hard verification — always runs regardless of workerResult.isError
@@ -1160,14 +1159,14 @@ export class MainLoop {
           projectPath,
           brainOpts?.persona,
         );
-        this.eventBus.emit(this.makeEvent("reflect", "after"));
         this.endStep("reflect", "done");
+        this.eventBus.emit(this.makeEvent("reflect", "after"));
       } catch (reflectErr) {
         log.warn(
           `brainReflect failed (non-fatal, continuing merge flow): ${reflectErr}`,
         );
-        this.eventBus.emit(this.makeEvent("reflect", "after", { error: true }));
         this.endStep("reflect", "failed", `brainReflect error: ${reflectErr}`);
+        this.eventBus.emit(this.makeEvent("reflect", "after", { error: true }));
       }
 
       // 10. Merge or cleanup
