@@ -1133,7 +1133,14 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
             singleVerify.reason,
           );
           if (!singleVerify.passed) {
-            this.updateStepStatus("execute", "failed", singleVerify.reason);
+            try {
+              this.updateStepStatus("execute", "failed", singleVerify.reason);
+            } catch (statusErr) {
+              log.warn(
+                "updateStepStatus('execute') failed after verify, continuing with failed verification result",
+                { statusErr },
+              );
+            }
           }
         } catch (verifyErr) {
           const errMsg =
