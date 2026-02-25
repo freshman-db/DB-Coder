@@ -2037,10 +2037,19 @@ Respond with EXACTLY this JSON (no markdown):
       }
       const fallback = String(i + 1);
       if (persistedIds.has(fallback)) {
+        const persistedOrder = (task.subtasks ?? []).find(
+          (s) => s.id === fallback,
+        )?.order;
+        if (persistedOrder === st.order) {
+          log.warn(
+            `No persisted subtask found for order=${st.order}, using fallback id=${fallback}`,
+          );
+          return { ...st, subtaskId: fallback };
+        }
         log.warn(
-          `No persisted subtask found for order=${st.order}, using fallback id=${fallback}`,
+          `Fallback id=${fallback} has order=${persistedOrder} but expected order=${st.order}, using sentinel`,
         );
-        return { ...st, subtaskId: fallback };
+        return { ...st, subtaskId: `__sentinel_${randomUUID()}` };
       }
       log.warn(
         `No persisted subtask for order=${st.order}, fallback=${fallback} not in persisted subtasks, using sentinel`,
