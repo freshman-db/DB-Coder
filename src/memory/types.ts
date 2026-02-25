@@ -60,6 +60,7 @@ export interface SubTaskRecord {
   executor: "claude" | "codex";
   status: "pending" | "running" | "done" | "failed";
   result?: string;
+  workerError?: string;
 }
 
 export interface Persona {

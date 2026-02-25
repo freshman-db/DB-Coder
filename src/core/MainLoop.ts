@@ -916,11 +916,6 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
             duration_ms: 0,
           });
         }
-        this.endStep(
-          "execute",
-          workerResult.isError ? "failed" : "done",
-          workerErrMsg,
-        );
         this.eventBus.emit(
           this.makeEvent("execute", "after", {
             startCommit,
@@ -1030,6 +1025,13 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
         workerSessionId = currentSessionId;
         verification.passed = singleVerify.passed;
         verification.reason = singleVerify.reason;
+
+        // endStep execute based on hardVerify result, not worker report
+        this.endStep(
+          "execute",
+          singleVerify.passed ? "done" : "failed",
+          singleVerify.passed ? undefined : workerErrMsg,
+        );
         this.endStep(
           "verify",
           singleVerify.passed ? "done" : "failed",
@@ -1920,6 +1922,15 @@ Respond with EXACTLY this JSON (no markdown):
             : s,
         );
         await this.taskStore.updateTask(task.id, { subtasks: updatedSubtasks });
+        // Re-read task so in-memory subtasks include the workerError just persisted
+        const refreshed = await this.taskStore.getTask(task.id);
+        if (!refreshed) {
+          log.warn(
+            "Task disappeared during subtask processing, using stale data",
+          );
+        } else {
+          task = refreshed;
+        }
       }
 
       // Per-subtask hard verify with HALT retry loop — always runs
