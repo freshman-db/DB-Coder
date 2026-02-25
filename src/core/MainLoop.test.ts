@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import {
   countTscErrors,
   setCountTscErrorsDepsForTests,
-  findFinishedStepsByPhase,
   applyStepStatusUpdate,
 } from "./MainLoop.js";
 import type { CycleStep } from "./types.js";
@@ -80,79 +79,6 @@ Found 2 errors.`,
 
     const count = await countTscErrors("/project");
     assert.equal(count, 1);
-  });
-});
-
-// --- findFinishedStepsByPhase ---
-
-describe("findFinishedStepsByPhase", () => {
-  it("should return null when no steps match the phase", () => {
-    const steps: CycleStep[] = [
-      {
-        phase: "execute",
-        status: "done",
-        startedAt: 1000,
-        finishedAt: 2000,
-        durationMs: 1000,
-      },
-    ];
-    assert.equal(findFinishedStepsByPhase(steps, "verify"), null);
-  });
-
-  it("should return null for empty steps array", () => {
-    assert.equal(findFinishedStepsByPhase([], "execute"), null);
-  });
-
-  it("should return null when matching step has no finishedAt", () => {
-    const steps: CycleStep[] = [
-      { phase: "execute", status: "active", startedAt: 1000 },
-    ];
-    assert.equal(findFinishedStepsByPhase(steps, "execute"), null);
-  });
-
-  it("should return null when any matching step lacks finishedAt", () => {
-    const steps: CycleStep[] = [
-      {
-        phase: "execute",
-        status: "done",
-        startedAt: 1000,
-        finishedAt: 2000,
-        durationMs: 1000,
-      },
-      { phase: "execute", status: "active", startedAt: 3000 },
-    ];
-    assert.equal(findFinishedStepsByPhase(steps, "execute"), null);
-  });
-
-  it("should return all matching steps when all have finishedAt", () => {
-    const steps: CycleStep[] = [
-      {
-        phase: "execute",
-        status: "done",
-        startedAt: 1000,
-        finishedAt: 2000,
-        durationMs: 1000,
-      },
-      {
-        phase: "verify",
-        status: "done",
-        startedAt: 3000,
-        finishedAt: 4000,
-        durationMs: 1000,
-      },
-      {
-        phase: "execute",
-        status: "done",
-        startedAt: 5000,
-        finishedAt: 6000,
-        durationMs: 1000,
-      },
-    ];
-    const result = findFinishedStepsByPhase(steps, "execute");
-    assert.ok(result);
-    assert.equal(result.length, 2);
-    assert.equal(result[0].startedAt, 1000);
-    assert.equal(result[1].startedAt, 5000);
   });
 });
 

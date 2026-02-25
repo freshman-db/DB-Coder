@@ -126,7 +126,7 @@ export function setCountTscErrorsDepsForTests(
  * Return all steps matching `phase` whose finishedAt is set, or null if
  * the precondition is not met (no matching steps, or any match lacks finishedAt).
  */
-export function findFinishedStepsByPhase(
+function findFinishedStepsByPhase(
   steps: CycleStep[],
   phase: StepPhase,
 ): CycleStep[] | null {
@@ -1093,8 +1093,16 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
               );
             }
           } else {
+            const execSteps = this.cycleSteps.filter(
+              (s) => s.phase === "execute",
+            );
             log.warn(
               "Skipping updateStepStatus for execute: step not found or not finished",
+              {
+                exists: execSteps.length > 0,
+                count: execSteps.length,
+                allFinished: execSteps.every((s) => s.finishedAt != null),
+              },
             );
           }
           throw verifyErr;
