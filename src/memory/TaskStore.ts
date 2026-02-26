@@ -412,6 +412,29 @@ export class TaskStore {
     return row.found;
   }
 
+  async isDuplicateTask(
+    projectPath: string,
+    description: string,
+    cooldownHours = 24,
+  ): Promise<{ duplicate: boolean; reason?: string }> {
+    const similar = await this.findSimilarTask(projectPath, description);
+    if (similar) {
+      return {
+        duplicate: true,
+        reason: `similar to [${similar.status}] "${similar.task_description.slice(0, 80)}"`,
+      };
+    }
+    const recentlyFailed = await this.hasRecentlyFailedSimilar(
+      projectPath,
+      description,
+      cooldownHours,
+    );
+    if (recentlyFailed) {
+      return { duplicate: true, reason: "similar to recently failed task" };
+    }
+    return { duplicate: false };
+  }
+
   // --- Logs ---
 
   async addLog(entry: Omit<TaskLog, "id" | "created_at">): Promise<void> {
@@ -429,6 +452,35 @@ export class TaskStore {
     return sql<TaskLog[]>`
       SELECT * FROM task_logs WHERE task_id = ${taskId} ORDER BY created_at ASC
     `;
+  }
+
+  async getRecentReflections(
+    projectPath: string,
+    limit = 5,
+  ): Promise<
+    Array<{ task_description: string; status: string; lesson: string }>
+  > {
+    const sql = this.getSql();
+    const rows = await sql<
+      Array<{
+        output_summary: string;
+        task_description: string;
+        status: string;
+      }>
+    >`
+      SELECT tl.output_summary, t.task_description, t.status
+      FROM task_logs tl
+      JOIN tasks t ON t.id = tl.task_id
+      WHERE t.project_path = ${projectPath}
+        AND tl.phase = 'reflect'
+      ORDER BY tl.created_at DESC
+      LIMIT ${limit}
+    `;
+    return rows.map((r) => ({
+      task_description: r.task_description,
+      status: r.status,
+      lesson: r.output_summary,
+    }));
   }
 
   // --- Costs ---
