@@ -1200,6 +1200,72 @@ describe("executeSubtasks", () => {
     }
   });
 
+  it("should match subtask with falsy-but-valid ID (empty string) via orderToId, not fallback", async () => {
+    // Regression: `if (matchedId)` skips empty-string IDs because "" is falsy.
+    // After fix to `if (matchedId != null)`, empty-string IDs should be recognized.
+    const subtaskRecords: SubTaskRecord[] = [
+      {
+        id: "",
+        description: "empty-id subtask",
+        executor: "claude",
+        status: "pending",
+        order: 1,
+      },
+    ];
+
+    let currentTask = makeTask(subtaskRecords);
+    const updateCalls: Array<{ subtasks: SubTaskRecord[] }> = [];
+
+    const loop = buildStub({
+      taskStore: {
+        getTask: async () => structuredClone(currentTask),
+        updateTask: async (_id, updates) => {
+          if (updates.subtasks) {
+            updateCalls.push({ subtasks: updates.subtasks as SubTaskRecord[] });
+            currentTask = {
+              ...currentTask,
+              subtasks: updates.subtasks as SubTaskRecord[],
+            };
+          }
+        },
+        addLog: async () => {},
+      },
+      workerExecute: async () => makeSessionResult(),
+      hardVerify: async () => ({ passed: true }),
+      costTracker: { addCost: async () => {} },
+    });
+
+    const result = await (loop as unknown as Record<string, Function>)[
+      "executeSubtasks"
+    ](currentTask, [{ description: "empty-id subtask", order: 1 }], {
+      baselineErrors: 0,
+      startCommit: "abc123",
+    });
+
+    assert.ok(result.success, "executeSubtasks should succeed");
+
+    // The first running-status write must use id="" (matched via orderToId),
+    // NOT a sentinel like "__sentinel_..." which would happen if the falsy
+    // check skipped the match.
+    const firstRunning = updateCalls[0]?.subtasks.find(
+      (s) => s.status === "running",
+    );
+    assert.equal(
+      firstRunning?.id,
+      "",
+      'Subtask with id="" must be matched via orderToId, not fall through to sentinel',
+    );
+    // Verify no sentinel IDs were generated
+    for (const call of updateCalls) {
+      for (const s of call.subtasks) {
+        assert.ok(
+          !s.id.startsWith("__sentinel_"),
+          `No sentinel ID should be generated when orderToId has a valid match (got ${s.id})`,
+        );
+      }
+    }
+  });
+
   it("should produce NaN-free comparator results for all invalid order combinations", () => {
     // Directly verify the sort comparator logic never returns NaN
     const cmp = (a: { order: unknown }, b: { order: unknown }): number => {

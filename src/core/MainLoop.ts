@@ -2276,7 +2276,7 @@ Respond with EXACTLY this JSON (no markdown):
     );
     const withId = subtasks.map((st) => {
       const matchedId = orderToId.get(st.order);
-      if (matchedId) {
+      if (matchedId != null) {
         return { ...st, subtaskId: matchedId };
       }
       // Fallback uses order (not array index) so out-of-order subtasks
