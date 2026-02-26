@@ -13,6 +13,7 @@ export interface BrainConfig {
   claudeMdMaintenanceInterval: number; // trigger every N completed tasks (0=disabled)
   claudeMdMaintenanceEnabled: boolean;
   chainScan: ChainScanConfig;
+  language: string; // task description language, default "简体中文"
 }
 
 export interface ClaudeConfig {

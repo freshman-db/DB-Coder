@@ -25,6 +25,7 @@ const DEFAULTS: DbCoderConfig = {
       chainsPerTrigger: 2,
       rediscoveryInterval: 10,
     },
+    language: "简体中文",
   },
   claude: { model: "opus", maxTaskBudget: 10.0, maxTurns: 200 },
   codex: {

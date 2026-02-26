@@ -23,6 +23,7 @@ function createValidConfig(): DbCoderConfig {
         chainsPerTrigger: 2,
         rediscoveryInterval: 10,
       },
+      language: "简体中文",
     },
     claude: { model: "opus", maxTaskBudget: 2.0, maxTurns: 30 },
     codex: {
