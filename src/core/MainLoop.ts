@@ -1073,6 +1073,8 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
             duration_ms: 0,
           });
         }
+        // Hard verification — always runs regardless of workerResult.isError
+        this.endStep("execute", "done");
         this.eventBus.emit(
           this.makeEvent("execute", "after", {
             startCommit,
@@ -1082,9 +1084,6 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
             },
           }),
         );
-
-        // Hard verification — always runs regardless of workerResult.isError
-        this.endStep("execute", "done");
         try {
           this.beginStep("verify");
           this.setState("reviewing");
