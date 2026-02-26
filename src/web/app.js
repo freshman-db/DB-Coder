@@ -954,9 +954,19 @@ function renderTaskLogs(logs) {
             ? `${(l.duration_ms / 1000).toFixed(1)}s`
             : "-";
           const cost = l.cost_usd ? `$${Number(l.cost_usd).toFixed(4)}` : "-";
+          const hasLongOutput =
+            l.output_summary && escapeHtml(l.output_summary).length > 200;
+          const id = `log-out-${l.id}`;
+          const expandable = hasLongOutput
+            ? ` data-action="toggleLog" data-id="${id}"`
+            : "";
+          const cursorStyle = hasLongOutput
+            ? "cursor:pointer;"
+            : "cursor:default;";
           return `
-          <div class="list-item" style="flex-wrap:wrap;gap:8px;cursor:default;">
+          <div class="list-item" style="flex-wrap:wrap;gap:8px;${cursorStyle}"${expandable}>
             <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1;">
+              ${hasLongOutput ? `<span id="${id}-arrow" style="font-size:10px;color:var(--text-muted);flex-shrink:0;">▶</span>` : ""}
               <span class="badge badge-blue">${escapeHtml(l.phase || "-")}</span>
               <span class="badge badge-secondary">${escapeHtml(l.agent || "-")}</span>
               <span style="color:var(--text-muted);font-size:12px;">${duration} | ${cost}</span>
@@ -970,8 +980,7 @@ function renderTaskLogs(logs) {
                     const PREVIEW = 200;
                     if (escaped.length <= PREVIEW)
                       return `<div style="width:100%;font-size:12px;color:var(--text);padding:4px 0 0 8px;"><strong>Output:</strong> ${escaped}</div>`;
-                    const id = `log-out-${l.id}`;
-                    return `<div style="width:100%;font-size:12px;color:var(--text);padding:4px 0 0 8px;"><strong>Output:</strong> <span id="${id}-short">${escaped.slice(0, PREVIEW)}… <a href="#" onclick="document.getElementById('${id}-short').style.display='none';document.getElementById('${id}-full').style.display='inline';return false;" style="color:var(--accent);">[expand]</a></span><span id="${id}-full" style="display:none;white-space:pre-wrap;">${escaped}</span></div>`;
+                    return `<div style="width:100%;font-size:12px;color:var(--text);padding:4px 0 0 8px;"><strong>Output:</strong> <span id="${id}-short">${escaped.slice(0, PREVIEW)}…</span><span id="${id}-full" style="display:none;white-space:pre-wrap;">${escaped}</span></div>`;
                   })()
                 : ""
             }
@@ -1893,6 +1902,17 @@ function setupActionDelegation() {
       case "newPlanChat":
         newPlanChat();
         break;
+      case "toggleLog": {
+        const shortEl = document.getElementById(`${id}-short`);
+        const fullEl = document.getElementById(`${id}-full`);
+        const arrowEl = document.getElementById(`${id}-arrow`);
+        if (!shortEl || !fullEl) break;
+        const expanding = shortEl.style.display !== "none";
+        shortEl.style.display = expanding ? "none" : "inline";
+        fullEl.style.display = expanding ? "inline" : "none";
+        if (arrowEl) arrowEl.textContent = expanding ? "▼" : "▶";
+        break;
+      }
       case "navigate":
         location.hash = id;
         break;
