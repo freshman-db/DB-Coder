@@ -3,6 +3,7 @@ import {
   type Query,
   type SDKMessage,
   type Options,
+  type ThinkingConfig,
 } from "@anthropic-ai/claude-agent-sdk";
 import { log } from "../utils/logger.js";
 import { buildSdkOptions, type SdkExtras } from "./buildSdkOptions.js";
@@ -37,6 +38,10 @@ export interface SessionOptions {
   onEvent?: (event: SDKMessage) => void;
   /** Model to use (default: claude-sonnet-4-6) */
   model?: string;
+  /** Extended thinking configuration (adaptive recommended for Opus 4.6) */
+  thinking?: ThinkingConfig;
+  /** Effort level for thinking depth */
+  effort?: "low" | "medium" | "high" | "max";
 }
 
 export interface SessionResult {

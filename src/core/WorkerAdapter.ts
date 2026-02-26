@@ -3,6 +3,7 @@ import type {
   SessionResult,
   SessionOptions,
 } from "../bridges/ClaudeCodeSession.js";
+import type { ThinkingConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { CodexBridge } from "../bridges/CodexBridge.js";
 import type { ReviewResult } from "../bridges/CodingAgent.js";
 import type { CodexConfig } from "../config/types.js";
@@ -29,6 +30,8 @@ export interface WorkerExecOpts {
   model?: string;
   appendSystemPrompt?: string;
   resumeSessionId?: string;
+  thinking?: ThinkingConfig;
+  effort?: "low" | "medium" | "high" | "max";
 }
 
 export interface WorkerAnalyzeOpts {
@@ -38,6 +41,8 @@ export interface WorkerAnalyzeOpts {
   cwd: string;
   model?: string;
   resumeSessionId?: string;
+  thinking?: ThinkingConfig;
+  effort?: "low" | "medium" | "high" | "max";
 }
 
 // --- Worker Adapter Interface ---
@@ -79,6 +84,8 @@ export class ClaudeWorkerAdapter implements WorkerAdapter {
       cwd: opts.cwd,
       timeout: opts.timeout,
       model: opts.model,
+      thinking: opts.thinking,
+      effort: opts.effort,
       appendSystemPrompt: opts.appendSystemPrompt,
       resumeSessionId: opts.resumeSessionId,
     });
@@ -101,6 +108,8 @@ export class ClaudeWorkerAdapter implements WorkerAdapter {
       cwd: opts.cwd,
       timeout: opts.timeout ?? 300_000,
       model: opts.model,
+      thinking: opts.thinking,
+      effort: opts.effort,
       resumeSessionId: opts.resumeSessionId,
       disallowedTools: ["Edit", "Write", "NotebookEdit"],
       appendSystemPrompt:
@@ -171,6 +180,8 @@ export class ClaudeReviewAdapter implements ReviewAdapter {
         maxTurns: 200,
         cwd,
         timeout: 600_000,
+        thinking: { type: "adaptive" },
+        effort: "medium",
         disallowedTools: ["Edit", "Write", "NotebookEdit"],
         appendSystemPrompt:
           "You are an adversarial code reviewer. Do NOT modify files — only read and analyze.",

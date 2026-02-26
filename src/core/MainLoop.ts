@@ -9,7 +9,7 @@ import {
   type SessionResult,
 } from "../bridges/ClaudeCodeSession.js";
 import type { SdkExtras } from "../bridges/buildSdkOptions.js";
-import type { ReviewResult } from "../bridges/CodingAgent.js";
+import type { AgentResult, ReviewResult } from "../bridges/CodingAgent.js";
 import {
   ClaudeWorkerAdapter,
   CodexWorkerAdapter,
@@ -73,20 +73,44 @@ import {
   type StructuredWorkInstructions,
 } from "./PersonaLoader.js";
 import { ChainScanner } from "./ChainScanner.js";
+import { ProjectVerifier, type VerifyBaseline } from "./ProjectVerifier.js";
 import type { RegisteredStrategies } from "./strategies/index.js";
 
 const PAUSE_INTERVAL_MS = 5000;
 const ERROR_RECOVERY_MS = 30_000;
 const BRANCH_ID_LENGTH = 8;
 
-const COMPLEXITY_CONFIG: Record<
-  string,
-  { maxTurns: number; maxBudget: number; timeout: number }
-> = {
-  S: { maxTurns: 100, maxBudget: 5.0, timeout: 600_000 }, // 10 min
-  M: { maxTurns: 200, maxBudget: 10.0, timeout: 1_200_000 }, // 20 min
-  L: { maxTurns: 200, maxBudget: 15.0, timeout: 2_400_000 }, // 40 min
-  XL: { maxTurns: 200, maxBudget: 20.0, timeout: 3_600_000 }, // 60 min
+interface ComplexityConfig {
+  maxTurns: number;
+  maxBudget: number;
+  timeout: number;
+  worker: "claude" | "codex";
+  model?: string; // Claude model override (e.g. 'sonnet', 'opus')
+}
+
+const COMPLEXITY_CONFIG: Record<string, ComplexityConfig> = {
+  S: { maxTurns: 100, maxBudget: 5.0, timeout: 600_000, worker: "codex" },
+  M: {
+    maxTurns: 200,
+    maxBudget: 10.0,
+    timeout: 1_200_000,
+    worker: "claude",
+    model: "sonnet",
+  },
+  L: {
+    maxTurns: 200,
+    maxBudget: 15.0,
+    timeout: 2_400_000,
+    worker: "claude",
+    model: "opus",
+  },
+  XL: {
+    maxTurns: 200,
+    maxBudget: 20.0,
+    timeout: 3_600_000,
+    worker: "claude",
+    model: "opus",
+  },
 };
 
 async function runGitLog(cwd: string): Promise<{ stdout: string }> {
@@ -267,8 +291,11 @@ export class MainLoop {
   private workerSession!: ClaudeCodeSession;
   private chainScanner: ChainScanner;
   private personaLoader: PersonaLoader;
+  private projectVerifier: ProjectVerifier;
   private worker: WorkerAdapter;
   private reviewer: ReviewAdapter;
+  private claudeReviewer: ClaudeReviewAdapter;
+  private codexReviewer: CodexReviewAdapter;
   private strategies?: RegisteredStrategies;
 
   constructor(
@@ -296,6 +323,9 @@ export class MainLoop {
     this.brainSession = new ClaudeCodeSession(sdkExtras);
     this.workerSession = new ClaudeCodeSession(sdkExtras);
     this.chainScanner = new ChainScanner(this.brainSession, taskStore, config);
+    this.projectVerifier = new ProjectVerifier();
+    this.claudeReviewer = new ClaudeReviewAdapter(this.brainSession);
+    this.codexReviewer = new CodexReviewAdapter(codex);
     this.strategies = strategies;
 
     // Wire up WorkerAdapter + ReviewAdapter (defaults from config if not injected)
@@ -306,12 +336,17 @@ export class MainLoop {
       const workerType = config.values.autonomy.worker;
       if (workerType === "codex") {
         this.worker = new CodexWorkerAdapter(codex);
-        this.reviewer = new ClaudeReviewAdapter(this.brainSession);
+        this.reviewer = this.claudeReviewer;
       } else {
         this.worker = new ClaudeWorkerAdapter(this.workerSession);
-        this.reviewer = new CodexReviewAdapter(codex);
+        this.reviewer = this.codexReviewer;
       }
     }
+  }
+
+  /** Select the reviewer that's opposite to the given worker type */
+  private reviewerFor(workerType: "claude" | "codex"): ReviewAdapter {
+    return workerType === "codex" ? this.claudeReviewer : this.codexReviewer;
   }
 
   private makeEvent(
@@ -474,14 +509,6 @@ export class MainLoop {
       await this.cleanupOrphanedBranches();
     } catch (err) {
       log.warn(`Failed to cleanup orphaned branches: ${err}`);
-    }
-
-    // Seed personas from files
-    try {
-      const seeded = await this.personaLoader.seedFromFiles();
-      if (seeded > 0) log.info(`Seeded ${seeded} persona(s) from files`);
-    } catch (err) {
-      log.warn(`Failed to seed personas: ${err}`);
     }
 
     try {
@@ -801,7 +828,7 @@ export class MainLoop {
       // 4. Prepare git branch
       originalBranch = await getCurrentBranch(projectPath).catch(() => "main");
       startCommit = await getHeadCommit(projectPath).catch(() => "");
-      const baselineErrors = await countTscErrors(projectPath);
+      const baseline = await this.projectVerifier.baseline(projectPath);
 
       if (await branchExists(branchName, projectPath)) {
         await switchBranch(branchName, projectPath);
@@ -818,6 +845,8 @@ export class MainLoop {
 
       // 4.5 Analysis phase (M/L/XL only) — produce and review a plan before coding
       const complexity = brainOpts?.complexity ?? "M";
+      const cConfigForTask = COMPLEXITY_CONFIG[complexity];
+      const taskReviewer = this.reviewerFor(cConfigForTask.worker);
       const needsAnalysis = complexity !== "S";
       let approvedPlan: string | undefined;
 
@@ -890,6 +919,7 @@ export class MainLoop {
           const planReview = await this.reviewPlan(
             analyzeResult.proposal,
             task,
+            taskReviewer,
           );
 
           // Brain synthesizes proposal + feedback into final plan
@@ -1012,7 +1042,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
           taskType: brainOpts.taskType,
           complexity: brainOpts.complexity,
           workInstructions: brainOpts.workInstructions,
-          baselineErrors,
+          baseline,
           startCommit,
         });
         workerPassed = result.success;
@@ -1034,6 +1064,9 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
           }),
         );
         this.beginStep("verify");
+        this.eventBus.emit(
+          this.makeEvent("verify", "after", { verification, startCommit }),
+        );
         this.endStep(
           "verify",
           result.success ? "done" : "failed",
@@ -1089,7 +1122,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
           this.setState("reviewing");
           const verifyStart = Date.now();
           const singleVerify = await this.hardVerify(
-            baselineErrors,
+            baseline,
             startCommit,
             projectPath,
           );
@@ -1097,7 +1130,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
             task_id: task.id,
             phase: "verify",
             agent: "tsc",
-            input_summary: `baseline=${baselineErrors}, startCommit=${startCommit}${workerResult.isError ? ", workerError=true" : ""}`,
+            input_summary: `baseline=${JSON.stringify(baseline)}, startCommit=${startCommit}${workerResult.isError ? ", workerError=true" : ""}`,
             output_summary: singleVerify.passed
               ? "PASS"
               : `FAIL: ${singleVerify.reason}`,
@@ -1151,7 +1184,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
               break;
             }
             const reVerify = await this.hardVerify(
-              baselineErrors,
+              baseline,
               startCommit,
               projectPath,
             );
@@ -1166,17 +1199,15 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
             log.warn(
               `HALT after ${fixAttempts} fix attempts: ${singleVerify.reason}`,
             );
-            if (brainOpts?.persona) {
-              await this.taskStore.addLog({
-                task_id: task.id,
-                phase: "halt-learning",
-                agent: "system",
-                input_summary: `persona=${brainOpts.persona}`,
-                output_summary: `HALT triggered: ${singleVerify.reason} (after ${fixAttempts} attempts)`,
-                cost_usd: 0,
-                duration_ms: 0,
-              });
-            }
+            await this.taskStore.addLog({
+              task_id: task.id,
+              phase: "halt-learning",
+              agent: "system",
+              input_summary: "HALT triggered",
+              output_summary: `HALT triggered: ${singleVerify.reason} (after ${fixAttempts} attempts)`,
+              cost_usd: 0,
+              duration_ms: 0,
+            });
           }
 
           workerPassed = singleVerify.passed;
@@ -1260,6 +1291,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
           task,
           startCommit,
           projectPath,
+          taskReviewer,
         );
 
         // Store review results for traceability
@@ -1270,7 +1302,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
         if (!reviewResult.passed) {
           log.info(`Code review: FAIL — ${reviewResult.summary}`, {
             issues: (reviewResult.issues ?? []).length,
-            reviewer: this.reviewer.name,
+            reviewer: taskReviewer.name,
           });
         } else {
           log.info(`Code review: PASS — ${reviewResult.summary}`);
@@ -1360,7 +1392,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
 
                 // Re-verify
                 const reVerify = await this.hardVerify(
-                  baselineErrors,
+                  baseline,
                   startCommit,
                   projectPath,
                 );
@@ -1376,6 +1408,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
                   task,
                   startCommit,
                   projectPath,
+                  taskReviewer,
                 );
                 if (reReview.passed) {
                   shouldMerge = true;
@@ -1444,13 +1477,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
       this.setState("reflecting");
       const outcome = shouldMerge ? "success" : "failed";
       try {
-        await this.brainReflect(
-          task,
-          outcome,
-          verification,
-          projectPath,
-          brainOpts?.persona,
-        );
+        await this.brainReflect(task, outcome, verification, projectPath);
         this.endStep("reflect", "done");
         this.eventBus.emit(this.makeEvent("reflect", "after"));
       } catch (reflectErr) {
@@ -1612,7 +1639,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
     let totalCost = 0;
 
     // --- Phase 1: Free exploration (no jsonSchema, tools enabled) ---
-    const explorationPrompt = `You are the brain of an autonomous coding agent in EVOLUTION MODE.
+    const explorationPrompt = `You are the brain of an autonomous coding agent.
 Your job is to continuously improve the project — you are NOT a passive monitor.
 
 Read CLAUDE.md for project context, current status, and priorities.
@@ -1621,19 +1648,18 @@ Actually explore the codebase — read files, search for patterns, trace call si
 
 ${context}
 
-## EVOLUTION DIMENSIONS (scan for opportunities in this order):
-1. **功能完善** — Read CLAUDE.md/README for unchecked items ([ ]), complete missing features
-2. **功能增强** — Improve existing features: better UX, error messages, config options, edge cases
-3. **模块深度扫描** — Focus on the current rotation module, review its internal logic and boundaries
-4. **类型安全** — Eliminate any/unknown, strengthen return types, add missing generics
-5. **错误处理** — Find catch-ignore patterns, add error propagation, ensure errors are visible
-6. **测试覆盖** — Add tests for untested functions, especially pure functions and edge cases
-7. **代码质量** — Split long functions (>80 lines), reduce nesting, eliminate dead/duplicate code
-8. **性能** — N+1 queries, unnecessary awaits in loops, missing parallelization
-9. **韧性** — Timeout handling, retry logic, graceful degradation for external services
-10. **安全** — Input validation, injection prevention, sensitive data in logs
+## YOUR MISSION
+Find the highest-value improvement opportunities in this project.
+You have full freedom to explore the codebase and decide what matters most.
 
-## YOUR TASK:
+Prioritize improvements that are:
+- High impact on correctness, reliability, or maintainability
+- Low risk of breaking existing functionality
+- Verifiable (can be validated by type checks + tests + code review)
+
+Think deeply. You are not constrained to any predefined category.
+
+## YOUR TASK
 Explore the project and identify 1-5 concrete improvement opportunities.
 For each, describe: what to change, which files/functions, why it matters, and how to verify.
 Be specific — name exact files, functions, line ranges. Vague findings waste worker time.
@@ -1665,7 +1691,7 @@ Write your analysis as a natural language report.`;
       !phase1Result.isError && phase1Result.exitCode === 0
         ? phase1Result.sessionId
         : undefined;
-    const analysisReport = phase1Result.text.slice(0, 12000);
+    const analysisReport = phase1Result.text;
 
     // --- Phase 2: Structured output (jsonSchema, converts analysis to tasks) ---
     const structuredPrompt = phase1SessionId
@@ -1681,14 +1707,13 @@ ${analysisReport}
 ## OUTPUT RULES:
 - tasks[0] is the HIGHEST priority task — it will be executed immediately.
 - tasks[1..4] are extra tasks — they will be queued for later execution.
-- Each task needs: task (specific description), priority (0-3), persona, taskType, complexity (S/M/L/XL).
+- Each task needs: task (specific description), priority (0-3), taskType, complexity (S/M/L/XL).
 - workInstructions: guidance for the worker. Can be:
   - a plain string with free-form instructions, OR
   - a structured object with fields: acceptanceCriteria (testable "done" statements),
     filesToModify (explicit paths), guardrails (what NOT to do), verificationSteps,
     references (related files/docs to read first)
 - subtasks: ONLY for complex tasks needing 2+ independent steps. Most tasks should NOT have subtasks. Each subtask needs: description (string) and order (integer starting from 1, execution sequence).
-- persona: feature-builder, refactoring-expert, bugfix-debugger, test-engineer, security-auditor, performance-optimizer, frontend-specialist
 - taskType: feature, bugfix, refactoring, test, security, performance, frontend, code-quality, docs
 - reasoning: brief explanation of why these tasks were chosen`;
 
@@ -1702,7 +1727,6 @@ ${analysisReport}
             properties: {
               task: { type: "string" },
               priority: { type: "number" },
-              persona: { type: "string" },
               taskType: { type: "string" },
               complexity: { type: "string" },
               workInstructions: {
@@ -2111,8 +2135,10 @@ Respond with EXACTLY this JSON (no markdown):
       permissionMode: "bypassPermissions",
       maxTurns: 200,
       cwd: this.config.projectPath,
-      timeout: 300_000,
+      timeout: 900_000,
       model: resolveModelId(this.config.values.brain.model),
+      thinking: { type: "adaptive" },
+      effort: "high",
       disallowedTools: ["Edit", "Write", "NotebookEdit"],
       appendSystemPrompt: isResume
         ? undefined
@@ -2171,6 +2197,27 @@ Respond with EXACTLY this JSON (no markdown):
         | undefined);
     const cConfig = COMPLEXITY_CONFIG[complexity ?? "M"];
 
+    // Route to Codex for S-level tasks (unless resuming a Claude session)
+    if (cConfig.worker === "codex" && !isResume) {
+      log.info(`workerExecute: routing ${complexity ?? "M"} task to Codex`);
+      const codexResult = await this.codex.execute(
+        prompt,
+        this.config.projectPath,
+        {
+          systemPrompt,
+          maxTurns: cConfig.maxTurns,
+          maxBudget: cConfig.maxBudget,
+          timeout: cConfig.timeout,
+        },
+      );
+      return codexResultToSessionResult(codexResult);
+    }
+
+    // Claude path — select model from complexity config or fall back to config default
+    const model = cConfig.model
+      ? resolveModelId(cConfig.model)
+      : resolveModelId(this.config.values.claude.model);
+
     const result = await this.workerSession.run(prompt, {
       permissionMode: "bypassPermissions",
       maxTurns: cConfig.maxTurns,
@@ -2180,7 +2227,9 @@ Respond with EXACTLY this JSON (no markdown):
       ),
       cwd: this.config.projectPath,
       timeout: cConfig.timeout,
-      model: resolveModelId(this.config.values.claude.model),
+      model,
+      thinking: { type: "adaptive" },
+      effort: "medium",
       appendSystemPrompt: isResume ? undefined : systemPrompt,
       resumeSessionId: opts?.resumeSessionId,
     });
@@ -2235,7 +2284,7 @@ Respond with EXACTLY this JSON (no markdown):
       taskType?: string;
       complexity?: string;
       workInstructions?: WorkInstructions;
-      baselineErrors: number;
+      baseline: VerifyBaseline;
       startCommit: string;
     },
   ): Promise<{
@@ -2409,7 +2458,7 @@ Respond with EXACTLY this JSON (no markdown):
       let verification: { passed: boolean; reason?: string };
       try {
         verification = await this.hardVerify(
-          opts.baselineErrors,
+          opts.baseline,
           opts.startCommit,
           this.config.projectPath,
         );
@@ -2462,7 +2511,7 @@ Respond with EXACTLY this JSON (no markdown):
               break;
             }
             lastVerification = await this.hardVerify(
-              opts.baselineErrors,
+              opts.baseline,
               opts.startCommit,
               this.config.projectPath,
             );
@@ -2482,7 +2531,7 @@ Respond with EXACTLY this JSON (no markdown):
               task_id: task.id,
               phase: "halt-learning",
               agent: "system",
-              input_summary: `persona=${opts.persona}, subtask=${i + 1}`,
+              input_summary: `subtask=${i + 1}`,
               output_summary: `HALT triggered: ${lastVerification.reason} (after ${fixAttempts} attempts)`,
               cost_usd: 0,
               duration_ms: 0,
@@ -2566,6 +2615,8 @@ Respond with EXACTLY this JSON (no markdown):
         maxBudget: this.config.values.claude.maxTaskBudget,
         cwd: this.config.projectPath,
         timeout: 600_000,
+        thinking: { type: "adaptive" },
+        effort: "medium",
         resumeSessionId: sessionId,
         model: resolveModelId(this.config.values.claude.model),
       },
@@ -2575,20 +2626,14 @@ Respond with EXACTLY this JSON (no markdown):
   // --- Hard verification (zero LLM cost) ---
 
   private async hardVerify(
-    baselineErrors: number,
+    baseline: VerifyBaseline,
     startCommit: string,
     projectPath: string,
   ): Promise<{ passed: boolean; reason?: string }> {
-    // 1. TypeScript errors
-    const currentErrors = await countTscErrors(projectPath);
-    if (currentErrors < 0) {
-      return { passed: false, reason: "TypeScript compilation crashed" };
-    }
-    if (baselineErrors >= 0 && currentErrors > baselineErrors) {
-      return {
-        passed: false,
-        reason: `TypeScript errors increased: ${baselineErrors} → ${currentErrors} (+${currentErrors - baselineErrors})`,
-      };
+    // 1. Type check + tests via ProjectVerifier
+    const result = await this.projectVerifier.verify(projectPath, baseline);
+    if (!result.passed) {
+      return { passed: false, reason: result.reason };
     }
 
     // 2. Diff anomaly check (warn only)
@@ -2672,8 +2717,8 @@ ${diff}
 - Do commit messages accurately describe the changes?
 
 ## Rules
-- Find 3-10 specific issues. Be concrete — cite file names and line context.
-- If you find fewer than 3 issues AND pass, you MUST explain why this code is exceptional.
+- Report all issues you find. Be concrete — cite file names and line context.
+- If the code is clean, report passed: true and explain briefly why.
 - "Looks good" without specific analysis is NOT acceptable.
 
 Respond with EXACTLY this JSON (no markdown, no extra text):
@@ -2807,6 +2852,8 @@ Be specific: include function signatures, type definitions, and concrete code sn
       maxBudget: Math.min(cConfig.maxBudget, 5.0),
       timeout: Math.min(cConfig.timeout, 600_000),
       model: resolveModelId(this.config.values.claude.model),
+      thinking: { type: "adaptive" },
+      effort: "medium",
       resumeSessionId: revision?.resumeSessionId,
     });
 
@@ -2840,6 +2887,7 @@ Be specific: include function signatures, type definitions, and concrete code sn
   private async reviewPlan(
     proposal: string,
     task: Task,
+    reviewerOverride?: ReviewAdapter,
   ): Promise<ReviewResult> {
     const prompt = `You are reviewing a proposed code change plan. Assess feasibility and correctness.
 
@@ -2859,7 +2907,8 @@ ${proposal}
 ## Output Format (JSON)
 {"passed": true/false, "issues": [{"severity": "critical|high|medium|low", "description": "..."}], "summary": "..."}`;
 
-    const result = await this.reviewer.review(prompt, this.config.projectPath);
+    const reviewer = reviewerOverride ?? this.reviewer;
+    const result = await reviewer.review(prompt, this.config.projectPath);
 
     if (result.cost_usd > 0) {
       await this.costTracker.addCost(task.id, result.cost_usd);
@@ -2868,7 +2917,7 @@ ${proposal}
     await this.taskStore.addLog({
       task_id: task.id,
       phase: "plan-review",
-      agent: this.reviewer.name,
+      agent: reviewer.name,
       input_summary: "Plan review",
       output_summary: `${result.passed ? "PASS" : "FAIL"}: ${result.summary ?? ""}`,
       cost_usd: result.cost_usd,
@@ -2902,7 +2951,7 @@ ${proposal}
 ${task.task_description}
 
 ## Worker Proposal
-${proposal.slice(0, 10000)}
+${proposal}
 
 ## Reviewer Feedback
 ${reviewSummary}
@@ -3010,7 +3059,7 @@ Summary: ${reviewResult.summary}
 
 ## Code Diff (truncated)
 \`\`\`diff
-${diff.slice(0, 8000)}
+${diff.slice(0, 100_000)}
 \`\`\`
 
 ## Available Decisions: ${allowedDecisions}
@@ -3145,6 +3194,7 @@ Fix these issues. Do not make unrelated changes.`;
     task: Task,
     startCommit: string,
     projectPath: string,
+    reviewerOverride?: ReviewAdapter,
   ): Promise<ReviewResult & { reviewDiff: string }> {
     const changedFiles = await getChangedFilesSince(
       startCommit,
@@ -3207,15 +3257,15 @@ ${reviewDiff}
 ## Rules
 - ONLY report issues introduced or worsened by THIS diff in the "issues" array.
 - If you notice pre-existing bugs/issues in touched files (NOT introduced by this diff), list them separately in "preExistingIssues".
-- Find 3-10 specific issues with file names and descriptions.
-- If fewer than 3 issues found, explain why the code quality is exceptional.
+- Report all issues you find. If the code is clean, report passed: true with an empty issues array.
 - Be concrete — cite specific code patterns, not vague concerns.
 - Write ALL descriptions (issues + preExistingIssues) in ${this.config.values.brain.language}.
 
 ## Output Format (JSON)
 {"passed": true/false, "issues": [...], "preExistingIssues": [{"description": "...", "file": "...", "severity": "high|medium|low"}], "summary": "..."}`;
 
-    const result = await this.reviewer.review(prompt, projectPath);
+    const reviewer = reviewerOverride ?? this.reviewer;
+    const result = await reviewer.review(prompt, projectPath);
 
     if (result.cost_usd > 0) {
       await this.costTracker.addCost(task.id, result.cost_usd);
@@ -3232,7 +3282,7 @@ ${reviewDiff}
     await this.taskStore.addLog({
       task_id: task.id,
       phase: "review",
-      agent: this.reviewer.name,
+      agent: reviewer.name,
       input_summary: `files: ${changedFiles.join(", ")}`,
       output_summary: `${result.passed ? "PASS" : "FAIL"}: ${result.summary ?? ""}`,
       cost_usd: result.cost_usd,
@@ -3268,38 +3318,15 @@ ${reviewDiff}
     outcome: string,
     verification: { passed: boolean; reason?: string },
     projectPath: string,
-    personaName?: string,
   ): Promise<void> {
-    // Build persona context for evolution
-    const personaData = personaName
-      ? await this.taskStore.getPersona(personaName)
-      : null;
-    const personaContext = personaData
-      ? `
-## Current Persona: ${personaData.name}
-Role: ${personaData.role}
-Usage: ${personaData.usage_count} tasks, ${Math.round((personaData.success_rate ?? 0) * 100)}% success
-Content:
-${personaData.content}
-
-If this task revealed a pattern (recurring failure, new anti-pattern, rule that should be added/removed),
-you may update the persona content. Use this format to propose changes:
-
-PERSONA_UPDATE:
-[new full content for the persona, or "NO_CHANGE" if no update needed]
-END_PERSONA_UPDATE
-`
-      : "";
-
     const prompt = `Reflect on this completed task:
 
 Task: ${task.task_description}
 Outcome: ${outcome}
 Verification: ${verification.passed ? "PASSED" : `FAILED — ${verification.reason}`}
-${personaContext}
+
 1. What went well? What could be improved?
 2. Do NOT edit CLAUDE.md unless you discover a critical, repeatable anti-pattern that would affect every future task (extremely rare, <5% of reflections).
-${personaData ? "3. If the persona needs updating based on this experience, include a PERSONA_UPDATE block." : ""}
 
 After your reflection, output a single-line actionable lesson:
 LESSON: <one sentence the brain should remember for next task selection>`;
@@ -3308,8 +3335,10 @@ LESSON: <one sentence the brain should remember for next task selection>`;
       permissionMode: "bypassPermissions",
       maxTurns: 50,
       cwd: projectPath,
-      timeout: 300_000,
+      timeout: 900_000,
       model: resolveModelId(this.config.values.brain.model),
+      thinking: { type: "adaptive" },
+      effort: "medium",
       appendSystemPrompt:
         "You are reflecting on a task. Do not modify source code. Do not edit CLAUDE.md unless absolutely necessary.",
       allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
@@ -3334,38 +3363,6 @@ LESSON: <one sentence the brain should remember for next task selection>`;
       cost_usd: result.costUsd,
       duration_ms: result.durationMs,
     });
-
-    // Parse and apply persona evolution
-    if (personaName && personaData) {
-      const updateMatch = result.text.match(
-        /PERSONA_UPDATE:\s*\n([\s\S]*?)\nEND_PERSONA_UPDATE/,
-      );
-      if (updateMatch) {
-        const newContent = updateMatch[1].trim();
-        if (newContent && newContent !== "NO_CHANGE") {
-          await this.taskStore.updatePersonaContent(personaName, newContent);
-          log.info(`Persona ${personaName} evolved via brainReflect`);
-          await this.taskStore.addLog({
-            task_id: task.id,
-            phase: "persona-evolution",
-            agent: "brain",
-            input_summary: `Persona ${personaName} updated`,
-            output_summary: newContent,
-            cost_usd: 0,
-            duration_ms: 0,
-          });
-        }
-      }
-    }
-
-    // Update persona usage stats
-    if (personaName) {
-      await this.taskStore
-        .updatePersonaStats(personaName, outcome === "success")
-        .catch((err) =>
-          log.warn(`Failed to update persona stats for ${personaName}:`, err),
-        );
-    }
   }
 
   // --- Pipeline health check (auto-diagnosis) ---
@@ -3394,6 +3391,8 @@ Multiple tasks have been rejected consecutively, suggesting a systemic pipeline 
         cwd: projectPath,
         timeout: 600_000,
         model: resolveModelId(this.config.values.brain.model),
+        thinking: { type: "adaptive" },
+        effort: "medium",
         allowedTools: [
           "Read",
           "Glob",
@@ -3446,6 +3445,8 @@ Rules:
         cwd: projectPath,
         timeout: 3_600_000,
         model: resolveModelId(this.config.values.brain.model),
+        thinking: { type: "adaptive" },
+        effort: "medium",
         allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
         appendSystemPrompt:
           "You are maintaining CLAUDE.md. You CAN edit CLAUDE.md. Do not modify source code.",
@@ -3737,6 +3738,28 @@ Rules:
       log.warn(`Failed to cleanup branch ${branch}: ${err}`);
     }
   }
+}
+
+// --- Codex result adapter ---
+
+function codexResultToSessionResult(r: AgentResult): SessionResult {
+  return {
+    text: r.output,
+    costUsd: r.cost_usd,
+    durationMs: r.duration_ms,
+    sessionId: "", // Codex has no session resume
+    isError: !r.success,
+    errors: r.success ? [] : [r.output],
+    json: r.structured ?? null,
+    exitCode: r.success ? 0 : 1,
+    numTurns: r.numTurns ?? 0,
+    usage: {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+    },
+  };
 }
 
 // --- Exported utilities (used by tests and routes) ---

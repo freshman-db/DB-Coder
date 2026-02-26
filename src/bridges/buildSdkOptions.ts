@@ -1,15 +1,24 @@
-import type { Options, SdkPluginConfig, HookEvent, HookCallbackMatcher } from '@anthropic-ai/claude-agent-sdk';
-import type { SessionOptions } from './ClaudeCodeSession.js';
+import type {
+  Options,
+  SdkPluginConfig,
+  HookEvent,
+  HookCallbackMatcher,
+} from "@anthropic-ai/claude-agent-sdk";
+import type { SessionOptions } from "./ClaudeCodeSession.js";
 
 const CLAUDE_ENV_VARS = [
-  'CLAUDECODE', 'CLAUDE_CODE_SESSION', 'CLAUDE_CODE_ENTRYPOINT',
-  'CLAUDE_CODE_PACKAGE_DIR', 'CLAUDE_DEV_HOST', 'CLAUDE_DEV_PORT',
+  "CLAUDECODE",
+  "CLAUDE_CODE_SESSION",
+  "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_PACKAGE_DIR",
+  "CLAUDE_DEV_HOST",
+  "CLAUDE_DEV_PORT",
 ];
 
 function cleanEnv(): Record<string, string | undefined> {
   const env = { ...process.env };
   for (const key of CLAUDE_ENV_VARS) delete env[key];
-  env.CLAUDE_MEM_MODEL = 'claude-opus-4-6';
+  env.CLAUDE_MEM_MODEL = "claude-opus-4-6";
   return env;
 }
 
@@ -22,8 +31,8 @@ export interface SdkSessionOptions {
 export interface SdkExtras {
   hooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>;
   plugins?: SdkPluginConfig[];
-  agents?: Options['agents'];
-  mcpServers?: Options['mcpServers'];
+  agents?: Options["agents"];
+  mcpServers?: Options["mcpServers"];
 }
 
 export function buildSdkOptions(
@@ -36,24 +45,24 @@ export function buildSdkOptions(
     permissionMode: opts.permissionMode,
   };
 
-  if (opts.permissionMode === 'bypassPermissions') {
+  if (opts.permissionMode === "bypassPermissions") {
     options.allowDangerouslySkipPermissions = true;
   }
 
   // --- Always: settings sources (loads CLAUDE.md + settings) ---
-  options.settingSources = ['user', 'project', 'local'];
+  options.settingSources = ["user", "project", "local"];
 
   // --- System prompt: always preset, optionally with append ---
   if (opts.appendSystemPrompt) {
     options.systemPrompt = {
-      type: 'preset',
-      preset: 'claude_code',
+      type: "preset",
+      preset: "claude_code",
       append: opts.appendSystemPrompt,
     };
   } else {
     options.systemPrompt = {
-      type: 'preset',
-      preset: 'claude_code',
+      type: "preset",
+      preset: "claude_code",
     };
   }
 
@@ -65,14 +74,17 @@ export function buildSdkOptions(
   if (opts.resumeSessionId !== undefined) options.resume = opts.resumeSessionId;
   if (opts.maxTurns !== undefined) options.maxTurns = opts.maxTurns;
   if (opts.model !== undefined) options.model = opts.model;
+  if (opts.thinking !== undefined) options.thinking = opts.thinking;
+  if (opts.effort !== undefined) options.effort = opts.effort;
   if (opts.cwd !== undefined) options.cwd = opts.cwd;
   if (opts.allowedTools !== undefined) options.allowedTools = opts.allowedTools;
-  if (opts.disallowedTools !== undefined) options.disallowedTools = opts.disallowedTools;
+  if (opts.disallowedTools !== undefined)
+    options.disallowedTools = opts.disallowedTools;
 
   // --- JSON schema → outputFormat ---
   if (opts.jsonSchema !== undefined) {
     options.outputFormat = {
-      type: 'json_schema',
+      type: "json_schema",
       schema: opts.jsonSchema as Record<string, unknown>,
     };
   }

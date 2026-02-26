@@ -162,19 +162,13 @@ export class PersonaLoader {
     return persona?.content ?? DEFAULT_PERSONA_CONTENT;
   }
 
-  /** Build the full worker prompt with persona + task + optional work instructions */
+  /** Build the full worker prompt with task + optional work instructions */
   async buildWorkerPrompt(opts: {
     taskDescription: string;
-    personaName?: string;
+    personaName?: string; // Deprecated — kept for interface compatibility, ignored
     taskType?: string;
     workInstructions?: WorkInstructions;
   }): Promise<{ prompt: string; systemPrompt: string }> {
-    const persona = opts.personaName
-      ? await this.taskStore.getPersona(opts.personaName)
-      : null;
-    const personaContent = persona?.content ?? DEFAULT_PERSONA_CONTENT;
-    const role = persona?.role ?? "coding worker";
-
     const sections = [
       `Execute this coding task:\n\n${opts.taskDescription}`,
       `Read CLAUDE.md for project context and environment rules.`,
@@ -189,7 +183,8 @@ export class PersonaLoader {
     }
 
     const prompt = sections.join("\n\n");
-    const systemPrompt = `You are a ${role}.\n\n${personaContent}`;
+    // No persona injection — Claude Code's preset system prompt provides agent identity
+    const systemPrompt = "";
 
     return { prompt, systemPrompt };
   }
