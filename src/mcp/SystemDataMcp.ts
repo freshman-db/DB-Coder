@@ -117,11 +117,19 @@ export function buildToolDefs(deps: SystemDataMcpDeps) {
 
     safeTool(
       "get_task_logs",
-      "Get execution logs for a task",
+      "Get execution logs for a task (output_summary truncated to 500 chars; full text stored in DB)",
       { taskId: z.string().describe("Task UUID") },
       async (args) => {
         const logs = await taskStore.getTaskLogs(args.taskId);
-        return textResult(logs);
+        const summarized = logs.map((l) => ({
+          ...l,
+          output_summary: l.output_summary
+            ? l.output_summary.length > 500
+              ? l.output_summary.slice(0, 500) + "… [truncated]"
+              : l.output_summary
+            : l.output_summary,
+        }));
+        return textResult(summarized);
       },
     ),
 
@@ -177,9 +185,7 @@ export function buildToolDefs(deps: SystemDataMcpDeps) {
       "requeue_blocked_tasks",
       "Re-queue blocked/failed tasks so they can be retried",
       {
-        taskIds: z
-          .array(z.string())
-          .describe("Array of task UUIDs to requeue"),
+        taskIds: z.array(z.string()).describe("Array of task UUIDs to requeue"),
       },
       async (args) => {
         const count = await taskStore.requeueBlockedTasks(

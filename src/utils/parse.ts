@@ -3,7 +3,6 @@ import type {
   ReviewIssue,
   ReviewResult,
 } from "../bridges/CodingAgent.js";
-import { SUMMARY_PREVIEW_LEN } from "../types/constants.js";
 
 export const VALID_SEVERITIES = new Set([
   "critical",
@@ -183,7 +182,7 @@ export function tryParseReview(text: string): Omit<ReviewResult, "cost_usd"> {
     // If Markdown issues were found, they become actionable; if not, we can't confirm a pass.
     passed: false,
     issues: markdownIssues,
-    summary: output.slice(0, SUMMARY_PREVIEW_LEN),
+    summary: output,
   };
 }
 

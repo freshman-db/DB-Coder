@@ -963,7 +963,18 @@ function renderTaskLogs(logs) {
               <span style="color:var(--text-muted);font-size:12px;margin-left:auto;">${timeAgo(l.created_at)}</span>
             </div>
             ${l.input_summary ? `<div style="width:100%;font-size:12px;color:var(--text-secondary);padding:4px 0 0 8px;border-top:1px solid var(--border);"><strong>Input:</strong> ${escapeHtml(l.input_summary)}</div>` : ""}
-            ${l.output_summary ? `<div style="width:100%;font-size:12px;color:var(--text);padding:4px 0 0 8px;"><strong>Output:</strong> ${escapeHtml(l.output_summary)}</div>` : ""}
+            ${
+              l.output_summary
+                ? (() => {
+                    const escaped = escapeHtml(l.output_summary);
+                    const PREVIEW = 200;
+                    if (escaped.length <= PREVIEW)
+                      return `<div style="width:100%;font-size:12px;color:var(--text);padding:4px 0 0 8px;"><strong>Output:</strong> ${escaped}</div>`;
+                    const id = `log-out-${l.id}`;
+                    return `<div style="width:100%;font-size:12px;color:var(--text);padding:4px 0 0 8px;"><strong>Output:</strong> <span id="${id}-short">${escaped.slice(0, PREVIEW)}… <a href="#" onclick="document.getElementById('${id}-short').style.display='none';document.getElementById('${id}-full').style.display='inline';return false;" style="color:var(--accent);">[expand]</a></span><span id="${id}-full" style="display:none;white-space:pre-wrap;">${escaped}</span></div>`;
+                  })()
+                : ""
+            }
           </div>`;
         })
         .join("")}
