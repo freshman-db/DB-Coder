@@ -97,12 +97,15 @@ program
       sseBroadcast: emitSseEvent,
     });
 
-    registerStrategies(eventBus, {
-      getProjectHealth: async () => ({
-        tscErrors: 0, // Will be populated by actual tsc check in later iteration
-        recentSuccessRate: 0.8,
-        blockedTaskCount: 0,
-      }),
+    const strategies = registerStrategies(eventBus, {
+      getProjectHealth: async () => {
+        const metrics = await taskStore.getOperationalMetrics(projectPath);
+        return {
+          tscErrors: 0, // TODO: wire actual tsc error count
+          recentSuccessRate: metrics.taskPassRate,
+          blockedTaskCount: metrics.tasksByStatus["blocked"] ?? 0,
+        };
+      },
     });
 
     // Discover plugins and build hooks for SDK sessions
@@ -127,6 +130,9 @@ program
       costTracker,
       eventBus,
       sdkExtras,
+      undefined, // workerAdapter
+      undefined, // reviewAdapter
+      strategies,
     );
     const patrolManager = new PatrolManager(mainLoop, taskStore, projectPath);
     const planChat = new PlanChatManager(taskStore, config);

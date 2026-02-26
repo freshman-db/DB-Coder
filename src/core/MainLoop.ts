@@ -73,6 +73,7 @@ import {
   type StructuredWorkInstructions,
 } from "./PersonaLoader.js";
 import { ChainScanner } from "./ChainScanner.js";
+import type { RegisteredStrategies } from "./strategies/index.js";
 
 const PAUSE_INTERVAL_MS = 5000;
 const ERROR_RECOVERY_MS = 30_000;
@@ -87,6 +88,16 @@ const COMPLEXITY_CONFIG: Record<
   L: { maxTurns: 200, maxBudget: 15.0, timeout: 2_400_000 }, // 40 min
   XL: { maxTurns: 200, maxBudget: 20.0, timeout: 3_600_000 }, // 60 min
 };
+
+async function runGitLog(cwd: string): Promise<{ stdout: string }> {
+  const { runProcess } = await import("../utils/process.js");
+  const result = await runProcess(
+    "git",
+    ["log", "--name-only", "--format=", "-30", "--", "src/"],
+    { cwd, timeout: 10_000 },
+  );
+  return { stdout: result.stdout };
+}
 
 type RunProcessFn = (
   command: string,
@@ -258,6 +269,7 @@ export class MainLoop {
   private personaLoader: PersonaLoader;
   private worker: WorkerAdapter;
   private reviewer: ReviewAdapter;
+  private strategies?: RegisteredStrategies;
 
   constructor(
     private config: Config,
@@ -269,6 +281,7 @@ export class MainLoop {
     private sdkExtras?: SdkExtras,
     workerAdapter?: WorkerAdapter,
     reviewAdapter?: ReviewAdapter,
+    strategies?: RegisteredStrategies,
   ) {
     const hash = createHash("md5")
       .update(config.projectPath)
@@ -283,6 +296,7 @@ export class MainLoop {
     this.brainSession = new ClaudeCodeSession(sdkExtras);
     this.workerSession = new ClaudeCodeSession(sdkExtras);
     this.chainScanner = new ChainScanner(this.brainSession, taskStore, config);
+    this.strategies = strategies;
 
     // Wire up WorkerAdapter + ReviewAdapter (defaults from config if not injected)
     if (workerAdapter && reviewAdapter) {
@@ -1039,8 +1053,8 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
           task_id: task.id,
           phase: "execute",
           agent: "claude-code",
-          input_summary: truncate(task.task_description, SUMMARY_PREVIEW_LEN),
-          output_summary: workerResult.text.slice(0, SUMMARY_PREVIEW_LEN),
+          input_summary: task.task_description,
+          output_summary: workerResult.text,
           cost_usd: workerResult.costUsd,
           duration_ms: workerResult.durationMs,
         });
@@ -1293,6 +1307,17 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
               // Create new tasks for unresolved issues
               if (decision.newTasks) {
                 for (const newTaskDesc of decision.newTasks) {
+                  const { duplicate, reason } =
+                    await this.taskStore.isDuplicateTask(
+                      projectPath,
+                      newTaskDesc,
+                    );
+                  if (duplicate) {
+                    log.info(
+                      `Split dedup: ${reason} — "${truncate(newTaskDesc, 100)}"`,
+                    );
+                    continue;
+                  }
                   await this.taskStore.createTask(projectPath, newTaskDesc, 2);
                   log.info(
                     `Split: created follow-up task: ${truncate(newTaskDesc, 100)}`,
@@ -1375,6 +1400,17 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
                   shouldMerge = true;
                   if (finalDecision.newTasks) {
                     for (const newTaskDesc of finalDecision.newTasks) {
+                      const { duplicate, reason } =
+                        await this.taskStore.isDuplicateTask(
+                          projectPath,
+                          newTaskDesc,
+                        );
+                      if (duplicate) {
+                        log.info(
+                          `Split dedup: ${reason} — "${truncate(newTaskDesc, 100)}"`,
+                        );
+                        continue;
+                      }
                       await this.taskStore.createTask(
                         projectPath,
                         newTaskDesc,
@@ -1883,7 +1919,7 @@ ${analysisReport}
       );
     }
 
-    // Recent 15 tasks (expanded from 5 to avoid repeats)
+    // Recent 15 tasks with quality signals
     const recentResult = await this.taskStore.listTasksPaged(
       projectPath,
       1,
@@ -1891,9 +1927,23 @@ ${analysisReport}
     );
     const recentTasks = recentResult.tasks ?? [];
     if (recentTasks.length > 0) {
-      parts.push(
-        `Recent tasks (DO NOT duplicate these):\n${recentTasks.map((t: Task) => `- [${t.status}] ${t.task_description}`).join("\n")}`,
+      const reflections = await this.taskStore.getRecentReflections(
+        projectPath,
+        15,
       );
+      const lessonByDesc = new Map(
+        reflections.map((r) => [r.task_description, r.lesson]),
+      );
+      const lines = recentTasks.map((t: Task) => {
+        const lesson = lessonByDesc.get(t.task_description) ?? "";
+        const quality = lesson.startsWith("LESSON:")
+          ? lesson.includes("low-value") || lesson.includes("not worth")
+            ? " · low-value"
+            : " \u2713 high-value"
+          : "";
+        return `- [${t.status}${quality}] ${t.task_description}`;
+      });
+      parts.push(`Recent tasks (DO NOT duplicate these):\n${lines.join("\n")}`);
     }
 
     // Budget remaining
@@ -1912,6 +1962,62 @@ ${analysisReport}
       );
     } catch {
       /* metrics not critical */
+    }
+
+    // Strategy context (quality alerts + priority suggestions)
+    if (this.strategies) {
+      const qualityCtx = this.strategies.qualityEvaluator.getContextForBrain();
+      if (qualityCtx) parts.push(qualityCtx);
+      try {
+        const priorityCtx =
+          await this.strategies.dynamicPriority.getContextForBrain();
+        if (priorityCtx) parts.push(priorityCtx);
+      } catch {
+        /* priority suggestions not critical */
+      }
+    }
+
+    // Recent reflection lessons (close the feedback loop)
+    try {
+      const reflections = await this.taskStore.getRecentReflections(
+        projectPath,
+        5,
+      );
+      if (reflections.length > 0) {
+        const lines = reflections.map(
+          (r) =>
+            `- [${r.status}] "${truncate(r.task_description, 60)}" → ${r.lesson}`,
+        );
+        parts.push(`## Recent Reflection Lessons\n${lines.join("\n")}`);
+      }
+    } catch {
+      /* reflections not critical */
+    }
+
+    // Hot files detection (prevent area fixation)
+    try {
+      const { stdout } = await runGitLog(projectPath);
+      if (stdout.trim()) {
+        const fileCounts = new Map<string, number>();
+        for (const line of stdout.split("\n")) {
+          const file = line.trim();
+          if (file) fileCounts.set(file, (fileCounts.get(file) ?? 0) + 1);
+        }
+        const hotFiles = [...fileCounts.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 5)
+          .filter(([, count]) => count >= 3);
+        if (hotFiles.length > 0) {
+          const lines = hotFiles.map(
+            ([file, count]) => `- ${file}: ${count} changes in last 30 commits`,
+          );
+          parts.push(
+            `## Hot Files (recently modified, diminishing returns likely)\n${lines.join("\n")}\nConsider working on OTHER areas of the codebase.`,
+          );
+        }
+      }
+    } catch {
+      /* hot files not critical */
     }
 
     return parts.join("\n\n");
@@ -2259,7 +2365,7 @@ Respond with EXACTLY this JSON (no markdown):
         phase: "execute",
         agent: "claude-code",
         input_summary: `subtask ${i + 1}/${sorted.length}: ${truncate(st.description, 80)}`,
-        output_summary: result.text.slice(0, SUMMARY_PREVIEW_LEN),
+        output_summary: result.text,
         cost_usd: result.costUsd,
         duration_ms: result.durationMs,
       });
@@ -2584,7 +2690,7 @@ Respond with EXACTLY this JSON (no markdown, no extra text):
       phase: "review",
       agent: "brain-spec",
       input_summary: "Spec compliance review",
-      output_summary: result.text.slice(0, SUMMARY_PREVIEW_LEN),
+      output_summary: result.text,
       cost_usd: result.costUsd,
       duration_ms: result.durationMs,
     });
@@ -2714,8 +2820,8 @@ Be specific: include function signatures, type definitions, and concrete code sn
       task_id: task.id,
       phase,
       agent: this.worker.name,
-      input_summary: truncate(task.task_description, SUMMARY_PREVIEW_LEN),
-      output_summary: result.text.slice(0, SUMMARY_PREVIEW_LEN),
+      input_summary: task.task_description,
+      output_summary: result.text,
       cost_usd: result.costUsd,
       duration_ms: result.durationMs,
     });
@@ -2765,11 +2871,7 @@ ${proposal}
       phase: "plan-review",
       agent: this.reviewer.name,
       input_summary: "Plan review",
-      output_summary:
-        `${result.passed ? "PASS" : "FAIL"}: ${result.summary ?? ""}`.slice(
-          0,
-          SUMMARY_PREVIEW_LEN,
-        ),
+      output_summary: `${result.passed ? "PASS" : "FAIL"}: ${result.summary ?? ""}`,
       cost_usd: result.cost_usd,
       duration_ms: 0,
     });
@@ -2922,6 +3024,7 @@ ${diff.slice(0, 8000)}
 ${isRetry ? "This is a RETRY — the worker already attempted one fix. Only ignore/block/split are available." : ""}
 
 ## Output (JSON only)
+Write all text fields (reasoning, fixInstructions, newTasks) in ${this.config.values.brain.language}.
 {"decision": "...", "reasoning": "...", "fixInstructions": "...", "newTasks": ["..."]}`;
 
     const result = await this.brainThink(prompt);
@@ -2935,7 +3038,7 @@ ${isRetry ? "This is a RETRY — the worker already attempted one fix. Only igno
       phase: "reviewing",
       agent: "brain-decision",
       input_summary: `Review decision (retry=${isRetry})`,
-      output_summary: result.text.slice(0, SUMMARY_PREVIEW_LEN),
+      output_summary: result.text,
       cost_usd: result.costUsd,
       duration_ms: result.durationMs,
     });
@@ -3022,7 +3125,7 @@ Fix these issues. Do not make unrelated changes.`;
       phase: "executing",
       agent: `${this.worker.name}-review-fix`,
       input_summary: "Review fix",
-      output_summary: result.text.slice(0, SUMMARY_PREVIEW_LEN),
+      output_summary: result.text,
       cost_usd: result.costUsd,
       duration_ms: result.durationMs,
     });
@@ -3108,6 +3211,7 @@ ${reviewDiff}
 - Find 3-10 specific issues with file names and descriptions.
 - If fewer than 3 issues found, explain why the code quality is exceptional.
 - Be concrete — cite specific code patterns, not vague concerns.
+- Write ALL descriptions (issues + preExistingIssues) in ${this.config.values.brain.language}.
 
 ## Output Format (JSON)
 {"passed": true/false, "issues": [...], "preExistingIssues": [{"description": "...", "file": "...", "severity": "high|medium|low"}], "summary": "..."}`;
@@ -3130,12 +3234,8 @@ ${reviewDiff}
       task_id: task.id,
       phase: "review",
       agent: this.reviewer.name,
-      input_summary: `files: ${changedFiles.join(", ").slice(0, SUMMARY_PREVIEW_LEN)}`,
-      output_summary:
-        `${result.passed ? "PASS" : "FAIL"}: ${result.summary ?? ""}`.slice(
-          0,
-          SUMMARY_PREVIEW_LEN,
-        ),
+      input_summary: `files: ${changedFiles.join(", ")}`,
+      output_summary: `${result.passed ? "PASS" : "FAIL"}: ${result.summary ?? ""}`,
       cost_usd: result.cost_usd,
       duration_ms: 0,
     });
@@ -3146,12 +3246,14 @@ ${reviewDiff}
       const desc = issue.file
         ? `fix: ${issue.description} (${issue.file})`
         : `fix: ${issue.description}`;
-      const isDuplicate = await this.taskStore.hasRecentlyFailedSimilar(
+      const { duplicate, reason } = await this.taskStore.isDuplicateTask(
         projectPath,
         desc,
         48,
       );
-      if (!isDuplicate) {
+      if (duplicate) {
+        log.info(`Dedup preExisting: ${reason} — "${desc.slice(0, 80)}"`);
+      } else {
         await this.taskStore.createTask(projectPath, desc, 3);
         log.info(`Queued pre-existing issue: ${desc.slice(0, 100)}`);
       }
@@ -3198,7 +3300,10 @@ Verification: ${verification.passed ? "PASSED" : `FAILED — ${verification.reas
 ${personaContext}
 1. What went well? What could be improved?
 2. Do NOT edit CLAUDE.md unless you discover a critical, repeatable anti-pattern that would affect every future task (extremely rare, <5% of reflections).
-${personaData ? "3. If the persona needs updating based on this experience, include a PERSONA_UPDATE block." : ""}`;
+${personaData ? "3. If the persona needs updating based on this experience, include a PERSONA_UPDATE block." : ""}
+
+After your reflection, output a single-line actionable lesson:
+LESSON: <one sentence the brain should remember for next task selection>`;
 
     const result = await this.brainSession.run(prompt, {
       permissionMode: "bypassPermissions",
@@ -3214,12 +3319,19 @@ ${personaData ? "3. If the persona needs updating based on this experience, incl
     if (result.costUsd > 0)
       await this.costTracker.addCost(task.id, result.costUsd);
 
+    // Extract structured LESSON line as the summary;
+    // fall back to truncated full text if model didn't produce one
+    const lessonMatch = result.text.match(/^LESSON:\s*(.+)$/m);
+    const outputSummary = lessonMatch
+      ? `LESSON: ${lessonMatch[1]}`
+      : result.text.slice(0, SUMMARY_PREVIEW_LEN);
+
     await this.taskStore.addLog({
       task_id: task.id,
       phase: "reflect",
       agent: "brain",
       input_summary: `Reflect on ${outcome}`,
-      output_summary: result.text.slice(0, SUMMARY_PREVIEW_LEN),
+      output_summary: outputSummary,
       cost_usd: result.costUsd,
       duration_ms: result.durationMs,
     });
@@ -3239,7 +3351,7 @@ ${personaData ? "3. If the persona needs updating based on this experience, incl
             phase: "persona-evolution",
             agent: "brain",
             input_summary: `Persona ${personaName} updated`,
-            output_summary: newContent.slice(0, SUMMARY_PREVIEW_LEN),
+            output_summary: newContent,
             cost_usd: 0,
             duration_ms: 0,
           });
