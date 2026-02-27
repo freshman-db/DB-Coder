@@ -1266,6 +1266,95 @@ describe("executeSubtasks", () => {
     }
   });
 
+  it("should re-evaluate isPersisted from live task.subtasks when subtask is removed concurrently", async () => {
+    // Scenario: task starts with two persisted subtasks ("1" and "2").
+    // After patchSubtask sets "1" to running, the task returned no longer
+    // contains subtask "2" (concurrent external removal).
+    //
+    // OLD code: persistedIds.has("2") → true (stale snapshot) → calls patchSubtask
+    //           → patchSubtask pre-read finds no "2" → returns subtask-not-found
+    //           → executeSubtasks returns failure.
+    // NEW code: isPersisted = task.subtasks.some(s => s.id === "2") → false
+    //           (task was refreshed by patchSubtask for "1") → skips patchSubtask
+    //           → worker executes → succeeds.
+    const subtaskRecords: SubTaskRecord[] = [
+      {
+        id: "1",
+        description: "first subtask",
+        executor: "claude",
+        status: "pending",
+        order: 1,
+      },
+      {
+        id: "2",
+        description: "second subtask",
+        executor: "claude",
+        status: "pending",
+        order: 2,
+      },
+    ];
+
+    let currentTask = makeTask(subtaskRecords);
+    let firstUpdateDone = false;
+    const runningWritesForId2: SubTaskRecord[] = [];
+
+    const loop = buildStub({
+      taskStore: {
+        getTask: async () => {
+          // Once the first updateTask (running-status for "1") has been called,
+          // return task WITHOUT id="2" to simulate concurrent removal.
+          if (firstUpdateDone) {
+            return structuredClone({
+              ...currentTask,
+              subtasks: currentTask.subtasks.filter((s) => s.id !== "2"),
+            });
+          }
+          return structuredClone(currentTask);
+        },
+        updateTask: async (_id, updates) => {
+          const subs = updates.subtasks as SubTaskRecord[] | undefined;
+          if (subs) {
+            // Track any running-status writes targeting id="2"
+            const r2 = subs.find((s) => s.id === "2" && s.status === "running");
+            if (r2) runningWritesForId2.push(r2);
+            currentTask = { ...currentTask, subtasks: subs };
+            firstUpdateDone = true;
+          }
+        },
+        addLog: async () => {},
+      },
+      workerExecute: async () => makeSessionResult(),
+      hardVerify: async () => ({ passed: true }),
+      costTracker: { addCost: async () => {} },
+    });
+
+    const result = await (loop as unknown as Record<string, Function>)[
+      "executeSubtasks"
+    ](
+      currentTask,
+      [
+        { description: "first subtask", order: 1 },
+        { description: "second subtask", order: 2 },
+      ],
+      {
+        baselineErrors: 0,
+        startCommit: "abc123",
+      },
+    );
+
+    assert.ok(
+      result.success,
+      "executeSubtasks should succeed when a subtask is removed concurrently " +
+        "(new isPersisted guard uses refreshed task.subtasks, not stale snapshot)",
+    );
+    assert.equal(
+      runningWritesForId2.length,
+      0,
+      "Subtask id='2' must NOT be set to running after it was removed from task.subtasks " +
+        "(isPersisted computed from live task, not stale initialPersistedIds)",
+    );
+  });
+
   it("should produce NaN-free comparator results for all invalid order combinations", () => {
     // Directly verify the sort comparator logic never returns NaN
     const cmp = (a: { order: unknown }, b: { order: unknown }): number => {
