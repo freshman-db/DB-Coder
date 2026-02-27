@@ -1285,26 +1285,30 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
               );
             }
           } else {
+            const execStepExists = this.cycleSteps.some(
+              (s) => s.phase === "execute",
+            );
             log.warn(
               "Skipping updateStepStatus('execute') in catch(verifyErr): execute step not found or not finished",
-              {
-                exists: this.cycleSteps.some((s) => s.phase === "execute"),
-              },
+              { exists: execStepExists },
             );
-            try {
-              await this.taskStore.addLog({
-                task_id: task.id,
-                phase: "execute",
-                agent: "system",
-                input_summary: "execute step status persistence fallback",
-                output_summary: `execute step not finished when verification threw: ${errMsg}`,
-                cost_usd: 0,
-                duration_ms: 0,
-              });
-            } catch (logErr) {
-              log.warn("taskStore.addLog fallback failed in catch(verifyErr)", {
-                logErr,
-              });
+            if (execStepExists) {
+              try {
+                await this.taskStore.addLog({
+                  task_id: task.id,
+                  phase: "execute",
+                  agent: "system",
+                  input_summary: "execute step status persistence fallback",
+                  output_summary: `execute step not finished when verification threw: ${errMsg}`,
+                  cost_usd: 0,
+                  duration_ms: 0,
+                });
+              } catch (logErr) {
+                log.warn(
+                  "taskStore.addLog fallback failed in catch(verifyErr)",
+                  { logErr },
+                );
+              }
             }
           }
           throw verifyErr;
