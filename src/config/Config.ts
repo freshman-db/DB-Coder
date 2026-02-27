@@ -62,7 +62,7 @@ const DEFAULTS: DbCoderConfig = {
     protectedBranches: ["main", "master"],
     branchRetentionDays: 7,
   },
-  server: { port: 18801, host: "127.0.0.1" },
+  server: { port: 18800, host: "127.0.0.1" },
   mcp: { enabled: true },
   plugins: {},
   evolution: {
