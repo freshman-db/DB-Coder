@@ -1270,9 +1270,6 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
               { statusErr },
             );
           }
-          const execSteps = this.cycleSteps.filter(
-            (s) => s.phase === "execute",
-          );
           const finished = findFinishedStepsByPhase(this.cycleSteps, "execute");
           if (finished) {
             try {
@@ -1288,16 +1285,31 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
               );
             }
           } else {
+            const execStepExists = this.cycleSteps.some(
+              (s) => s.phase === "execute",
+            );
             log.warn(
               "Skipping updateStepStatus('execute') in catch(verifyErr): execute step not found or not finished",
-              {
-                exists: execSteps.length > 0,
-                count: execSteps.length,
-                allFinished:
-                  execSteps.length > 0 &&
-                  execSteps.every((s) => s.finishedAt != null),
-              },
+              { exists: execStepExists },
             );
+            if (execStepExists) {
+              try {
+                await this.taskStore.addLog({
+                  task_id: task.id,
+                  phase: "execute",
+                  agent: "system",
+                  input_summary: "execute step status persistence fallback",
+                  output_summary: `execute step not finished when verification threw: ${errMsg}`,
+                  cost_usd: 0,
+                  duration_ms: 0,
+                });
+              } catch (logErr) {
+                log.warn(
+                  "taskStore.addLog fallback failed in catch(verifyErr)",
+                  { logErr },
+                );
+              }
+            }
           }
           throw verifyErr;
         }
