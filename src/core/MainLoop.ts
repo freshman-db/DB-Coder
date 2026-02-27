@@ -1274,9 +1274,22 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
             (s) => s.phase === "execute",
           );
           const finished = findFinishedStepsByPhase(this.cycleSteps, "execute");
-          if (!finished) {
+          if (finished) {
+            try {
+              this.updateStepStatus(
+                "execute",
+                "failed",
+                `Verification phase exception: ${errMsg}`,
+              );
+            } catch (statusErr) {
+              log.warn(
+                "updateStepStatus('execute') failed in catch(verifyErr), preserving original error",
+                { statusErr },
+              );
+            }
+          } else {
             log.warn(
-              "findFinishedStepsByPhase returned null for execute in catch(verifyErr)",
+              "Skipping updateStepStatus('execute') in catch(verifyErr): execute step not found or not finished",
               {
                 exists: execSteps.length > 0,
                 count: execSteps.length,
@@ -1284,18 +1297,6 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
                   execSteps.length > 0 &&
                   execSteps.every((s) => s.finishedAt != null),
               },
-            );
-          }
-          try {
-            this.updateStepStatus(
-              "execute",
-              "failed",
-              `Verification phase exception: ${errMsg}`,
-            );
-          } catch (statusErr) {
-            log.warn(
-              "updateStepStatus('execute') failed in catch(verifyErr), preserving original error",
-              { statusErr },
             );
           }
           throw verifyErr;
