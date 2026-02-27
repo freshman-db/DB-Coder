@@ -487,7 +487,7 @@ function renderCycleTimeline(steps, cycleNumber) {
       : "Cycle Pipeline";
   const stepsHtml = steps
     .map((s, i) => {
-      const label = PHASE_LABELS[s.phase] || s.phase;
+      const label = escapeHtml(PHASE_LABELS[s.phase] || s.phase);
       const durationStr =
         typeof s.durationMs === "number"
           ? `${Math.round(s.durationMs / 1000)}s`
@@ -497,7 +497,7 @@ function renderCycleTimeline(steps, cycleNumber) {
           ? `<div class="step-connector ${s.status === "done" ? "done" : ""}"></div>`
           : "";
       return `
-        <div class="timeline-step ${s.status}" data-phase="${escapeHtml(s.phase)}">
+        <div class="timeline-step ${escapeHtml(s.status)}" data-phase="${escapeHtml(s.phase)}">
           <div class="step-indicator"></div>
           <div class="step-label">${label}</div>
           ${durationStr ? `<div class="step-duration">${durationStr}</div>` : ""}
