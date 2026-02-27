@@ -3538,6 +3538,7 @@ Rules:
         summary,
       };
     });
+    this.currentPhase = null;
     this.broadcastStatus();
   }
 
