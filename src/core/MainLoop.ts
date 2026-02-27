@@ -2318,7 +2318,7 @@ Respond with EXACTLY this JSON (no markdown):
         }
       }
     }
-    const persistedIds = new Set((task.subtasks ?? []).map((s) => s.id));
+    const initialPersistedIds = new Set((task.subtasks ?? []).map((s) => s.id));
     const persistedOrderById = new Map(
       (task.subtasks ?? []).map((s) => [s.id, s.order]),
     );
@@ -2332,7 +2332,7 @@ Respond with EXACTLY this JSON (no markdown):
       // cross-check ensures we only reuse an id when its stored order
       // actually matches st.order; otherwise we fall through to sentinel.
       const fallback = String(st.order);
-      if (persistedIds.has(fallback)) {
+      if (initialPersistedIds.has(fallback)) {
         const persistedOrder = persistedOrderById.get(fallback);
         if (persistedOrder == null) {
           log.warn(
@@ -2369,13 +2369,18 @@ Respond with EXACTLY this JSON (no markdown):
 
     for (let i = 0; i < sorted.length; i++) {
       const st = sorted[i];
+      // Recompute on each iteration so concurrent task.subtasks changes
+      // (from patchSubtask refreshes) are reflected in guard decisions.
+      const isPersisted = (task.subtasks ?? []).some(
+        (s) => s.id === st.subtaskId,
+      );
       log.info(
         `Subtask ${i + 1}/${sorted.length}: ${truncate(st.description, 100)}`,
       );
 
       // Update subtask status to running — match by id, not loop index
       // Skip DB update for sentinel IDs that don't match any persisted subtask
-      if (persistedIds.has(st.subtaskId)) {
+      if (isPersisted) {
         const result = await this.patchSubtask(task.id, st.subtaskId, {
           status: "running",
         });
@@ -2424,7 +2429,7 @@ Respond with EXACTLY this JSON (no markdown):
         subtaskWorkerErrMsg = `Subtask ${i + 1} worker reported error: ${result.errors.join("; ") || "unknown error"}`;
         log.warn(subtaskWorkerErrMsg);
         // Persist worker error in subtask history — skip for sentinel IDs
-        if (persistedIds.has(st.subtaskId)) {
+        if (isPersisted) {
           const result = await this.patchSubtask(task.id, st.subtaskId, {
             workerError: subtaskWorkerErrMsg,
           });
@@ -2538,7 +2543,7 @@ Respond with EXACTLY this JSON (no markdown):
             });
           }
 
-          if (persistedIds.has(st.subtaskId)) {
+          if (isPersisted) {
             const result = await this.patchSubtask(task.id, st.subtaskId, {
               status: "failed",
               result: lastVerification.reason,
@@ -2567,7 +2572,7 @@ Respond with EXACTLY this JSON (no markdown):
       }
 
       // Mark subtask done — skip for sentinel IDs
-      if (persistedIds.has(st.subtaskId)) {
+      if (isPersisted) {
         const result = await this.patchSubtask(task.id, st.subtaskId, {
           status: "done",
         });
