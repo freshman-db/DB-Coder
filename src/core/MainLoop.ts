@@ -213,6 +213,27 @@ export function failAllActiveSteps(
   });
 }
 
+/**
+ * Pure helper for beginStep: activates a pending step.
+ * Returns the updated steps array, or null if the step is not "pending"
+ * (which means the caller should reject re-entry and log a warning).
+ */
+export function applyBeginStep(
+  steps: CycleStep[],
+  phase: StepPhase,
+  now: number,
+): CycleStep[] | null {
+  const existing = steps.find((s) => s.phase === phase);
+  if (!existing || existing.status !== "pending") {
+    return null;
+  }
+  return steps.map((s) =>
+    s.phase === phase
+      ? { ...s, status: "active" as CycleStepStatus, startedAt: now }
+      : s,
+  );
+}
+
 function coerceSubtaskOrder(value: unknown, fallback: number): number {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 1 || !Number.isInteger(n)) return fallback;
@@ -3505,12 +3526,16 @@ Rules:
       log.warn(`beginStep called with unknown phase "${phase}", ignoring`);
       return;
     }
+    const updated = applyBeginStep(this.cycleSteps, phase, Date.now());
+    if (updated === null) {
+      const existing = this.cycleSteps.find((s) => s.phase === phase);
+      log.warn(
+        `beginStep called on phase "${phase}" which is already "${existing?.status ?? "unknown"}", ignoring to preserve timing/history`,
+      );
+      return;
+    }
     this.currentPhase = phase;
-    this.cycleSteps = this.cycleSteps.map((s) =>
-      s.phase === phase
-        ? { ...s, status: "active" as CycleStepStatus, startedAt: Date.now() }
-        : s,
-    );
+    this.cycleSteps = updated;
     this.broadcastStatus();
   }
 

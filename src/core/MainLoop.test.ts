@@ -6,6 +6,7 @@ import {
   setCountTscErrorsDepsForTests,
   applyStepStatusUpdate,
   failAllActiveSteps,
+  applyBeginStep,
 } from "./MainLoop.js";
 import type { CycleStep } from "./types.js";
 
@@ -256,5 +257,64 @@ describe("failAllActiveSteps", () => {
     const result = failAllActiveSteps(steps, "crash", 500);
     assert.equal(result[0].status, "failed");
     assert.equal(result[0].durationMs, 500);
+  });
+});
+
+// --- applyBeginStep ---
+
+describe("applyBeginStep", () => {
+  it("activates a pending step and sets startedAt", () => {
+    const steps: CycleStep[] = [
+      { phase: "decide", status: "pending" },
+      { phase: "execute", status: "pending" },
+    ];
+    const result = applyBeginStep(steps, "decide", 1000);
+    assert.ok(result !== null);
+    assert.equal(result[0].status, "active");
+    assert.equal(result[0].startedAt, 1000);
+    // Other steps unchanged
+    assert.equal(result[1].status, "pending");
+    // Original not mutated
+    assert.equal(steps[0].status, "pending");
+  });
+
+  it("returns null when step is already active (re-entry rejected)", () => {
+    const steps: CycleStep[] = [
+      { phase: "execute", status: "active", startedAt: 500 },
+    ];
+    const result = applyBeginStep(steps, "execute", 999);
+    assert.equal(result, null);
+    // Original startedAt must not be overwritten
+    assert.equal(steps[0].startedAt, 500);
+  });
+
+  it("returns null when step is already done", () => {
+    const steps: CycleStep[] = [
+      {
+        phase: "execute",
+        status: "done",
+        startedAt: 100,
+        finishedAt: 200,
+        durationMs: 100,
+      },
+    ];
+    assert.equal(applyBeginStep(steps, "execute", 999), null);
+  });
+
+  it("returns null when step is already failed", () => {
+    const steps: CycleStep[] = [
+      { phase: "execute", status: "failed", startedAt: 100 },
+    ];
+    assert.equal(applyBeginStep(steps, "execute", 999), null);
+  });
+
+  it("returns null when step is already skipped", () => {
+    const steps: CycleStep[] = [{ phase: "execute", status: "skipped" }];
+    assert.equal(applyBeginStep(steps, "execute", 999), null);
+  });
+
+  it("returns null when phase not found in steps", () => {
+    const steps: CycleStep[] = [{ phase: "decide", status: "pending" }];
+    assert.equal(applyBeginStep(steps, "execute", 999), null);
   });
 });
