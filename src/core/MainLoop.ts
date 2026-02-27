@@ -3528,7 +3528,8 @@ Rules:
     this.cycleSteps = this.cycleSteps.map((s) => {
       if (s.phase !== phase) return s;
       const durationMs =
-        durationOverrideMs ?? (s.startedAt ? now - s.startedAt : undefined);
+        durationOverrideMs ??
+        (s.startedAt != null ? now - s.startedAt : undefined);
       return {
         ...s,
         status: result as CycleStepStatus,
