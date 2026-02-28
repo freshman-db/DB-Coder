@@ -1,12 +1,12 @@
 import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 
-import { MainLoop } from "./MainLoop.js";
+import { WorkerPhase } from "./phases/WorkerPhase.js";
 import type { Task, SubTaskRecord } from "../memory/types.js";
 import type { SessionResult } from "../bridges/ClaudeCodeSession.js";
 
 /**
- * Creates a minimal MainLoop instance with mocked internals,
+ * Creates a minimal WorkerPhase instance with mocked internals,
  * bypassing the real constructor.
  */
 function buildStub(overrides: {
@@ -29,12 +29,12 @@ function buildStub(overrides: {
   maxRetries?: number;
 }) {
   // Bypass constructor completely
-  const loop = Object.create(MainLoop.prototype) as InstanceType<
-    typeof MainLoop
+  const wp = Object.create(WorkerPhase.prototype) as InstanceType<
+    typeof WorkerPhase
   >;
 
   // Inject mocked dependencies as private fields
-  const any = loop as unknown as Record<string, unknown>;
+  const any = wp as unknown as Record<string, unknown>;
   any.taskStore = overrides.taskStore;
   any.costTracker = overrides.costTracker;
   any.config = {
@@ -42,14 +42,14 @@ function buildStub(overrides: {
     values: { autonomy: { maxRetries: overrides.maxRetries ?? 0 } },
   };
 
-  // Replace private methods
+  // Replace public methods / injected callbacks
   any.workerExecute = overrides.workerExecute;
   any.hardVerify = overrides.hardVerify;
   if (overrides.workerFix) {
     any.workerFix = overrides.workerFix;
   }
 
-  return loop;
+  return wp;
 }
 
 function makeTask(subtasks: SubTaskRecord[]): Task {

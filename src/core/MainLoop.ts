@@ -9,7 +9,7 @@ import {
   type SessionResult,
 } from "../bridges/ClaudeCodeSession.js";
 import type { SdkExtras } from "../bridges/buildSdkOptions.js";
-import type { AgentResult, ReviewResult } from "../bridges/CodingAgent.js";
+import type { ReviewResult } from "../bridges/CodingAgent.js";
 import {
   ClaudeWorkerAdapter,
   CodexWorkerAdapter,
@@ -18,7 +18,7 @@ import {
   type WorkerAdapter,
   type ReviewAdapter,
 } from "./WorkerAdapter.js";
-import type { Task, SubTaskRecord } from "../memory/types.js";
+import type { Task } from "../memory/types.js";
 import type {
   LoopState,
   StatusSnapshot,
@@ -49,7 +49,7 @@ import {
 } from "../types/constants.js";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { safeBuild } from "../utils/safeBuild.js";
 import { CycleEventBus } from "./CycleEventBus.js";
 import type { CycleEvent, CyclePhase, CycleTiming } from "./CycleEvents.js";
@@ -65,6 +65,7 @@ import type { RegisteredStrategies } from "./strategies/index.js";
 import { ProjectMemory } from "../memory/ProjectMemory.js";
 import { MaintenancePhase } from "./phases/MaintenancePhase.js";
 import { ReviewPhase } from "./phases/ReviewPhase.js";
+import { WorkerPhase, COMPLEXITY_CONFIG } from "./phases/WorkerPhase.js";
 import { runBrainThink } from "./phases/brainThink.js";
 // Re-export pure functions from StepTracker for backward compatibility
 export {
@@ -91,38 +92,7 @@ const ERROR_RECOVERY_MS = 30_000;
 const BRANCH_ID_LENGTH = 8;
 const CLAUDE_MEM_CONTEXT_MAX_CHARS = 3500;
 
-interface ComplexityConfig {
-  maxTurns: number;
-  maxBudget: number;
-  timeout: number;
-  worker: "claude" | "codex";
-  model?: string; // Claude model override (e.g. 'sonnet', 'opus')
-}
-
-const COMPLEXITY_CONFIG: Record<string, ComplexityConfig> = {
-  S: { maxTurns: 100, maxBudget: 5.0, timeout: 600_000, worker: "codex" },
-  M: {
-    maxTurns: 200,
-    maxBudget: 10.0,
-    timeout: 1_200_000,
-    worker: "claude",
-    model: "sonnet",
-  },
-  L: {
-    maxTurns: 200,
-    maxBudget: 15.0,
-    timeout: 2_400_000,
-    worker: "claude",
-    model: "opus",
-  },
-  XL: {
-    maxTurns: 200,
-    maxBudget: 20.0,
-    timeout: 3_600_000,
-    worker: "claude",
-    model: "opus",
-  },
-};
+// COMPLEXITY_CONFIG is imported from WorkerPhase
 
 async function runGitLog(cwd: string): Promise<{ stdout: string }> {
   const { runProcess } = await import("../utils/process.js");
@@ -193,11 +163,6 @@ function normalizeSubtasks(
 // StatusListener type is defined in StepTracker.ts
 import type { StatusListener } from "./StepTracker.js";
 
-type PatchSubtaskResult =
-  | { ok: true; task: Task }
-  | { ok: false; reason: "task-gone" }
-  | { ok: false; reason: "subtask-not-found" };
-
 export class MainLoop {
   // All mutable cycle/state fields are managed by the tracker
   private tracker = new CycleStepTracker();
@@ -222,6 +187,7 @@ export class MainLoop {
   private memoryProject = "default-project";
   private maintenance!: MaintenancePhase;
   private review!: ReviewPhase;
+  private workerPhase!: WorkerPhase;
 
   constructor(
     private config: Config,
@@ -285,6 +251,17 @@ export class MainLoop {
       costTracker,
       this.brainSession,
       this.reviewer,
+    );
+    this.workerPhase = new WorkerPhase(
+      config,
+      taskStore,
+      costTracker,
+      this.worker,
+      this.workerSession,
+      codex,
+      this.personaLoader,
+      (baseline, startCommit, projectPath) =>
+        this.maintenance.hardVerify(baseline, startCommit, projectPath),
     );
 
     // claude-mem integration (optional, non-critical)
@@ -2134,108 +2111,7 @@ Respond with EXACTLY this JSON (no markdown):
       resumeSessionId?: string;
     },
   ): Promise<SessionResult> {
-    const description = opts?.subtaskDescription ?? task.task_description;
-    const { prompt: basePrompt, systemPrompt } =
-      await this.personaLoader.buildWorkerPrompt({
-        taskDescription: description,
-        personaName: opts?.persona,
-        taskType: opts?.taskType,
-        workInstructions: opts?.workInstructions,
-      });
-
-    const isResume = !!opts?.resumeSessionId;
-
-    // If an approved plan exists, prepend it to the worker prompt
-    const prompt = isResume
-      ? `--- NEXT SUBTASK ---\n${description}\n\n${opts?.approvedPlan ? `## Approved Plan\n${opts.approvedPlan}\n\n` : ""}Continue working in this session.`
-      : opts?.approvedPlan
-        ? `${basePrompt}\n\n## Approved Implementation Plan\nFollow this plan that was reviewed and approved:\n\n${opts.approvedPlan}`
-        : basePrompt;
-
-    const complexity =
-      opts?.complexity ??
-      ((task.plan as Record<string, unknown> | null)?.complexity as
-        | string
-        | undefined);
-    const cConfig = COMPLEXITY_CONFIG[complexity ?? "M"];
-
-    // Route to Codex for S-level tasks (unless resuming a Claude session)
-    if (cConfig.worker === "codex" && !isResume) {
-      log.info(`workerExecute: routing ${complexity ?? "M"} task to Codex`);
-      const codexResult = await this.codex.execute(
-        prompt,
-        this.config.projectPath,
-        {
-          systemPrompt,
-          maxTurns: cConfig.maxTurns,
-          maxBudget: cConfig.maxBudget,
-          timeout: cConfig.timeout,
-        },
-      );
-      return codexResultToSessionResult(codexResult);
-    }
-
-    // Claude path — select model from complexity config or fall back to config default
-    const model = cConfig.model
-      ? resolveModelId(cConfig.model)
-      : resolveModelId(this.config.values.claude.model);
-
-    const result = await this.workerSession.run(prompt, {
-      permissionMode: "bypassPermissions",
-      maxTurns: cConfig.maxTurns,
-      maxBudget: Math.min(
-        cConfig.maxBudget,
-        this.config.values.claude.maxTaskBudget,
-      ),
-      cwd: this.config.projectPath,
-      timeout: cConfig.timeout,
-      model,
-      thinking: { type: "adaptive" },
-      effort: "medium",
-      appendSystemPrompt: isResume ? undefined : systemPrompt,
-      resumeSessionId: opts?.resumeSessionId,
-    });
-
-    if (isResume) {
-      const u = result.usage;
-      const total = u.inputTokens || 1;
-      log.info(
-        `workerExecute resume cache: read=${u.cacheReadInputTokens}/${total} (${((u.cacheReadInputTokens / total) * 100).toFixed(0)}%)`,
-      );
-    }
-
-    return result;
-  }
-
-  /**
-   * Atomically patch a single subtask: read fresh from DB, apply patch, write,
-   * then post-read for verification.
-   */
-  private async patchSubtask(
-    taskId: string,
-    subtaskId: string,
-    patch: Partial<Pick<SubTaskRecord, "status" | "result" | "workerError">>,
-  ): Promise<PatchSubtaskResult> {
-    const fresh = await this.taskStore.getTask(taskId);
-    if (!fresh) return { ok: false, reason: "task-gone" };
-    let matched = false;
-    const patched = (fresh.subtasks ?? []).map((s) => {
-      if (s.id === subtaskId) {
-        matched = true;
-        return { ...s, ...patch };
-      }
-      return s;
-    });
-    if (!matched) {
-      log.warn(
-        `patchSubtask: subtaskId ${subtaskId} not found in task ${taskId}, skipping write`,
-      );
-      return { ok: false, reason: "subtask-not-found" };
-    }
-    await this.taskStore.updateTask(taskId, { subtasks: patched });
-    const verified = await this.taskStore.getTask(taskId);
-    if (!verified) return { ok: false, reason: "task-gone" };
-    return { ok: true, task: verified };
+    return this.workerPhase.workerExecute(task, opts);
   }
 
   private async executeSubtasks(
@@ -2256,317 +2132,7 @@ Respond with EXACTLY this JSON (no markdown):
     failureKind?: "task-gone" | "subtask-not-found";
     totalVerifyMs: number;
   }> {
-    let totalVerifyMs = 0;
-    // Re-read task from DB to ensure subtasks array is fresh
-    const freshTask = await this.taskStore.getTask(task.id);
-    if (!freshTask) {
-      const reason = `Task ${task.id} disappeared before subtask execution`;
-      log.error(reason);
-      return { success: false, reason, totalVerifyMs };
-    }
-    task = freshTask;
-
-    // Build order→id map from persisted subtasks, then match by order (not index).
-    // Known limitation: if brain reuses the same order number across cycles for
-    // semantically different subtasks, the main-path lookup will bind the wrong id.
-    // That is an architectural concern (order stability) beyond this fallback fix.
-    const orderToId = new Map<number, string>();
-    for (const s of task.subtasks ?? []) {
-      if (s.order != null) {
-        if (orderToId.has(s.order)) {
-          log.warn(`Duplicate subtask order ${s.order}, keeping first`);
-        } else {
-          orderToId.set(s.order, s.id);
-        }
-      }
-    }
-    const initialPersistedIds = new Set((task.subtasks ?? []).map((s) => s.id));
-    const persistedOrderById = new Map(
-      (task.subtasks ?? []).map((s) => [s.id, s.order]),
-    );
-    const withId = subtasks.map((st) => {
-      const matchedId = orderToId.get(st.order);
-      if (matchedId != null) {
-        return { ...st, subtaskId: matchedId };
-      }
-      // Fallback uses order (not array index) so out-of-order subtasks
-      // don't bind to wrong persisted IDs. The subsequent persistedOrder
-      // cross-check ensures we only reuse an id when its stored order
-      // actually matches st.order; otherwise we fall through to sentinel.
-      const fallback = String(st.order);
-      if (initialPersistedIds.has(fallback)) {
-        const persistedOrder = persistedOrderById.get(fallback);
-        if (persistedOrder == null) {
-          log.warn(
-            `Persisted subtask has no order field for fallback id=${fallback}, order=${st.order}, using sentinel`,
-          );
-          return { ...st, subtaskId: `__sentinel_${randomUUID()}` };
-        }
-        if (Number(persistedOrder) === Number(st.order)) {
-          log.warn(
-            `Persisted subtask fallback id=${fallback} matches order=${st.order}, reusing id`,
-          );
-          return { ...st, subtaskId: fallback };
-        }
-        log.warn(
-          `Fallback id=${fallback} has order=${persistedOrder} but expected order=${st.order}, using sentinel`,
-        );
-        return { ...st, subtaskId: `__sentinel_${randomUUID()}` };
-      }
-      log.warn(
-        `No persisted subtask for order=${st.order}, fallback=${fallback} not in persisted subtasks, using sentinel`,
-      );
-      return { ...st, subtaskId: `__sentinel_${randomUUID()}` };
-    });
-    const sorted = withId.toSorted((a, b) => {
-      const aOrd = Number.isFinite(a.order) ? a.order : Infinity;
-      const bOrd = Number.isFinite(b.order) ? b.order : Infinity;
-      if (aOrd === bOrd) return 0;
-      if (!Number.isFinite(aOrd)) return 1;
-      if (!Number.isFinite(bOrd)) return -1;
-      return aOrd - bOrd;
-    });
-
-    let lastSuccessfulSessionId: string | undefined;
-
-    for (let i = 0; i < sorted.length; i++) {
-      const st = sorted[i];
-      // Recompute on each iteration so concurrent task.subtasks changes
-      // (from patchSubtask refreshes) are reflected in guard decisions.
-      const isPersisted = (task.subtasks ?? []).some(
-        (s) => s.id === st.subtaskId,
-      );
-      log.info(
-        `Subtask ${i + 1}/${sorted.length}: ${truncate(st.description, 100)}`,
-      );
-
-      // Update subtask status to running — match by id, not loop index
-      // Skip DB update for sentinel IDs that don't match any persisted subtask
-      if (isPersisted) {
-        const result = await this.patchSubtask(task.id, st.subtaskId, {
-          status: "running",
-        });
-        if (!result.ok) {
-          const reason =
-            result.reason === "task-gone"
-              ? `Task ${task.id} disappeared during running-status write`
-              : `Subtask ${st.subtaskId} not found in task ${task.id} during running-status write`;
-          log.error(reason);
-          return {
-            success: false,
-            reason,
-            failureKind: result.reason,
-            totalVerifyMs,
-          };
-        }
-        task = result.task;
-      }
-
-      // Execute worker — resume from previous subtask if available
-      const result = await this.workerExecute(task, {
-        persona: opts.persona,
-        taskType: opts.taskType,
-        complexity: opts.complexity,
-        workInstructions: opts.workInstructions,
-        subtaskDescription: st.description,
-        resumeSessionId: lastSuccessfulSessionId,
-      });
-
-      if (result.costUsd > 0)
-        await this.costTracker.addCost(task.id, result.costUsd);
-
-      await this.taskStore.addLog({
-        task_id: task.id,
-        phase: "execute",
-        agent: "claude-code",
-        input_summary: `subtask ${i + 1}/${sorted.length}: ${truncate(st.description, 80)}`,
-        output_summary: result.text,
-        cost_usd: result.costUsd,
-        duration_ms: result.durationMs,
-      });
-
-      // isError is a warning, not a gate — hardVerify makes the final call
-      let subtaskWorkerErrMsg: string | undefined;
-      if (result.isError) {
-        subtaskWorkerErrMsg = `Subtask ${i + 1} worker reported error: ${result.errors.join("; ") || "unknown error"}`;
-        log.warn(subtaskWorkerErrMsg);
-        // Persist worker error in subtask history — skip for sentinel IDs
-        if (isPersisted) {
-          const result = await this.patchSubtask(task.id, st.subtaskId, {
-            workerError: subtaskWorkerErrMsg,
-          });
-          if (!result.ok) {
-            const reason =
-              result.reason === "task-gone"
-                ? `Task ${task.id} disappeared during error-status write`
-                : `Subtask ${st.subtaskId} not found in task ${task.id} during error-status write`;
-            log.error(reason);
-            return {
-              success: false,
-              reason,
-              failureKind: result.reason,
-              totalVerifyMs,
-            };
-          }
-          task = result.task;
-        } else {
-          const refreshed = await this.taskStore.getTask(task.id);
-          if (!refreshed) {
-            const reason = `Task ${task.id} disappeared during subtask error processing`;
-            log.error(reason);
-            return { success: false, reason, totalVerifyMs };
-          }
-          task = refreshed;
-        }
-      }
-
-      // Per-subtask hard verify with HALT retry loop — always runs
-      const verifyStart = Date.now();
-      let verification: { passed: boolean; reason?: string };
-      try {
-        verification = await this.hardVerify(
-          opts.baseline,
-          opts.startCommit,
-          this.config.projectPath,
-        );
-      } finally {
-        totalVerifyMs += Date.now() - verifyStart;
-      }
-      if (!verification.passed) {
-        const maxRetries = this.config.values.autonomy.maxRetries;
-        let fixAttempts = 0;
-        let currentSessionId = result.sessionId;
-        let lastVerification = verification;
-
-        const retryPhaseStart = Date.now();
-        try {
-          while (
-            !lastVerification.passed &&
-            currentSessionId &&
-            fixAttempts < maxRetries
-          ) {
-            fixAttempts++;
-            log.warn(
-              `Subtask ${i + 1} verification failed (attempt ${fixAttempts}/${maxRetries}): ${lastVerification.reason}`,
-            );
-            const fixResult = await this.workerFix(
-              currentSessionId,
-              lastVerification.reason ?? "Unknown",
-              task,
-            );
-            if (fixResult.costUsd > 0)
-              await this.costTracker.addCost(task.id, fixResult.costUsd);
-            currentSessionId = fixResult.sessionId ?? currentSessionId;
-
-            const changedFilesForCommit = await getModifiedAndAddedFiles(
-              this.config.projectPath,
-            ).catch(() => []);
-            try {
-              await commitAll(
-                "db-coder: fix verification issues",
-                this.config.projectPath,
-                changedFilesForCommit,
-              );
-            } catch (commitErr) {
-              log.error(
-                `commitAll failed during subtask verification retry ${fixAttempts}: ${commitErr}`,
-              );
-              lastVerification = {
-                passed: false,
-                reason: `commitAll failed: ${commitErr instanceof Error ? commitErr.message : String(commitErr)}`,
-              };
-              break;
-            }
-            lastVerification = await this.hardVerify(
-              opts.baseline,
-              opts.startCommit,
-              this.config.projectPath,
-            );
-          }
-        } finally {
-          totalVerifyMs += Date.now() - retryPhaseStart;
-        }
-
-        if (!lastVerification.passed) {
-          const haltMsg = currentSessionId
-            ? `HALT after ${fixAttempts} fix attempts: ${lastVerification.reason}`
-            : `Verification failed, no session to fix: ${lastVerification.reason}`;
-          log.warn(`Subtask ${i + 1}: ${haltMsg}`);
-
-          if (opts.persona) {
-            await this.taskStore.addLog({
-              task_id: task.id,
-              phase: "halt-learning",
-              agent: "system",
-              input_summary: `subtask=${i + 1}`,
-              output_summary: `HALT triggered: ${lastVerification.reason} (after ${fixAttempts} attempts)`,
-              cost_usd: 0,
-              duration_ms: 0,
-            });
-          }
-
-          if (isPersisted) {
-            const result = await this.patchSubtask(task.id, st.subtaskId, {
-              status: "failed",
-              result: lastVerification.reason,
-            });
-            if (!result.ok) {
-              const reason =
-                result.reason === "task-gone"
-                  ? `Task ${task.id} disappeared during verification-failure write`
-                  : `Subtask ${st.subtaskId} not found in task ${task.id} during verification-failure write`;
-              log.error(reason);
-              return {
-                success: false,
-                reason,
-                failureKind: result.reason,
-                totalVerifyMs,
-              };
-            }
-            task = result.task;
-          }
-          const verifyReason = lastVerification.reason || "verification failed";
-          const fullReason = subtaskWorkerErrMsg
-            ? `${verifyReason} (worker also reported: ${result.errors.join("; ") || "unknown error"})`
-            : verifyReason;
-          return { success: false, reason: fullReason, totalVerifyMs };
-        }
-      }
-
-      // Mark subtask done — skip for sentinel IDs
-      if (isPersisted) {
-        const result = await this.patchSubtask(task.id, st.subtaskId, {
-          status: "done",
-        });
-        if (!result.ok) {
-          const reason =
-            result.reason === "task-gone"
-              ? `Task ${task.id} disappeared during done-status write`
-              : `Subtask ${st.subtaskId} not found in task ${task.id} during done-status write`;
-          log.error(reason);
-          return {
-            success: false,
-            reason,
-            failureKind: result.reason,
-            totalVerifyMs,
-          };
-        }
-        task = result.task;
-      } else {
-        const refreshed = await this.taskStore.getTask(task.id);
-        if (!refreshed) {
-          const reason = `Task ${task.id} disappeared after marking subtask done`;
-          log.error(reason);
-          return { success: false, reason, totalVerifyMs };
-        }
-        task = refreshed;
-      }
-
-      // Capture session for next subtask resume (only on success)
-      lastSuccessfulSessionId = result.sessionId;
-    }
-
-    return { success: true, totalVerifyMs };
+    return this.workerPhase.executeSubtasks(task, subtasks, opts);
   }
 
   private async workerFix(
@@ -2574,20 +2140,7 @@ Respond with EXACTLY this JSON (no markdown):
     errors: string,
     task: Task,
   ): Promise<SessionResult> {
-    return this.workerSession.run(
-      `The previous changes failed verification:\n${errors}\n\nFix these issues. The original task was: ${task.task_description}\n\nUse superpowers:systematic-debugging to investigate the root cause.\nFollow all 4 phases: investigate → analyze → hypothesize → implement.\nDo NOT guess or "try changing X". Find the actual root cause first.`,
-      {
-        permissionMode: "bypassPermissions",
-        maxTurns: 100,
-        maxBudget: this.config.values.claude.maxTaskBudget,
-        cwd: this.config.projectPath,
-        timeout: 600_000,
-        thinking: { type: "adaptive" },
-        effort: "medium",
-        resumeSessionId: sessionId,
-        model: resolveModelId(this.config.values.claude.model),
-      },
-    );
+    return this.workerPhase.workerFix(sessionId, errors, task);
   }
 
   // --- Hard verification (delegates to MaintenancePhase) ---
@@ -2646,74 +2199,7 @@ Respond with EXACTLY this JSON (no markdown):
     isError: boolean;
     sessionId?: string;
   }> {
-    let analyzePrompt: string;
-
-    if (revision) {
-      // Revision round: resume session with feedback context
-      analyzePrompt = revision.revisionPrompt;
-    } else {
-      const { prompt: basePrompt } = await this.personaLoader.buildWorkerPrompt(
-        {
-          taskDescription: task.task_description,
-          personaName: brainOpts?.persona,
-          taskType: brainOpts?.taskType,
-          workInstructions: brainOpts?.workInstructions,
-        },
-      );
-
-      analyzePrompt = `## Analysis Mode (Read-Only)
-
-You are analyzing code to produce a detailed change proposal. Do NOT modify any files.
-
-${basePrompt}
-
-## Required Output
-
-Produce a structured proposal with:
-1. **Files to modify** — exact file paths and what changes are needed
-2. **New files to create** — path, purpose, key interfaces/classes
-3. **Dependencies** — imports to add, packages needed
-4. **Risk assessment** — what could go wrong, edge cases
-5. **Test strategy** — what tests to add/modify
-
-Be specific: include function signatures, type definitions, and concrete code snippets where helpful.`;
-    }
-
-    const complexity = brainOpts?.complexity ?? "M";
-    const cConfig = COMPLEXITY_CONFIG[complexity];
-
-    const result = await this.worker.analyze(analyzePrompt, {
-      cwd: this.config.projectPath,
-      maxTurns: Math.min(cConfig.maxTurns, 100),
-      maxBudget: Math.min(cConfig.maxBudget, 5.0),
-      timeout: Math.min(cConfig.timeout, 600_000),
-      model: resolveModelId(this.config.values.claude.model),
-      thinking: { type: "adaptive" },
-      effort: "medium",
-      resumeSessionId: revision?.resumeSessionId,
-    });
-
-    if (result.costUsd > 0) {
-      await this.costTracker.addCost(task.id, result.costUsd);
-    }
-
-    const phase = revision ? "analyzing-revision" : "analyzing";
-    await this.taskStore.addLog({
-      task_id: task.id,
-      phase,
-      agent: this.worker.name,
-      input_summary: task.task_description,
-      output_summary: result.text,
-      cost_usd: result.costUsd,
-      duration_ms: result.durationMs,
-    });
-
-    return {
-      proposal: result.text,
-      costUsd: result.costUsd,
-      isError: result.isError || !result.text.trim(),
-      sessionId: result.sessionId,
-    };
+    return this.workerPhase.workerAnalyze(task, brainOpts, revision);
   }
 
   /**
@@ -2937,53 +2423,14 @@ Write all text fields (reasoning, fixInstructions, newTasks) in ${this.config.va
   }
 
   /**
-   * Worker fixes issues found in code review.
-   * For Claude worker: resumes the original session for context continuity.
-   * For Codex worker: starts fresh with full context.
+   * Worker fixes issues found in code review (delegates to WorkerPhase).
    */
   private async workerReviewFix(
     task: Task,
     fixInstructions: string,
     sessionId?: string,
   ): Promise<{ costUsd: number; sessionId?: string; isError: boolean }> {
-    const prompt = `The code review found issues that need fixing.
-
-## Original Task
-${task.task_description}
-
-## Fix Instructions
-${fixInstructions}
-
-Fix these issues. Do not make unrelated changes.`;
-
-    const result = await this.worker.fix(prompt, {
-      cwd: this.config.projectPath,
-      maxTurns: 100,
-      maxBudget: this.config.values.claude.maxTaskBudget,
-      timeout: 600_000,
-      model: resolveModelId(this.config.values.claude.model),
-      resumeSessionId: sessionId,
-    });
-
-    if (result.costUsd > 0) {
-      await this.costTracker.addCost(task.id, result.costUsd);
-    }
-
-    await this.taskStore.addLog({
-      task_id: task.id,
-      phase: "executing",
-      agent: `${this.worker.name}-review-fix`,
-      input_summary: "Review fix",
-      output_summary: result.text,
-      cost_usd: result.costUsd,
-      duration_ms: result.durationMs,
-    });
-
-    return {
-      costUsd: result.costUsd,
-      sessionId: result.sessionId,
-      isError: result.isError,
-    };
+    return this.workerPhase.workerReviewFix(task, fixInstructions, sessionId);
   }
 
   /**
@@ -3191,28 +2638,6 @@ LESSON: <one sentence the brain should remember for next task selection>`;
   ): Promise<void> {
     return this.maintenance.cleanupTaskBranch(branch, opts);
   }
-}
-
-// --- Codex result adapter ---
-
-function codexResultToSessionResult(r: AgentResult): SessionResult {
-  return {
-    text: r.output,
-    costUsd: r.cost_usd,
-    durationMs: r.duration_ms,
-    sessionId: "", // Codex has no session resume
-    isError: !r.success,
-    errors: r.success ? [] : [r.output],
-    json: r.structured ?? null,
-    exitCode: r.success ? 0 : 1,
-    numTurns: r.numTurns ?? 0,
-    usage: {
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheCreationInputTokens: 0,
-      cacheReadInputTokens: 0,
-    },
-  };
 }
 
 // --- Utility functions ---
