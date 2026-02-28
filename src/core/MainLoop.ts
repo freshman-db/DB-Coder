@@ -36,7 +36,6 @@ import {
   getHeadCommit,
   getCurrentBranch,
   branchExists,
-  getChangedFilesSince,
   getModifiedAndAddedFiles,
   mergeBranch,
   deleteBranch,
@@ -65,6 +64,8 @@ import { ProjectVerifier, type VerifyBaseline } from "./ProjectVerifier.js";
 import type { RegisteredStrategies } from "./strategies/index.js";
 import { ProjectMemory } from "../memory/ProjectMemory.js";
 import { MaintenancePhase } from "./phases/MaintenancePhase.js";
+import { ReviewPhase } from "./phases/ReviewPhase.js";
+import { runBrainThink } from "./phases/brainThink.js";
 // Re-export pure functions from StepTracker for backward compatibility
 export {
   applyStepStatusUpdate,
@@ -220,6 +221,7 @@ export class MainLoop {
   private projectMemory: ProjectMemory | null = null;
   private memoryProject = "default-project";
   private maintenance!: MaintenancePhase;
+  private review!: ReviewPhase;
 
   constructor(
     private config: Config,
@@ -276,6 +278,13 @@ export class MainLoop {
       this.brainSession,
       this.projectVerifier,
       this.lockFile,
+    );
+    this.review = new ReviewPhase(
+      config,
+      taskStore,
+      costTracker,
+      this.brainSession,
+      this.reviewer,
     );
 
     // claude-mem integration (optional, non-critical)
@@ -2108,32 +2117,7 @@ Respond with EXACTLY this JSON (no markdown):
     prompt: string,
     opts?: { jsonSchema?: object; resumeSessionId?: string },
   ): Promise<SessionResult> {
-    const isResume = !!opts?.resumeSessionId;
-    const result = await this.brainSession.run(prompt, {
-      permissionMode: "bypassPermissions",
-      maxTurns: 200,
-      cwd: this.config.projectPath,
-      timeout: 900_000,
-      model: resolveModelId(this.config.values.brain.model),
-      thinking: { type: "adaptive" },
-      effort: "high",
-      disallowedTools: ["Edit", "Write", "NotebookEdit"],
-      appendSystemPrompt: isResume
-        ? undefined
-        : "You are the brain of an autonomous coding agent. Read CLAUDE.md for context. Do not modify files — only analyze and decide.",
-      jsonSchema: opts?.jsonSchema,
-      resumeSessionId: opts?.resumeSessionId,
-    });
-
-    if (isResume) {
-      const u = result.usage;
-      const total = u.inputTokens || 1;
-      log.info(
-        `brainThink resume cache: read=${u.cacheReadInputTokens}/${total} (${((u.cacheReadInputTokens / total) * 100).toFixed(0)}%)`,
-      );
-    }
-
-    return result;
+    return runBrainThink(this.brainSession, this.config, prompt, opts);
   }
 
   // --- Worker session ---
@@ -2630,125 +2614,12 @@ Respond with EXACTLY this JSON (no markdown):
     extra: string[];
     concerns: string[];
   }> {
-    const diff = await getDiffSince(startCommit, projectPath, {
-      ignoreWhitespace: true,
-    }).catch(() => "(diff unavailable)");
-    const subtaskList = (task.subtasks ?? [])
-      .map((s) => `- ${s.description}`)
-      .join("\n");
-
-    // BMAD: inject acceptance criteria from structured workInstructions
-    const acSection =
-      workInstructions &&
-      typeof workInstructions !== "string" &&
-      workInstructions.acceptanceCriteria?.length
-        ? `\n## Acceptance Criteria (verify against diff)\n${workInstructions.acceptanceCriteria.map((c) => `- [ ] ${c}`).join("\n")}\n`
-        : "";
-
-    const prompt = `You are a cynical, adversarial code reviewer. You EXPECT to find problems.
-Your job is NOT to confirm quality — it's to find what's wrong, missing, or dangerous.
-DO NOT trust commit messages — only examine the actual diff.
-If you find zero issues, that is suspicious — re-analyze with more skepticism.
-
-## Original Task
-${task.task_description}
-${acSection}
-${subtaskList ? `## Subtasks\n${subtaskList}\n` : ""}## Git Diff
-\`\`\`diff
-${diff}
-\`\`\`
-
-## Review Checklist (check ALL categories)
-
-### 1. Spec Compliance
-- Does the diff fully implement every requirement in the task?
-- Are there requirements mentioned but not implemented?
-
-### 2. Scope Discipline
-- Does the diff contain changes NOT requested by the task?
-- Are there "while I'm here" cleanups, refactors, or improvements?
-
-### 3. Correctness
-- Are there logic errors, off-by-one, or missing edge cases?
-- Are error paths handled explicitly (no catch-ignore)?
-
-### 4. Safety
-- Any new \`any\` types, unvalidated input, or injection vectors?
-- Are there catch blocks that swallow errors silently?
-
-### 5. Git Reality
-- Does the actual diff match what the task asked for?
-- Are there files changed that have no relation to the task?
-- Do commit messages accurately describe the changes?
-
-## Rules
-- Report all issues you find. Be concrete — cite file names and line context.
-- If the code is clean, report passed: true and explain briefly why.
-- "Looks good" without specific analysis is NOT acceptable.
-
-Respond with EXACTLY this JSON (no markdown, no extra text):
-{"passed": true/false, "missing": ["..."], "extra": ["..."], "concerns": ["..."]}`;
-
-    const result = await this.brainThink(prompt);
-    if (result.costUsd > 0 && task.id) {
-      await this.costTracker.addCost(task.id, result.costUsd);
-    }
-
-    await this.taskStore.addLog({
-      task_id: task.id,
-      phase: "review",
-      agent: "brain-spec",
-      input_summary: "Spec compliance review",
-      output_summary: result.text,
-      cost_usd: result.costUsd,
-      duration_ms: result.durationMs,
-    });
-
-    const parseSpecResult = (text: string) => {
-      const parsed = extractJsonFromText(
-        text,
-        (v) => isRecord(v) && Object.prototype.hasOwnProperty.call(v, "passed"),
-      );
-      if (!isRecord(parsed)) return null;
-      const res = {
-        passed: parsed.passed === true,
-        missing: Array.isArray(parsed.missing) ? parsed.missing : [],
-        extra: Array.isArray(parsed.extra) ? parsed.extra : [],
-        concerns: Array.isArray(parsed.concerns) ? parsed.concerns : [],
-      };
-      // BMAD: zero findings with PASS is suspicious — inject concern for visibility
-      if (
-        res.passed &&
-        res.missing.length === 0 &&
-        res.extra.length === 0 &&
-        res.concerns.length === 0
-      ) {
-        res.concerns = [
-          "Reviewer found zero issues — may indicate insufficient analysis",
-        ];
-      }
-      return res;
-    };
-
-    const firstResult = parseSpecResult(result.text);
-    if (firstResult) return firstResult;
-
-    // extractJsonFromText couldn't find valid JSON — retry once then FAIL
-    log.warn("Spec review returned unparseable JSON, retrying once");
-    const retry = await this.brainThink(prompt);
-    if (retry.costUsd > 0 && task.id) {
-      await this.costTracker.addCost(task.id, retry.costUsd);
-    }
-    const retryResult = parseSpecResult(retry.text);
-    if (retryResult) return retryResult;
-
-    log.warn("Spec review retry also unparseable — treating as FAIL");
-    return {
-      passed: false,
-      missing: ["spec review parse failure"],
-      extra: [],
-      concerns: [],
-    };
+    return this.review.specReview(
+      task,
+      startCommit,
+      projectPath,
+      workInstructions,
+    );
   }
 
   // --- Analysis phase (M/L/XL only) ---
@@ -2854,42 +2725,7 @@ Be specific: include function signatures, type definitions, and concrete code sn
     task: Task,
     reviewerOverride?: ReviewAdapter,
   ): Promise<ReviewResult> {
-    const prompt = `You are reviewing a proposed code change plan. Assess feasibility and correctness.
-
-## Task
-${task.task_description}
-
-## Proposed Changes
-${proposal}
-
-## Review Focus
-1. **Feasibility** — Can these changes be made without breaking existing functionality?
-2. **Completeness** — Does the proposal address all requirements?
-3. **Architecture** — Are the proposed changes well-structured?
-4. **Risk** — Are there unaddressed edge cases or breaking changes?
-5. **Scope** — Does the proposal stay within the task's scope?
-
-## Output Format (JSON)
-{"passed": true/false, "issues": [{"severity": "critical|high|medium|low", "description": "..."}], "summary": "..."}`;
-
-    const reviewer = reviewerOverride ?? this.reviewer;
-    const result = await reviewer.review(prompt, this.config.projectPath);
-
-    if (result.cost_usd > 0) {
-      await this.costTracker.addCost(task.id, result.cost_usd);
-    }
-
-    await this.taskStore.addLog({
-      task_id: task.id,
-      phase: "plan-review",
-      agent: reviewer.name,
-      input_summary: "Plan review",
-      output_summary: `${result.passed ? "PASS" : "FAIL"}: ${result.summary ?? ""}`,
-      cost_usd: result.cost_usd,
-      duration_ms: 0,
-    });
-
-    return result;
+    return this.review.reviewPlan(proposal, task, reviewerOverride);
   }
 
   /**
@@ -3161,119 +2997,12 @@ Fix these issues. Do not make unrelated changes.`;
     projectPath: string,
     reviewerOverride?: ReviewAdapter,
   ): Promise<ReviewResult & { reviewDiff: string }> {
-    const changedFiles = await getChangedFilesSince(
+    return this.review.codeReview(
+      task,
       startCommit,
       projectPath,
-    ).catch(() => []);
-
-    if (changedFiles.length === 0) {
-      return {
-        passed: true,
-        issues: [],
-        summary: "No changed files to review",
-        cost_usd: 0,
-        reviewDiff: "",
-      };
-    }
-
-    const reviewDiff = await getDiffSince(startCommit, projectPath, {
-      ignoreWhitespace: true,
-    }).catch(() => "(diff unavailable)");
-
-    const prompt = `You are an adversarial code reviewer. Review ONLY the changes in this diff.
-
-## Task
-${task.task_description}
-
-## Changed Files
-${changedFiles.join("\n")}
-
-## Git Diff
-\`\`\`diff
-${reviewDiff}
-\`\`\`
-
-## Review Focus Areas (apply ONLY to the diff above, not pre-existing code)
-
-### 1. Bugs & Logic Errors
-- Off-by-one errors, null dereference, race conditions
-- Missing await on async calls, unhandled promise rejections
-- Incorrect boolean logic, missing break/return statements
-
-### 2. Security
-- Unvalidated input, injection vectors (SQL, command, XSS)
-- Sensitive data in logs, hardcoded credentials
-- Missing authentication/authorization checks
-
-### 3. Error Handling
-- Catch blocks that swallow errors silently
-- Missing error propagation in async chains
-- Default return values hiding failures
-
-### 4. Type Safety
-- New \`any\` types introduced
-- Unsafe type assertions (as unknown as T)
-- Missing null checks on optional values
-
-### 5. Scope Creep
-- Changes unrelated to the stated purpose
-- "While I'm here" improvements mixed with the main change
-
-## Rules
-- ONLY report issues introduced or worsened by THIS diff in the "issues" array.
-- If you notice pre-existing bugs/issues in touched files (NOT introduced by this diff), list them separately in "preExistingIssues".
-- Report all issues you find. If the code is clean, report passed: true with an empty issues array.
-- Be concrete — cite specific code patterns, not vague concerns.
-- Write ALL descriptions (issues + preExistingIssues) in ${this.config.values.brain.language}.
-
-## Output Format (JSON)
-{"passed": true/false, "issues": [...], "preExistingIssues": [{"description": "...", "file": "...", "severity": "high|medium|low"}], "summary": "..."}`;
-
-    const reviewer = reviewerOverride ?? this.reviewer;
-    const result = await reviewer.review(prompt, projectPath);
-
-    if (result.cost_usd > 0) {
-      await this.costTracker.addCost(task.id, result.cost_usd);
-    }
-
-    // Warn on suspicious parse failure
-    if (!result.passed && (result.issues ?? []).length === 0) {
-      log.warn(
-        "Code review returned passed=false with zero issues — likely output parse failure, treating as PASS",
-      );
-      return { ...result, passed: true, reviewDiff };
-    }
-
-    await this.taskStore.addLog({
-      task_id: task.id,
-      phase: "review",
-      agent: reviewer.name,
-      input_summary: `files: ${changedFiles.join(", ")}`,
-      output_summary: `${result.passed ? "PASS" : "FAIL"}: ${result.summary ?? ""}`,
-      cost_usd: result.cost_usd,
-      duration_ms: 0,
-    });
-
-    // Queue pre-existing issues as new tasks
-    const preExisting = result.preExistingIssues ?? [];
-    for (const issue of preExisting) {
-      const desc = issue.file
-        ? `fix: ${issue.description} (${issue.file})`
-        : `fix: ${issue.description}`;
-      const { duplicate, reason } = await this.taskStore.isDuplicateTask(
-        projectPath,
-        desc,
-        48,
-      );
-      if (duplicate) {
-        log.info(`Dedup preExisting: ${reason} — "${desc.slice(0, 80)}"`);
-      } else {
-        await this.taskStore.createTask(projectPath, desc, 3);
-        log.info(`Queued pre-existing issue: ${desc.slice(0, 100)}`);
-      }
-    }
-
-    return { ...result, reviewDiff };
+      reviewerOverride,
+    );
   }
 
   // --- Brain reflection ---
