@@ -23,13 +23,12 @@ import type {
   LoopState,
   StatusSnapshot,
   CycleStep,
-  CycleStepStatus,
   StepPhase,
   TaskPlan,
   PlanTask,
   TaskType,
 } from "./types.js";
-import { CYCLE_PIPELINE } from "./types.js";
+// CYCLE_PIPELINE is used by CycleStepTracker (StepTracker.ts)
 import {
   createBranch,
   switchBranch,
@@ -41,10 +40,6 @@ import {
   getModifiedAndAddedFiles,
   mergeBranch,
   deleteBranch,
-  listBranches,
-  forceDeleteBranch,
-  getBranchHeadCommit,
-  getDiffStats,
   getDiffSince,
 } from "../utils/git.js";
 import { log } from "../utils/logger.js";
@@ -53,13 +48,6 @@ import {
   SUMMARY_PREVIEW_LEN,
   TASK_DESC_MAX_LENGTH,
 } from "../types/constants.js";
-import {
-  readFileSync,
-  existsSync,
-  writeFileSync,
-  mkdirSync,
-  unlinkSync,
-} from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
@@ -76,6 +64,26 @@ import { ChainScanner } from "./ChainScanner.js";
 import { ProjectVerifier, type VerifyBaseline } from "./ProjectVerifier.js";
 import type { RegisteredStrategies } from "./strategies/index.js";
 import { ProjectMemory } from "../memory/ProjectMemory.js";
+import { MaintenancePhase } from "./phases/MaintenancePhase.js";
+// Re-export pure functions from StepTracker for backward compatibility
+export {
+  applyStepStatusUpdate,
+  applyBeginStep,
+  failAllActiveSteps,
+} from "./StepTracker.js";
+// Re-export countTscErrors from MaintenancePhase for backward compatibility
+export {
+  countTscErrors,
+  setCountTscErrorsDepsForTests,
+} from "./phases/MaintenancePhase.js";
+// Internal import for use within this file
+import {
+  applyStepStatusUpdate as _applyStepStatusUpdate,
+  applyBeginStep as _applyBeginStep,
+  failAllActiveSteps as _failAllActiveSteps,
+  findFinishedStepsByPhase,
+  CycleStepTracker,
+} from "./StepTracker.js";
 
 const PAUSE_INTERVAL_MS = 5000;
 const ERROR_RECOVERY_MS = 30_000;
@@ -125,116 +133,11 @@ async function runGitLog(cwd: string): Promise<{ stdout: string }> {
   return { stdout: result.stdout };
 }
 
-type RunProcessFn = (
-  command: string,
-  args: string[],
-  options?: {
-    cwd?: string;
-    env?: Record<string, string>;
-    timeout?: number;
-    input?: string;
-  },
-) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
+// countTscErrors + setCountTscErrorsDepsForTests are defined in
+// phases/MaintenancePhase.ts and re-exported above for backward compatibility.
 
-type CountTscErrorsDeps = {
-  existsSync: (path: string) => boolean;
-  runProcess: RunProcessFn;
-};
-
-const defaultCountTscErrorsDeps: CountTscErrorsDeps = {
-  existsSync,
-  runProcess: async (command, args, options) => {
-    const { runProcess } = await import("../utils/process.js");
-    return runProcess(command, args, options);
-  },
-};
-
-let countTscErrorsDeps: CountTscErrorsDeps = defaultCountTscErrorsDeps;
-
-export function setCountTscErrorsDepsForTests(
-  overrides?: Partial<CountTscErrorsDeps>,
-): void {
-  countTscErrorsDeps = overrides
-    ? { ...defaultCountTscErrorsDeps, ...overrides }
-    : defaultCountTscErrorsDeps;
-}
-
-/**
- * Return all steps matching `phase` whose finishedAt is set, or null if
- * the precondition is not met (no matching steps, or any match lacks finishedAt).
- */
-function findFinishedStepsByPhase(
-  steps: CycleStep[],
-  phase: StepPhase,
-): CycleStep[] | null {
-  const matched = steps.filter((s) => s.phase === phase);
-  if (matched.length === 0) return null;
-  if (matched.some((s) => s.finishedAt == null)) return null;
-  return matched;
-}
-
-/** Pure logic for applyStepStatusUpdate — exported for testing. */
-export function applyStepStatusUpdate(
-  steps: CycleStep[],
-  phase: StepPhase,
-  status: "done" | "failed",
-  summary?: string,
-): CycleStep[] {
-  const finished = findFinishedStepsByPhase(steps, phase);
-  if (finished === null) {
-    const exists = steps.some((s) => s.phase === phase);
-    if (!exists) {
-      throw new Error(
-        `applyStepStatusUpdate: phase "${phase}" not found in cycleSteps`,
-      );
-    }
-    throw new Error(
-      `applyStepStatusUpdate: step "${phase}" has no finishedAt — only finished steps can be updated`,
-    );
-  }
-  return steps.map((s) => (s.phase === phase ? { ...s, status, summary } : s));
-}
-
-/** Marks ALL active steps as failed in one pass. Only touches status==="active". */
-export function failAllActiveSteps(
-  steps: CycleStep[],
-  errorMsg: string,
-  now?: number,
-): CycleStep[] {
-  const ts = now ?? Date.now();
-  return steps.map((s) => {
-    if (s.status !== "active") return s;
-    const durationMs = s.startedAt != null ? ts - s.startedAt : undefined;
-    return {
-      ...s,
-      status: "failed" as CycleStepStatus,
-      finishedAt: ts,
-      durationMs,
-      summary: errorMsg,
-    };
-  });
-}
-
-/**
- * Pure helper for beginStep: activates a pending step.
- * Returns the updated steps array, or null if the step is not "pending"
- * (which means the caller should reject re-entry and log a warning).
- */
-export function applyBeginStep(
-  steps: CycleStep[],
-  phase: StepPhase,
-  now: number,
-): CycleStep[] | null {
-  const existing = steps.find((s) => s.phase === phase);
-  if (!existing || existing.status !== "pending") {
-    return null;
-  }
-  return steps.map((s) =>
-    s.phase === phase
-      ? { ...s, status: "active" as CycleStepStatus, startedAt: now }
-      : s,
-  );
-}
+// Pure functions (applyStepStatusUpdate, failAllActiveSteps, applyBeginStep)
+// are defined in StepTracker.ts and re-exported above for backward compatibility.
 
 function coerceSubtaskOrder(value: unknown, fallback: number): number {
   const n = Number(value);
@@ -286,7 +189,8 @@ function normalizeSubtasks(
   }));
 }
 
-type StatusListener = (status: StatusSnapshot) => void;
+// StatusListener type is defined in StepTracker.ts
+import type { StatusListener } from "./StepTracker.js";
 
 type PatchSubtaskResult =
   | { ok: true; task: Task }
@@ -294,15 +198,8 @@ type PatchSubtaskResult =
   | { ok: false; reason: "subtask-not-found" };
 
 export class MainLoop {
-  private state: LoopState = "idle";
-  private running = false;
-  private paused = false;
-  private currentTaskId: string | null = null;
-  private currentTaskDescription: string | null = null;
-  private cycleNumber = 0;
-  private currentPhase: StepPhase | null = null;
-  private cycleSteps: CycleStep[] = [];
-  private statusListeners = new Set<StatusListener>();
+  // All mutable cycle/state fields are managed by the tracker
+  private tracker = new CycleStepTracker();
   private lockFile: string;
   private restartPending = false;
   private restartListeners = new Set<() => void>();
@@ -322,6 +219,7 @@ export class MainLoop {
   private strategies?: RegisteredStrategies;
   private projectMemory: ProjectMemory | null = null;
   private memoryProject = "default-project";
+  private maintenance!: MaintenancePhase;
 
   constructor(
     private config: Config,
@@ -370,6 +268,16 @@ export class MainLoop {
 
     this.memoryProject = this.deriveMemoryProject(config.projectPath);
 
+    // MaintenancePhase handles verification, cleanup, locking, health checks
+    this.maintenance = new MaintenancePhase(
+      config,
+      taskStore,
+      costTracker,
+      this.brainSession,
+      this.projectVerifier,
+      this.lockFile,
+    );
+
     // claude-mem integration (optional, non-critical)
     const memUrl = config.values.memory.claudeMemUrl;
     this.projectMemory = memUrl ? new ProjectMemory(memUrl) : null;
@@ -385,42 +293,27 @@ export class MainLoop {
     timing: CycleTiming,
     data: Record<string, unknown> = {},
   ): CycleEvent {
-    return {
-      phase,
-      timing,
-      taskId: this.currentTaskId ?? undefined,
-      data,
-      timestamp: Date.now(),
-    };
+    return this.tracker.makeEvent(phase, timing, data);
   }
 
-  // --- Public interface (backward compatible) ---
+  // --- Public interface (backward compatible, delegates to tracker) ---
 
   getState(): LoopState {
-    return this.state;
+    return this.tracker.getState();
   }
   getCurrentTaskId(): string | null {
-    return this.currentTaskId;
+    return this.tracker.getCurrentTaskId();
   }
   isPaused(): boolean {
-    return this.paused;
+    return this.tracker.isPaused();
   }
   isRunning(): boolean {
-    return this.running;
+    return this.tracker.isRunning();
   }
 
   /** Return a full status snapshot for initial SSE push. */
   getStatusSnapshot(): StatusSnapshot {
-    return {
-      state: this.state,
-      currentTaskId: this.currentTaskId,
-      patrolling: this.running,
-      paused: this.paused,
-      cycleNumber: this.cycleNumber,
-      currentPhase: this.currentPhase ?? undefined,
-      cycleSteps: [...this.cycleSteps],
-      taskDescription: this.currentTaskDescription ?? undefined,
-    };
+    return this.tracker.getStatusSnapshot();
   }
 
   onRestart(listener: () => void): () => void {
@@ -431,10 +324,7 @@ export class MainLoop {
   }
 
   addStatusListener(listener: StatusListener): () => void {
-    this.statusListeners.add(listener);
-    return () => {
-      this.statusListeners.delete(listener);
-    };
+    return this.tracker.addStatusListener(listener);
   }
 
   pause(): void {
@@ -461,7 +351,7 @@ export class MainLoop {
   async triggerScan(
     depth: "quick" | "normal" | "deep" = "normal",
   ): Promise<void> {
-    if (this.running)
+    if (this.tracker.isRunning())
       throw new Error(
         "Cannot trigger manual scan while patrol loop is running",
       );
@@ -481,7 +371,7 @@ export class MainLoop {
 
   /** Manually trigger entry point discovery via chain scanner */
   async triggerIdentifyModules(): Promise<void> {
-    if (this.running)
+    if (this.tracker.isRunning())
       throw new Error("Cannot identify modules while patrol loop is running");
     this.setState("scanning");
     try {
@@ -496,7 +386,7 @@ export class MainLoop {
     _moduleName: string,
     _depth: "quick" | "normal" = "normal",
   ): Promise<void> {
-    if (this.running)
+    if (this.tracker.isRunning())
       throw new Error(
         "Cannot trigger module scan while patrol loop is running",
       );
@@ -511,7 +401,7 @@ export class MainLoop {
   // --- Lifecycle ---
 
   async start(): Promise<void> {
-    if (this.running) return;
+    if (this.tracker.isRunning()) return;
     if (this.stoppedPromise) await this.waitForStopped();
     if (!this.acquireLock()) {
       log.error("Another instance is running. Lock file: " + this.lockFile);
@@ -543,8 +433,8 @@ export class MainLoop {
     }
 
     try {
-      while (this.running) {
-        if (this.paused) {
+      while (this.tracker.isRunning()) {
+        if (this.tracker.isPaused()) {
           this.setState("paused");
           await sleep(PAUSE_INTERVAL_MS);
           continue;
@@ -660,7 +550,7 @@ export class MainLoop {
       log.info(
         `Queue pickup: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`,
       );
-      this.currentTaskDescription = task.task_description;
+      this.tracker.setCurrentTaskDescription(task.task_description);
       this.eventBus.emit(
         this.makeEvent("decide", "after", {
           taskDescription: task.task_description,
@@ -731,7 +621,7 @@ export class MainLoop {
         return false;
       }
 
-      this.currentTaskDescription = decision.taskDescription;
+      this.tracker.setCurrentTaskDescription(decision.taskDescription);
       this.eventBus.emit(
         this.makeEvent("decide", "after", {
           taskDescription: decision.taskDescription,
@@ -846,7 +736,7 @@ export class MainLoop {
     if (await this.checkBudgetOrAbort(task.id)) {
       this.skipRemainingSteps();
       this.setCurrentTaskId(null);
-      this.currentTaskDescription = null;
+      this.tracker.setCurrentTaskDescription(null);
       this.setState("idle");
       return false;
     }
@@ -941,7 +831,7 @@ export class MainLoop {
             await switchBranch(originalBranch, projectPath).catch(() => {});
             await this.cleanupTaskBranch(branchName, { force: true });
             this.setCurrentTaskId(null);
-            this.currentTaskDescription = null;
+            this.tracker.setCurrentTaskDescription(null);
             this.setState("idle");
             return false;
           }
@@ -1014,7 +904,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
           await switchBranch(originalBranch, projectPath).catch(() => {});
           await this.cleanupTaskBranch(branchName, { force: true });
           this.setCurrentTaskId(null);
-          this.currentTaskDescription = null;
+          this.tracker.setCurrentTaskDescription(null);
           this.setState("idle");
           return false;
         }
@@ -1043,7 +933,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
         await switchBranch(originalBranch, projectPath).catch(() => {});
         await this.cleanupTaskBranch(branchName, { force: true });
         this.setCurrentTaskId(null);
-        this.currentTaskDescription = null;
+        this.tracker.setCurrentTaskDescription(null);
         this.setState("idle");
         return false;
       }
@@ -1252,9 +1142,9 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
             singleVerify.reason,
           );
           if (!singleVerify.passed) {
-            const executeStep = this.cycleSteps.find(
-              (s) => s.phase === "execute",
-            );
+            const executeStep = this.tracker
+              .getCycleSteps()
+              .find((s) => s.phase === "execute");
             if (executeStep?.finishedAt != null) {
               this.updateStepStatus("execute", "failed", singleVerify.reason);
             } else if (executeStep) {
@@ -1280,7 +1170,10 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
               { statusErr },
             );
           }
-          const finished = findFinishedStepsByPhase(this.cycleSteps, "execute");
+          const finished = findFinishedStepsByPhase(
+            [...this.tracker.getCycleSteps()],
+            "execute",
+          );
           if (finished) {
             try {
               this.updateStepStatus(
@@ -1295,9 +1188,9 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
               );
             }
           } else {
-            const execStepExists = this.cycleSteps.some(
-              (s) => s.phase === "execute",
-            );
+            const execStepExists = this.tracker
+              .getCycleSteps()
+              .some((s) => s.phase === "execute");
             log.warn(
               "Skipping updateStepStatus('execute') in catch(verifyErr): execute step not found or not finished",
               { exists: execStepExists },
@@ -1626,7 +1519,9 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
     } catch (err) {
       log.error("Task execution error", err);
       // Mark ALL active steps as failed (not just the first one)
-      this.cycleSteps = failAllActiveSteps(this.cycleSteps, String(err));
+      this.tracker.setCycleSteps(
+        _failAllActiveSteps([...this.tracker.getCycleSteps()], String(err)),
+      );
       this.broadcastStatus();
       this.skipRemainingSteps();
       this.eventBus.emit(
@@ -1641,7 +1536,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
     } finally {
       await switchBranch(originalBranch, projectPath).catch(() => {});
       this.setCurrentTaskId(null);
-      this.currentTaskDescription = null;
+      this.tracker.setCurrentTaskDescription(null);
     }
 
     this.setState("idle");
@@ -2064,8 +1959,10 @@ ${analysisReport}
     // claude-mem: semantic experience search
     if (this.projectMemory) {
       try {
-        let memoryText =
-          await this.projectMemory.injectContext(this.memoryProject, false);
+        let memoryText = await this.projectMemory.injectContext(
+          this.memoryProject,
+          false,
+        );
 
         if (!memoryText) {
           const queryTerms = recentTasks
@@ -2080,9 +1977,7 @@ ${analysisReport}
           });
           if (memResults.ok && memResults.length > 0) {
             memoryText = memResults
-              .map((r) =>
-                r.title ? `${r.title}\n${r.text}` : r.text,
-              )
+              .map((r) => (r.title ? `${r.title}\n${r.text}` : r.text))
               .join("\n\n");
           }
         }
@@ -2711,32 +2606,14 @@ Respond with EXACTLY this JSON (no markdown):
     );
   }
 
-  // --- Hard verification (zero LLM cost) ---
+  // --- Hard verification (delegates to MaintenancePhase) ---
 
   private async hardVerify(
     baseline: VerifyBaseline,
     startCommit: string,
     projectPath: string,
   ): Promise<{ passed: boolean; reason?: string }> {
-    // 1. Type check + tests via ProjectVerifier
-    const result = await this.projectVerifier.verify(projectPath, baseline);
-    if (!result.passed) {
-      return { passed: false, reason: result.reason };
-    }
-
-    // 2. Diff anomaly check (warn only)
-    try {
-      const stats = await getDiffStats(startCommit, "HEAD", projectPath);
-      if (stats.files_changed > 15) {
-        log.warn(
-          `Post-check warning: ${stats.files_changed} files changed (${stats.insertions}+ ${stats.deletions}-)`,
-        );
-      }
-    } catch {
-      /* non-critical */
-    }
-
-    return { passed: true };
+    return this.maintenance.hardVerify(baseline, startCommit, projectPath);
   }
 
   // --- Spec compliance review (DEPRECATED: replaced by codeReview + brainReviewDecision) ---
@@ -3473,149 +3350,39 @@ LESSON: <one sentence the brain should remember for next task selection>`;
   // --- Pipeline health check (auto-diagnosis) ---
 
   private async pipelineHealthCheck(projectPath: string): Promise<void> {
-    log.info("Pipeline health check triggered after consecutive rejections");
-
-    const result = await this.brainSession.run(
-      `## Pipeline Health Check
-
-Multiple tasks have been rejected consecutively, suggesting a systemic pipeline issue.
-
-## Instructions
-1. Use the \`get_blocked_summary\` MCP tool to see how many tasks are blocked and their failure patterns
-2. If blocked count < 3, respond "No systemic issue" and stop
-3. Otherwise, use \`get_task_logs\` on a few failed tasks to understand the failure pattern
-4. Use Read, Grep, Bash to investigate the pipeline code if failures point to a code bug
-5. If you find a systemic bug, use \`create_task\` to create fix task(s) with:
-   - Description prefixed with "[PIPELINE-FIX]"
-   - Priority 0 (urgent)
-6. Use \`requeue_blocked_tasks\` if blocked tasks should be retried after the fix
-7. If failures are legitimate (bad task quality, not a bug), do nothing`,
-      {
-        permissionMode: "bypassPermissions",
-        maxTurns: 30,
-        cwd: projectPath,
-        timeout: 600_000,
-        model: resolveModelId(this.config.values.brain.model),
-        thinking: { type: "adaptive" },
-        effort: "medium",
-        allowedTools: [
-          "Read",
-          "Glob",
-          "Grep",
-          "Bash",
-          "mcp__db-coder-system-data__get_blocked_summary",
-          "mcp__db-coder-system-data__get_recent_tasks",
-          "mcp__db-coder-system-data__get_task_detail",
-          "mcp__db-coder-system-data__get_task_logs",
-          "mcp__db-coder-system-data__get_operational_metrics",
-          "mcp__db-coder-system-data__create_task",
-          "mcp__db-coder-system-data__requeue_blocked_tasks",
-        ],
-        appendSystemPrompt:
-          "You are diagnosing pipeline failures. Investigate thoroughly before taking action. Do not modify source files.",
-      },
-    );
-
-    if (result.costUsd > 0) {
-      await this.taskStore.addDailyCost(result.costUsd);
-    }
-    log.info(
-      `Pipeline health check completed (cost: $${result.costUsd.toFixed(3)})`,
-    );
+    return this.maintenance.pipelineHealthCheck(projectPath);
   }
 
   // --- Periodic CLAUDE.md maintenance ---
 
   private async claudeMdMaintenance(projectPath: string): Promise<void> {
-    log.info("Starting periodic CLAUDE.md maintenance");
-    const result = await this.brainSession.run(
-      `Perform a maintenance audit of CLAUDE.md. Keep it accurate, concise, and useful.
-
-Read CLAUDE.md, then verify against actual code:
-1. **文件结构** — Are listed files still accurate? Remove deleted, add important new ones.
-2. **当前状态** — Are checklist items correct? Update "待运行验证" items if now verified.
-3. **API 端点** — Do endpoints match actual routes in src/server/routes.ts?
-4. **架构描述** — Does it match actual code structure?
-5. **踩过的坑** — Remove entries for deleted code. Keep entries concise.
-6. **DB Schema** — Are table descriptions still accurate?
-
-Rules:
-- DELETE outdated info rather than adding disclaimers.
-- Keep the file concise — summarize growing sections.
-- Only state what you verify in the code.
-- Use claude-mem to note what you changed and why.`,
-      {
-        permissionMode: "bypassPermissions",
-        maxTurns: 50,
-        cwd: projectPath,
-        timeout: 3_600_000,
-        model: resolveModelId(this.config.values.brain.model),
-        thinking: { type: "adaptive" },
-        effort: "medium",
-        allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
-        appendSystemPrompt:
-          "You are maintaining CLAUDE.md. You CAN edit CLAUDE.md. Do not modify source code.",
-      },
-    );
-
-    if (result.costUsd > 0) await this.taskStore.addDailyCost(result.costUsd);
-    log.info(
-      `CLAUDE.md maintenance completed (${Math.round(result.durationMs / 1000)}s, $${result.costUsd.toFixed(4)})`,
-    );
+    return this.maintenance.claudeMdMaintenance(projectPath);
   }
 
-  // --- State management ---
+  // --- State management (delegates to CycleStepTracker) ---
 
   private setState(state: LoopState): void {
-    if (this.state === state) return;
-    this.state = state;
-    this.broadcastStatus();
+    this.tracker.setState(state);
   }
 
   private setCurrentTaskId(taskId: string | null): void {
-    if (this.currentTaskId === taskId) return;
-    this.currentTaskId = taskId;
-    this.broadcastStatus();
+    this.tracker.setCurrentTaskId(taskId);
   }
 
   private setPaused(paused: boolean): void {
-    if (this.paused === paused) return;
-    this.paused = paused;
-    this.broadcastStatus();
+    this.tracker.setPaused(paused);
   }
 
   private setRunning(running: boolean): void {
-    if (this.running === running) return;
-    this.running = running;
-    this.broadcastStatus();
+    this.tracker.setRunning(running);
   }
 
   private resetCycleSteps(): void {
-    this.cycleNumber++;
-    this.cycleSteps = CYCLE_PIPELINE.map((phase) => ({
-      phase,
-      status: "pending" as CycleStepStatus,
-    }));
-    this.currentPhase = null;
-    this.broadcastStatus();
+    this.tracker.resetCycleSteps();
   }
 
   private beginStep(phase: StepPhase): void {
-    if (!CYCLE_PIPELINE.includes(phase)) {
-      log.warn(`beginStep called with unknown phase "${phase}", ignoring`);
-      return;
-    }
-    const updated = applyBeginStep(this.cycleSteps, phase, Date.now());
-    if (updated === null) {
-      const existing = this.cycleSteps.find((s) => s.phase === phase);
-      log.warn(
-        `beginStep called on phase "${phase}" which is already "${existing?.status ?? "unknown"}", ignoring to preserve timing/history`,
-      );
-      return;
-    }
-    this.currentPhase = phase;
-    this.cycleSteps = updated;
-    this.broadcastStatus();
+    this.tracker.beginStep(phase);
   }
 
   private endStep(
@@ -3624,90 +3391,29 @@ Rules:
     summary?: string,
     durationOverrideMs?: number,
   ): void {
-    if (!CYCLE_PIPELINE.includes(phase)) {
-      log.warn(`endStep called with unknown phase "${phase}", ignoring`);
-      return;
-    }
-    const now = Date.now();
-    this.cycleSteps = this.cycleSteps.map((s) => {
-      if (s.phase !== phase) return s;
-      const durationMs =
-        durationOverrideMs ??
-        (s.startedAt != null ? now - s.startedAt : undefined);
-      return {
-        ...s,
-        status: result as CycleStepStatus,
-        finishedAt: now,
-        durationMs,
-        summary,
-      };
-    });
-    this.currentPhase = null;
-    this.broadcastStatus();
+    this.tracker.endStep(phase, result, summary, durationOverrideMs);
   }
 
-  /** Update only status and summary of a finished step (preserves finishedAt/durationMs). */
   private updateStepStatus(
     phase: StepPhase,
     status: "done" | "failed",
     summary?: string,
   ): void {
-    this.cycleSteps = applyStepStatusUpdate(
-      this.cycleSteps,
-      phase,
-      status,
-      summary,
-    );
-    this.broadcastStatus();
+    this.tracker.updateStepStatus(phase, status, summary);
   }
 
   private skipRemainingSteps(fromPhase?: StepPhase): void {
-    let shouldSkip = !fromPhase;
-    this.cycleSteps = this.cycleSteps.map((s) => {
-      if (s.phase === fromPhase) {
-        shouldSkip = true;
-        return s;
-      }
-      if (shouldSkip && s.status === "pending") {
-        return { ...s, status: "skipped" as CycleStepStatus };
-      }
-      return s;
-    });
-    this.broadcastStatus();
+    this.tracker.skipRemainingSteps(fromPhase);
   }
 
   private broadcastStatus(): void {
-    if (this.statusListeners.size === 0) return;
-    const snapshot: StatusSnapshot = {
-      state: this.state,
-      currentTaskId: this.currentTaskId,
-      patrolling: this.running,
-      paused: this.paused,
-      cycleNumber: this.cycleNumber,
-      currentPhase: this.currentPhase ?? undefined,
-      cycleSteps: [...this.cycleSteps],
-      taskDescription: this.currentTaskDescription ?? undefined,
-    };
-    for (const listener of this.statusListeners) {
-      try {
-        listener(snapshot);
-      } catch {
-        /* ignore listener failures */
-      }
-    }
+    this.tracker.broadcastStatus();
   }
 
   // --- Helpers ---
 
   private isSelfProject(): boolean {
-    try {
-      const pkgPath = join(this.config.projectPath, "package.json");
-      if (!existsSync(pkgPath)) return false;
-      const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
-      return pkg.name === "db-coder";
-    } catch {
-      return false;
-    }
+    return this.maintenance.isSelfProject();
   }
 
   private deriveMemoryProject(projectPath: string): string {
@@ -3731,143 +3437,30 @@ Rules:
   }
 
   private writeBuildError(error: string): void {
-    const dir = join(homedir(), ".db-coder");
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(
-      join(dir, "build-error.json"),
-      JSON.stringify(
-        {
-          timestamp: new Date().toISOString(),
-          type: "build",
-          error,
-        },
-        null,
-        2,
-      ),
-    );
+    this.maintenance.writeBuildError(error);
   }
 
   private acquireLock(): boolean {
-    if (existsSync(this.lockFile)) {
-      try {
-        const pid = parseInt(readFileSync(this.lockFile, "utf-8"), 10);
-        if (pid === process.pid) {
-          /* same process restart */
-        } else {
-          try {
-            process.kill(pid, 0);
-            return false;
-          } catch {
-            /* stale lock */
-          }
-        }
-      } catch {
-        /* invalid lock file */
-      }
-    }
-    const lockDir = join(homedir(), ".db-coder");
-    mkdirSync(lockDir, { recursive: true });
-    writeFileSync(this.lockFile, String(process.pid));
-    return true;
+    return this.maintenance.acquireLock();
   }
 
   private releaseLock(): void {
-    try {
-      unlinkSync(this.lockFile);
-    } catch {
-      /* ignore */
-    }
+    this.maintenance.releaseLock();
   }
 
   private async checkBudgetOrAbort(taskId: string): Promise<boolean> {
-    const budget = await this.costTracker.checkBudget(taskId);
-    if (budget.allowed) return false;
-    log.warn(`Budget exceeded: ${budget.reason}`);
-    await this.taskStore.updateTask(taskId, {
-      status: "blocked",
-      phase: "blocked",
-    });
-    return true;
+    return this.maintenance.checkBudgetOrAbort(taskId);
   }
 
   private async cleanupOrphanedBranches(): Promise<void> {
-    const projectPath = this.config.projectPath;
-    const prefix = this.config.values.git.branchPrefix;
-    const branches = await listBranches(prefix, projectPath);
-    if (branches.length === 0) return;
-
-    const [queued, active, failed, blocked] = await Promise.all([
-      this.taskStore.listTasks(projectPath, "queued"),
-      this.taskStore.listTasks(projectPath, "active"),
-      this.taskStore.listTasks(projectPath, "failed"),
-      this.taskStore.listTasks(projectPath, "blocked"),
-    ]);
-
-    // queued/active branches are always protected
-    const activeBranches = new Set(
-      [...queued, ...active].map((t) => t.git_branch).filter(Boolean),
-    );
-
-    // failed/blocked branches are protected within retention period
-    const retentionMs =
-      this.config.values.git.branchRetentionDays * 24 * 60 * 60 * 1000;
-    const now = Date.now();
-    const retainedBranches = new Set(
-      [...failed, ...blocked]
-        .filter(
-          (t) =>
-            t.git_branch &&
-            now - new Date(t.updated_at).getTime() < retentionMs,
-        )
-        .map((t) => t.git_branch),
-    );
-
-    let cleaned = 0;
-    let preserved = 0;
-    for (const branch of branches) {
-      if (activeBranches.has(branch)) continue;
-      if (retainedBranches.has(branch)) {
-        preserved++;
-        continue;
-      }
-      await this.cleanupTaskBranch(branch, { force: true });
-      const stillExists = await branchExists(branch, projectPath).catch(
-        () => true,
-      );
-      if (!stillExists) cleaned++;
-    }
-    if (preserved > 0)
-      log.info(
-        `Preserved ${preserved} branch(es) for recent failed/blocked tasks`,
-      );
-    if (cleaned > 0) log.info(`Cleaned up ${cleaned} orphaned branch(es)`);
+    return this.maintenance.cleanupOrphanedBranches();
   }
 
   private async cleanupTaskBranch(
     branch: string,
     opts?: { force?: boolean; startCommit?: string },
   ): Promise<void> {
-    try {
-      if (opts?.force) {
-        await forceDeleteBranch(branch, this.config.projectPath);
-        return;
-      }
-      // Compare branch HEAD with startCommit: identical means no worker output
-      if (opts?.startCommit) {
-        const branchHead = await getBranchHeadCommit(
-          branch,
-          this.config.projectPath,
-        );
-        if (branchHead === opts.startCommit) {
-          await forceDeleteBranch(branch, this.config.projectPath);
-          return;
-        }
-      }
-      // Has worker output or cannot determine → preserve
-      log.info(`Preserving branch ${branch} (has worker commits)`);
-    } catch (err) {
-      log.warn(`Failed to cleanup branch ${branch}: ${err}`);
-    }
+    return this.maintenance.cleanupTaskBranch(branch, opts);
   }
 }
 
@@ -3893,26 +3486,7 @@ function codexResultToSessionResult(r: AgentResult): SessionResult {
   };
 }
 
-// --- Exported utilities (used by tests and routes) ---
-
-export async function countTscErrors(cwd: string): Promise<number> {
-  if (!countTscErrorsDeps.existsSync(join(cwd, "tsconfig.json"))) return 0;
-  try {
-    const result = await countTscErrorsDeps.runProcess(
-      "npx",
-      ["tsc", "--noEmit"],
-      { cwd, timeout: 60_000 },
-    );
-    return (result.stdout + result.stderr)
-      .split("\n")
-      .filter((l) => l.includes(": error TS")).length;
-  } catch (e) {
-    log.warn("countTscErrors failed", {
-      error: e instanceof Error ? e.message : String(e),
-    });
-    return -1;
-  }
-}
+// --- Utility functions ---
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
