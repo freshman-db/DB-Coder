@@ -3,12 +3,8 @@ import type { TaskQueue } from "./TaskQueue.js";
 import type { CodexBridge } from "../bridges/CodexBridge.js";
 import type { TaskStore } from "../memory/TaskStore.js";
 import type { CostTracker } from "../utils/cost.js";
-import {
-  ClaudeCodeSession,
-  type SessionResult,
-} from "../bridges/ClaudeCodeSession.js";
+import { ClaudeCodeSession } from "../bridges/ClaudeCodeSession.js";
 import type { SdkExtras } from "../bridges/buildSdkOptions.js";
-import type { ReviewResult } from "../bridges/CodingAgent.js";
 import {
   ClaudeWorkerAdapter,
   CodexWorkerAdapter,
@@ -21,7 +17,6 @@ import type { Task } from "../memory/types.js";
 import type {
   LoopState,
   StatusSnapshot,
-  CycleStep,
   StepPhase,
   TaskPlan,
   PlanTask,
@@ -60,11 +55,7 @@ import { ProjectMemory } from "../memory/ProjectMemory.js";
 import { MaintenancePhase } from "./phases/MaintenancePhase.js";
 import { ReviewPhase } from "./phases/ReviewPhase.js";
 import { WorkerPhase, COMPLEXITY_CONFIG } from "./phases/WorkerPhase.js";
-import {
-  BrainPhase,
-  coerceSubtaskOrder,
-  normalizeSubtasks,
-} from "./phases/BrainPhase.js";
+import { BrainPhase, coerceSubtaskOrder } from "./phases/BrainPhase.js";
 // Re-export pure functions from StepTracker for backward compatibility
 export {
   applyStepStatusUpdate,
@@ -89,7 +80,7 @@ const PAUSE_INTERVAL_MS = 5000;
 const ERROR_RECOVERY_MS = 30_000;
 const BRANCH_ID_LENGTH = 8;
 // COMPLEXITY_CONFIG is imported from WorkerPhase
-// coerceSubtaskOrder + normalizeSubtasks are imported from BrainPhase
+// coerceSubtaskOrder is imported from BrainPhase
 
 // countTscErrors + setCountTscErrorsDepsForTests are defined in
 // phases/MaintenancePhase.ts and re-exported above for backward compatibility.
@@ -99,6 +90,25 @@ const BRANCH_ID_LENGTH = 8;
 
 // StatusListener type is defined in StepTracker.ts
 import type { StatusListener } from "./StepTracker.js";
+
+/** Shared options from the brain decision, threaded through the pipeline. */
+type BrainOpts = {
+  persona?: string;
+  taskType?: string;
+  complexity?: string;
+  subtasks?: Array<{ description: string; order: number }>;
+  workInstructions?: WorkInstructions;
+};
+
+/** Context shared across pipeline sub-methods within a single cycle. */
+type PipelineCtx = {
+  branchName: string;
+  originalBranch: string;
+  baseline: VerifyBaseline;
+  startCommit: string;
+  taskReviewer: ReviewAdapter;
+  projectPath: string;
+};
 
 export class MainLoop {
   // All mutable cycle/state fields are managed by the tracker
@@ -440,234 +450,12 @@ export class MainLoop {
     const projectPath = this.config.projectPath;
     this.resetCycleSteps();
 
-    // 0. Drain queued tasks first — skip brain entirely if work is waiting
-    this.setState("scanning");
-    this.beginStep("decide");
-    const queued = await this.taskQueue.getNext(projectPath);
-    let task: Task;
-    let brainOpts:
-      | {
-          persona?: string;
-          taskType?: string;
-          complexity?: string;
-          subtasks?: Array<{ description: string; order: number }>;
-          workInstructions?: WorkInstructions;
-        }
-      | undefined;
+    // 1. Decide task (queue or brain)
+    const decision = await this.decideTask(projectPath);
+    if (!decision) return false;
+    const { task, brainOpts } = decision;
 
-    if (queued) {
-      task = queued;
-      await this.taskStore.updateTask(task.id, {
-        status: "active",
-        phase: "executing",
-      });
-      this.setCurrentTaskId(task.id);
-
-      // Reconstruct brainOpts from stored plan (JSONB)
-      const plan = task.plan as Record<string, unknown> | null;
-      if (plan) {
-        brainOpts = {
-          persona: typeof plan.persona === "string" ? plan.persona : undefined,
-          taskType: typeof plan.type === "string" ? plan.type : undefined,
-          complexity:
-            typeof plan.estimatedComplexity === "string"
-              ? (
-                  { low: "S", medium: "M", high: "L" } as Record<string, string>
-                )[plan.estimatedComplexity]
-              : undefined,
-          workInstructions:
-            typeof plan.workInstructions === "string"
-              ? plan.workInstructions
-              : undefined,
-        };
-      }
-
-      log.info(
-        `Queue pickup: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`,
-      );
-      this.tracker.setCurrentTaskDescription(task.task_description);
-      this.eventBus.emit(
-        this.makeEvent("decide", "after", {
-          taskDescription: task.task_description,
-        }),
-      );
-      this.endStep("decide", "done", "Queue pickup");
-      this.endStep("create-task", "skipped");
-    } else {
-      // 1. Brain decides what to do
-      this.eventBus.emit(this.makeEvent("decide", "before"));
-      let decision = await this.brainDecide(projectPath);
-      if (decision.costUsd > 0)
-        await this.taskStore.addDailyCost(decision.costUsd);
-
-      // Layer 2: directive fallback if brain returned null
-      if (!decision.taskDescription) {
-        log.warn("Brain returned no task — retrying with directive prompt");
-        const directive = await this.brainDecideDirective(projectPath);
-        if (directive.costUsd > 0)
-          await this.taskStore.addDailyCost(directive.costUsd);
-        if (directive.taskDescription) {
-          decision = directive;
-        }
-      }
-
-      // Layer 3: if still null, short sleep will retry (handled by start())
-      if (!decision.taskDescription) {
-        log.warn(
-          "Brain: no task after directive retry. Short sleep then retry.",
-        );
-        this.endStep("decide", "failed", "No task found");
-        this.skipRemainingSteps("decide");
-        this.setState("idle");
-        return false;
-      }
-
-      // Dedup check: avoid creating duplicate or recently-failed tasks
-      const similar = await this.taskStore.findSimilarTask(
-        projectPath,
-        decision.taskDescription,
-      );
-      if (
-        similar &&
-        (similar.status === "queued" ||
-          similar.status === "active" ||
-          similar.status === "done")
-      ) {
-        log.info(
-          `Dedup: skipping task similar to [${similar.status}] "${truncate(similar.task_description, 80)}"`,
-        );
-        this.endStep("decide", "skipped", "Dedup");
-        this.skipRemainingSteps("decide");
-        this.setState("idle");
-        return false;
-      }
-      if (
-        await this.taskStore.hasRecentlyFailedSimilar(
-          projectPath,
-          decision.taskDescription,
-        )
-      ) {
-        log.info(
-          `Cooldown: skipping task similar to recently failed one: "${truncate(decision.taskDescription, 80)}"`,
-        );
-        this.endStep("decide", "skipped", "Cooldown");
-        this.skipRemainingSteps("decide");
-        this.setState("idle");
-        return false;
-      }
-
-      this.tracker.setCurrentTaskDescription(decision.taskDescription);
-      this.eventBus.emit(
-        this.makeEvent("decide", "after", {
-          taskDescription: decision.taskDescription,
-        }),
-      );
-      this.endStep("decide", "done");
-
-      // 2. Create task record
-      this.beginStep("create-task");
-      this.setState("planning");
-      task = await this.taskStore.createTask(
-        projectPath,
-        decision.taskDescription,
-        decision.priority ?? 2,
-      );
-      this.setCurrentTaskId(task.id);
-      log.info(
-        `Task: ${truncate(decision.taskDescription, TASK_DESC_MAX_LENGTH)}`,
-      );
-      this.eventBus.emit(
-        this.makeEvent("create-task", "after", {
-          taskId: task.id,
-          taskDescription: decision.taskDescription,
-        }),
-      );
-
-      // Store complexity and subtasks metadata from brain decision
-      if (
-        decision.complexity ||
-        (decision.subtasks && decision.subtasks.length > 0)
-      ) {
-        const updates: Record<string, unknown> = {};
-        if (decision.complexity) {
-          updates.plan = { complexity: decision.complexity };
-        }
-        if (decision.subtasks && decision.subtasks.length > 0) {
-          const rawOrders = decision.subtasks.map((st, i) =>
-            coerceSubtaskOrder(st.order, i + 1),
-          );
-          const hasDuplicates = new Set(rawOrders).size !== rawOrders.length;
-          updates.subtasks = decision.subtasks.map((st, i) => {
-            const coerced = coerceSubtaskOrder(st.order, i + 1);
-            return {
-              id: String(i + 1),
-              description: st.description,
-              executor: "claude" as const,
-              status: "pending" as const,
-              order: hasDuplicates ? i + 1 : coerced,
-            };
-          });
-        }
-        await this.taskStore.updateTask(task.id, updates);
-      }
-
-      brainOpts = {
-        persona: decision.persona,
-        taskType: decision.taskType,
-        complexity: decision.complexity,
-        subtasks: decision.subtasks,
-        workInstructions: decision.workInstructions,
-      };
-
-      // Enqueue extra tasks from brain's batch output
-      if (decision.extraTasks && decision.extraTasks.length > 0) {
-        try {
-          const planTasks: PlanTask[] = decision.extraTasks.map((et, i) => ({
-            id: `extra-${i + 1}`,
-            description: et.task,
-            priority: et.priority ?? 2,
-            executor: "claude" as const,
-            subtasks: (et.subtasks ?? []).map((st, si) => ({
-              id: `extra-${i + 1}-sub-${si + 1}`,
-              description: st.description,
-              executor: "claude" as const,
-            })),
-            dependsOn: [],
-            estimatedComplexity:
-              (
-                { S: "low", M: "medium", L: "high", XL: "high" } as Record<
-                  string,
-                  "low" | "medium" | "high"
-                >
-              )[et.complexity ?? "M"] ?? "medium",
-            type: et.taskType as TaskType | undefined,
-            // BMAD: pass through workInstructions + persona to queue
-            workInstructions: et.workInstructions
-              ? typeof et.workInstructions === "string"
-                ? et.workInstructions
-                : formatWorkInstructions(et.workInstructions) || undefined
-              : undefined,
-            persona: et.persona,
-          }));
-          const plan: TaskPlan = {
-            tasks: planTasks,
-            reasoning: "Extra tasks from brain batch output",
-          };
-          const enqueuedIds = await this.taskQueue.enqueue(projectPath, plan);
-          if (enqueuedIds.length > 0) {
-            log.info(
-              `Enqueued ${enqueuedIds.length} extra task(s) from brain batch`,
-            );
-          }
-        } catch (err) {
-          log.warn(`Failed to enqueue extra tasks: ${err}`);
-        }
-      }
-
-      this.endStep("create-task", "done");
-    }
-
-    // 3. Budget check
+    // 2. Budget check
     if (await this.checkBudgetOrAbort(task.id)) {
       this.skipRemainingSteps();
       this.setCurrentTaskId(null);
@@ -681,7 +469,6 @@ export class MainLoop {
     let startCommit = "";
 
     try {
-      // 4. Prepare git branch
       originalBranch = await getCurrentBranch(projectPath).catch(() => "main");
       startCommit = await getHeadCommit(projectPath).catch(() => "");
       const baseline = await this.projectVerifier.baseline(projectPath);
@@ -691,7 +478,6 @@ export class MainLoop {
       } else {
         await createBranch(branchName, projectPath);
       }
-
       await this.taskStore.updateTask(task.id, {
         status: "active",
         phase: "executing",
@@ -699,761 +485,46 @@ export class MainLoop {
         start_commit: startCommit,
       });
 
-      // 4.5 Analysis phase (M/L/XL only) — produce and review a plan before coding
       const complexity = brainOpts?.complexity ?? "M";
-      const cConfigForTask = COMPLEXITY_CONFIG[complexity];
-      const taskReviewer = this.reviewerFor(cConfigForTask.worker);
-      const needsAnalysis = complexity !== "S";
-      let approvedPlan: string | undefined;
-
-      if (needsAnalysis) {
-        this.beginStep("analyze");
-        this.setState("planning");
-        await this.taskStore.updateTask(task.id, { phase: "analyzing" });
-
-        // Analyze → Review → Synthesize loop (with up to 2 REVISE rounds)
-        const maxRevisions = 2;
-        let revisionRound = 0;
-        let analyzeSessionId: string | undefined;
-        let revisionCtx:
-          | { resumeSessionId: string; revisionPrompt: string }
-          | undefined;
-        let planApproved = false;
-
-        while (revisionRound <= maxRevisions) {
-          // Worker produces a concrete change proposal (read-only)
-          const analyzeResult = await this.workerAnalyze(
-            task,
-            brainOpts,
-            revisionCtx,
-          );
-          analyzeSessionId = analyzeResult.sessionId;
-
-          if (analyzeResult.isError) {
-            const maxAnalyzeRetries = 2;
-            const nextIteration = task.iteration + 1;
-            if (nextIteration > maxAnalyzeRetries) {
-              log.warn(
-                `Worker analyze failed ${nextIteration} times — blocking task (max ${maxAnalyzeRetries} retries)`,
-              );
-              this.endStep(
-                "analyze",
-                "failed",
-                "Empty or error proposal (retries exhausted)",
-              );
-              this.skipRemainingSteps("analyze");
-              await this.taskStore.updateTask(task.id, {
-                status: "blocked",
-                phase: "blocked",
-                iteration: nextIteration,
-              });
-            } else {
-              log.warn(
-                `Worker analyze failed — requeuing task (attempt ${nextIteration}/${maxAnalyzeRetries})`,
-              );
-              this.endStep(
-                "analyze",
-                "failed",
-                `Empty or error proposal, requeuing (attempt ${nextIteration})`,
-              );
-              this.skipRemainingSteps("analyze");
-              await this.taskStore.updateTask(task.id, {
-                status: "queued",
-                phase: "init",
-                iteration: nextIteration,
-              });
-            }
-            await switchBranch(originalBranch, projectPath).catch(() => {});
-            await this.cleanupTaskBranch(branchName, { force: true });
-            this.setCurrentTaskId(null);
-            this.tracker.setCurrentTaskDescription(null);
-            this.setState("idle");
-            return false;
-          }
-
-          // Reviewer evaluates the proposal (mutually exclusive with worker)
-          const planReview = await this.reviewPlan(
-            analyzeResult.proposal,
-            task,
-            taskReviewer,
-          );
-
-          // Brain synthesizes proposal + feedback into final plan
-          const synthesis = await this.brainSynthesizePlan(
-            analyzeResult.proposal,
-            planReview,
-            task,
-          );
-
-          if (synthesis.decision === "approved") {
-            approvedPlan = synthesis.finalPlan;
-            planApproved = true;
-            break;
-          }
-
-          if (synthesis.decision === "revise" && analyzeSessionId) {
-            revisionRound++;
-            if (revisionRound > maxRevisions) {
-              log.warn(
-                `Plan revisions exhausted (${maxRevisions} rounds) — blocking task`,
-              );
-              break;
-            }
-            log.info(
-              `Brain requested plan revision (round ${revisionRound}/${maxRevisions})`,
-            );
-
-            // Build full revision context: brain instructions + reviewer issues
-            const reviewerIssues = planReview.issues
-              .map((i) => `- [${i.severity}] ${i.description}`)
-              .join("\n");
-            const revisionPrompt = `## Revision Required (Round ${revisionRound}/${maxRevisions})
-
-### Brain's Direction
-${synthesis.reviseInstructions ?? "Revise the proposal to address reviewer concerns."}
-
-### Reviewer's Specific Issues
-${reviewerIssues || "No specific issues listed."}
-
-Revise your previous proposal to address ALL issues above. Produce a complete updated proposal in the same structured format.`;
-
-            revisionCtx = {
-              resumeSessionId: analyzeSessionId,
-              revisionPrompt,
-            };
-            continue;
-          }
-
-          // REJECTED or REVISE without sessionId (e.g. Codex)
-          log.warn("Brain rejected analysis plan — blocking task");
-          break;
-        }
-
-        if (!planApproved) {
-          this.endStep("analyze", "failed", "Plan rejected by brain");
-          this.skipRemainingSteps("analyze");
-          await this.taskStore.updateTask(task.id, {
-            status: "blocked",
-            phase: "blocked",
-          });
-          await switchBranch(originalBranch, projectPath).catch(() => {});
-          await this.cleanupTaskBranch(branchName, { force: true });
-          this.setCurrentTaskId(null);
-          this.tracker.setCurrentTaskDescription(null);
-          this.setState("idle");
-          return false;
-        }
-
-        this.endStep("analyze", "done");
-      } else {
-        this.endStep("analyze", "skipped");
-      }
-
-      // 5. Execute (subtask loop or single shot)
-      this.beginStep("execute");
-      this.setState("executing");
-      const guardErrors = await this.eventBus.emitAndWait(
-        this.makeEvent("execute", "before", {
-          taskDescription: task.task_description,
-        }),
+      const taskReviewer = this.reviewerFor(
+        COMPLEXITY_CONFIG[complexity].worker,
       );
-      if (guardErrors.length > 0) {
-        log.warn(`Guard blocked execution: ${guardErrors[0].message}`);
-        this.endStep("execute", "failed", "Guard blocked");
-        this.skipRemainingSteps("execute");
-        await this.taskStore.updateTask(task.id, {
-          status: "blocked",
-          phase: "blocked",
-        });
-        await switchBranch(originalBranch, projectPath).catch(() => {});
-        await this.cleanupTaskBranch(branchName, { force: true });
-        this.setCurrentTaskId(null);
-        this.tracker.setCurrentTaskDescription(null);
-        this.setState("idle");
-        return false;
-      }
-
-      let workerPassed: boolean;
-      let workerSessionId: string | undefined;
-      const verification: { passed: boolean; reason?: string } = {
-        passed: true,
+      const pipeCtx: PipelineCtx = {
+        branchName,
+        originalBranch,
+        baseline,
+        startCommit,
+        taskReviewer,
+        projectPath,
       };
 
-      if (brainOpts?.subtasks && brainOpts.subtasks.length > 0) {
-        // Normalize orders to match persisted subtasks
-        const normalizedSubtasks = brainOpts.subtasks.map((st, i) => ({
-          ...st,
-          order: coerceSubtaskOrder(st.order, i + 1),
-        }));
-        // Deduplicate: if any orders collide, fall back to sequential
-        const orderSet = new Set(normalizedSubtasks.map((s) => s.order));
-        const subtasksForExec =
-          orderSet.size !== normalizedSubtasks.length
-            ? normalizedSubtasks.map((st, i) => ({ ...st, order: i + 1 }))
-            : normalizedSubtasks;
-        // Subtask execution loop
-        const executeStart = Date.now();
-        const result = await this.executeSubtasks(task, subtasksForExec, {
-          persona: brainOpts.persona,
-          taskType: brainOpts.taskType,
-          complexity: brainOpts.complexity,
-          workInstructions: brainOpts.workInstructions,
-          baseline,
-          startCommit,
-        });
-        workerPassed = result.success;
-        verification.passed = result.success;
-        if (!result.success)
-          verification.reason = result.reason || "Subtask verification failed";
-        const executeDurationMs =
-          Date.now() - executeStart - result.totalVerifyMs;
-        this.endStep(
-          "execute",
-          result.success ? "done" : "failed",
-          undefined,
-          Math.max(0, executeDurationMs),
-        );
-        this.eventBus.emit(
-          this.makeEvent("execute", "after", {
-            startCommit,
-            result: { costUsd: 0, durationMs: 0 },
-          }),
-        );
-        this.beginStep("verify");
-        this.eventBus.emit(
-          this.makeEvent("verify", "after", { verification, startCommit }),
-        );
-        this.endStep(
-          "verify",
-          result.success ? "done" : "failed",
-          verification.reason,
-          result.totalVerifyMs,
-        );
-      } else {
-        // Single-shot execution (with optional approved plan)
-        const workerResult = await this.workerExecute(task, {
-          ...brainOpts,
-          approvedPlan,
-        });
-        if (workerResult.costUsd > 0)
-          await this.costTracker.addCost(task.id, workerResult.costUsd);
+      // 4.5 Analysis (M/L/XL)
+      const analysis = await this.analyzeTask(task, brainOpts, pipeCtx);
+      if (!analysis) return false;
 
-        await this.taskStore.addLog({
-          task_id: task.id,
-          phase: "execute",
-          agent: "claude-code",
-          input_summary: task.task_description,
-          output_summary: workerResult.text,
-          cost_usd: workerResult.costUsd,
-          duration_ms: workerResult.durationMs,
-        });
-        // isError is a warning, not a gate — hardVerify makes the final call
-        let workerErrMsg: string | undefined;
-        if (workerResult.isError) {
-          workerErrMsg = `Worker reported error: ${workerResult.errors.join("; ") || "unknown error"}`;
-          log.warn(workerErrMsg);
-          await this.taskStore.addLog({
-            task_id: task.id,
-            phase: "execute",
-            agent: "worker",
-            input_summary: "worker reported isError",
-            output_summary: workerErrMsg,
-            cost_usd: 0,
-            duration_ms: 0,
-          });
-        }
-        // Hard verification — always runs regardless of workerResult.isError
-        this.endStep("execute", "done");
-        this.eventBus.emit(
-          this.makeEvent("execute", "after", {
-            startCommit,
-            result: {
-              costUsd: workerResult.costUsd,
-              durationMs: workerResult.durationMs,
-            },
-          }),
-        );
-        try {
-          this.beginStep("verify");
-          this.setState("reviewing");
-          const verifyStart = Date.now();
-          const singleVerify = await this.hardVerify(
-            baseline,
-            startCommit,
-            projectPath,
-          );
-          await this.taskStore.addLog({
-            task_id: task.id,
-            phase: "verify",
-            agent: "tsc",
-            input_summary: `baseline=${JSON.stringify(baseline)}, startCommit=${startCommit}${workerResult.isError ? ", workerError=true" : ""}`,
-            output_summary: singleVerify.passed
-              ? "PASS"
-              : `FAIL: ${singleVerify.reason}`,
-            cost_usd: 0,
-            duration_ms: Date.now() - verifyStart,
-          });
-          this.eventBus.emit(
-            this.makeEvent("verify", "after", {
-              verification: singleVerify,
-              startCommit,
-            }),
-          );
+      // 5-6. Execute + Verify
+      const execution = await this.executeAndVerify(task, brainOpts, {
+        ...pipeCtx,
+        approvedPlan: analysis.approvedPlan,
+      });
+      if (!execution) return false;
 
-          // HALT retry loop: fix up to maxRetries times
-          const maxRetries = this.config.values.autonomy.maxRetries;
-          let fixAttempts = 0;
-          let currentSessionId = workerResult.sessionId;
+      // 7-8. Review
+      const shouldMerge = await this.reviewTask(task, {
+        ...pipeCtx,
+        ...execution,
+      });
 
-          while (
-            !singleVerify.passed &&
-            currentSessionId &&
-            fixAttempts < maxRetries
-          ) {
-            fixAttempts++;
-            log.warn(
-              `Hard verification failed (attempt ${fixAttempts}/${maxRetries}): ${singleVerify.reason}`,
-            );
-            const fixResult = await this.workerFix(
-              currentSessionId,
-              singleVerify.reason ?? "Unknown error",
-              task,
-            );
-            if (fixResult.costUsd > 0)
-              await this.costTracker.addCost(task.id, fixResult.costUsd);
-            currentSessionId = fixResult.sessionId ?? currentSessionId;
+      // 9-10. Reflect + Merge
+      await this.reflectAndMerge(task, shouldMerge, {
+        ...pipeCtx,
+        verification: execution.verification,
+      });
 
-            const changedFilesForCommit = await getModifiedAndAddedFiles(
-              projectPath,
-            ).catch(() => []);
-            try {
-              await commitAll(
-                "db-coder: fix verification issues",
-                projectPath,
-                changedFilesForCommit,
-              );
-            } catch (commitErr) {
-              log.error(
-                `commitAll failed during verification retry ${fixAttempts}: ${commitErr}`,
-              );
-              singleVerify.reason = `commitAll failed: ${commitErr}`;
-              break;
-            }
-            const reVerify = await this.hardVerify(
-              baseline,
-              startCommit,
-              projectPath,
-            );
-            singleVerify.passed = reVerify.passed;
-            singleVerify.reason = reVerify.reason;
-            this.eventBus.emit(
-              this.makeEvent("fix", "after", { verification: singleVerify }),
-            );
-          }
-
-          if (!singleVerify.passed && fixAttempts >= maxRetries) {
-            log.warn(
-              `HALT after ${fixAttempts} fix attempts: ${singleVerify.reason}`,
-            );
-            await this.taskStore.addLog({
-              task_id: task.id,
-              phase: "halt-learning",
-              agent: "system",
-              input_summary: "HALT triggered",
-              output_summary: `HALT triggered: ${singleVerify.reason} (after ${fixAttempts} attempts)`,
-              cost_usd: 0,
-              duration_ms: 0,
-            });
-          }
-
-          workerPassed = singleVerify.passed;
-          workerSessionId = currentSessionId;
-          verification.passed = singleVerify.passed;
-          verification.reason = singleVerify.reason;
-
-          this.endStep(
-            "verify",
-            singleVerify.passed ? "done" : "failed",
-            singleVerify.reason,
-          );
-          if (!singleVerify.passed) {
-            const executeStep = this.tracker
-              .getCycleSteps()
-              .find((s) => s.phase === "execute");
-            if (executeStep?.finishedAt != null) {
-              this.updateStepStatus("execute", "failed", singleVerify.reason);
-            } else if (executeStep) {
-              log.info(
-                "Skipping execute step status update: step not yet finished",
-                {
-                  hasStep: !!executeStep,
-                  finishedAt: executeStep?.finishedAt,
-                },
-              );
-            } else {
-              log.info("Skipping execute step status update: step not found");
-            }
-          }
-        } catch (verifyErr) {
-          const errMsg =
-            verifyErr instanceof Error ? verifyErr.message : String(verifyErr);
-          try {
-            this.endStep("verify", "failed", `Exception: ${errMsg}`);
-          } catch (statusErr) {
-            log.warn(
-              "endStep('verify') failed in catch(verifyErr), preserving original error",
-              { statusErr },
-            );
-          }
-          const finished = findFinishedStepsByPhase(
-            [...this.tracker.getCycleSteps()],
-            "execute",
-          );
-          if (finished) {
-            try {
-              this.updateStepStatus(
-                "execute",
-                "failed",
-                `Verification phase exception: ${errMsg}`,
-              );
-            } catch (statusErr) {
-              log.warn(
-                "updateStepStatus('execute') failed in catch(verifyErr), preserving original error",
-                { statusErr },
-              );
-            }
-          } else {
-            const execStepExists = this.tracker
-              .getCycleSteps()
-              .some((s) => s.phase === "execute");
-            log.warn(
-              "Skipping updateStepStatus('execute') in catch(verifyErr): execute step not found or not finished",
-              { exists: execStepExists },
-            );
-            if (execStepExists) {
-              try {
-                await this.taskStore.addLog({
-                  task_id: task.id,
-                  phase: "execute",
-                  agent: "system",
-                  input_summary: "execute step status persistence fallback",
-                  output_summary: `execute step not finished when verification threw: ${errMsg}`,
-                  cost_usd: 0,
-                  duration_ms: 0,
-                });
-              } catch (logErr) {
-                log.warn(
-                  "taskStore.addLog fallback failed in catch(verifyErr)",
-                  { logErr },
-                );
-              }
-            }
-          }
-          throw verifyErr;
-        }
-      }
-
-      // 7. Code review (reviewer auto-selects based on worker config — mutual exclusion)
-      this.beginStep("review");
-      let shouldMerge = false;
-
-      if (workerPassed) {
-        this.setState("reviewing");
-        const reviewResult = await this.codeReview(
-          task,
-          startCommit,
-          projectPath,
-          taskReviewer,
-        );
-
-        // Store review results for traceability
-        await this.taskStore.updateTask(task.id, {
-          review_results: reviewResult.issues ?? [],
-        });
-
-        if (!reviewResult.passed) {
-          log.info(`Code review: FAIL — ${reviewResult.summary}`, {
-            issues: (reviewResult.issues ?? []).length,
-            reviewer: taskReviewer.name,
-          });
-        } else {
-          log.info(`Code review: PASS — ${reviewResult.summary}`);
-        }
-
-        // 8. Brain decision phase
-        if (workerPassed && reviewResult.passed) {
-          // Both verify and review passed → merge
-          shouldMerge = true;
-        } else if (workerPassed) {
-          // Verify passed but review failed → brain decides
-          const decision = await this.brainReviewDecision(
-            task,
-            reviewResult,
-            reviewResult.reviewDiff,
-            false,
-          );
-          log.info(
-            `Brain decision: ${decision.decision} — ${decision.reasoning}`,
-          );
-
-          switch (decision.decision) {
-            case "ignore":
-              shouldMerge = true;
-              break;
-
-            case "block":
-              // Leave shouldMerge = false
-              break;
-
-            case "split": {
-              shouldMerge = true; // merge current work
-              // Create new tasks for unresolved issues
-              if (decision.newTasks) {
-                for (const newTaskDesc of decision.newTasks) {
-                  const { duplicate, reason } =
-                    await this.taskStore.isDuplicateTask(
-                      projectPath,
-                      newTaskDesc,
-                    );
-                  if (duplicate) {
-                    log.info(
-                      `Split dedup: ${reason} — "${truncate(newTaskDesc, 100)}"`,
-                    );
-                    continue;
-                  }
-                  await this.taskStore.createTask(projectPath, newTaskDesc, 2);
-                  log.info(
-                    `Split: created follow-up task: ${truncate(newTaskDesc, 100)}`,
-                  );
-                }
-              }
-              break;
-            }
-
-            case "fix":
-            case "rewrite": {
-              // Fix/rewrite loop (at most maxReviewFixes rounds)
-              const maxFixes = this.config.values.autonomy.maxReviewFixes;
-              let fixSessionId: string | undefined = workerSessionId;
-
-              for (let fixRound = 0; fixRound < maxFixes; fixRound++) {
-                const fixResult = await this.workerReviewFix(
-                  task,
-                  decision.fixInstructions ?? decision.reasoning,
-                  fixSessionId,
-                );
-                fixSessionId = fixResult.sessionId;
-
-                // Commit fix changes
-                const changedFilesForCommit = await getModifiedAndAddedFiles(
-                  projectPath,
-                ).catch(() => []);
-                try {
-                  await commitAll(
-                    "db-coder: fix review issues",
-                    projectPath,
-                    changedFilesForCommit,
-                  );
-                } catch (commitErr) {
-                  log.error(
-                    `commitAll failed during review fix round ${fixRound + 1}: ${commitErr}`,
-                  );
-                  shouldMerge = false;
-                  break;
-                }
-
-                // Re-verify
-                const reVerify = await this.hardVerify(
-                  baseline,
-                  startCommit,
-                  projectPath,
-                );
-                if (!reVerify.passed) {
-                  log.warn(
-                    `Review fix: hardVerify failed — ${reVerify.reason}`,
-                  );
-                  break; // Will fall through to block
-                }
-
-                // Re-review
-                const reReview = await this.codeReview(
-                  task,
-                  startCommit,
-                  projectPath,
-                  taskReviewer,
-                );
-                if (reReview.passed) {
-                  shouldMerge = true;
-                  break;
-                }
-
-                // Still failing — brain makes final decision (only ignore/block/split)
-                const finalDecision = await this.brainReviewDecision(
-                  task,
-                  reReview,
-                  reReview.reviewDiff,
-                  true, // isRetry: restricts to ignore/block/split
-                );
-                log.info(
-                  `Brain final decision: ${finalDecision.decision} — ${finalDecision.reasoning}`,
-                );
-
-                if (finalDecision.decision === "ignore") {
-                  shouldMerge = true;
-                } else if (finalDecision.decision === "split") {
-                  shouldMerge = true;
-                  if (finalDecision.newTasks) {
-                    for (const newTaskDesc of finalDecision.newTasks) {
-                      const { duplicate, reason } =
-                        await this.taskStore.isDuplicateTask(
-                          projectPath,
-                          newTaskDesc,
-                        );
-                      if (duplicate) {
-                        log.info(
-                          `Split dedup: ${reason} — "${truncate(newTaskDesc, 100)}"`,
-                        );
-                        continue;
-                      }
-                      await this.taskStore.createTask(
-                        projectPath,
-                        newTaskDesc,
-                        2,
-                      );
-                      log.info(
-                        `Split: created follow-up task: ${truncate(newTaskDesc, 100)}`,
-                      );
-                    }
-                  }
-                }
-                // else: block (shouldMerge stays false)
-                break; // Only 1 retry round in the loop
-              }
-              break;
-            }
-          }
-        }
-      }
-
-      this.endStep(
-        "review",
-        shouldMerge ? "done" : "failed",
-        shouldMerge ? "PASS" : "Review rejected",
-      );
-      this.eventBus.emit(
-        this.makeEvent("review", "after", { passed: shouldMerge }),
-      );
-
-      // 9. Brain reflects and learns
-      this.beginStep("reflect");
-      this.setState("reflecting");
-      const outcome = shouldMerge ? "success" : "failed";
-      try {
-        await this.brainReflect(task, outcome, verification, projectPath);
-        this.endStep("reflect", "done");
-        this.eventBus.emit(this.makeEvent("reflect", "after"));
-      } catch (reflectErr) {
-        log.warn(
-          `brainReflect failed (non-fatal, continuing merge flow): ${reflectErr}`,
-        );
-        this.endStep("reflect", "failed", `brainReflect error: ${reflectErr}`);
-        this.eventBus.emit(this.makeEvent("reflect", "after", { error: true }));
-      }
-
-      // 10. Merge or cleanup
-      this.beginStep("merge");
-      if (shouldMerge) {
-        await switchBranch(originalBranch, projectPath);
-        await mergeBranch(branchName, projectPath);
-        try {
-          await deleteBranch(branchName, projectPath);
-        } catch (delErr) {
-          log.warn(
-            `deleteBranch failed (non-fatal, merge already succeeded): ${delErr}`,
-          );
-        }
-        log.info(
-          `Task completed and merged: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`,
-        );
-        await this.taskStore.updateTask(task.id, {
-          status: "done",
-          phase: "done",
-        });
-        this.endStep("merge", "done", "Merged");
-        this.consecutiveRejections = 0;
-        this.eventBus.emit(
-          this.makeEvent("merge", "after", {
-            merged: true,
-            taskDescription: task.task_description,
-          }),
-        );
-
-        // Self-modification: rebuild after merging own code changes
-        if (this.isSelfProject()) {
-          const buildResult = await safeBuild(projectPath);
-          if (buildResult.success) {
-            this.restartPending = true;
-            log.info("Self-build succeeded, restart pending");
-          } else {
-            this.writeBuildError(buildResult.error);
-          }
-        }
-      } else {
-        await switchBranch(originalBranch, projectPath).catch(() => {});
-        await this.cleanupTaskBranch(branchName, { startCommit });
-        log.warn(
-          `Task rejected: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`,
-        );
-        await this.taskStore.updateTask(task.id, {
-          status: "blocked",
-          phase: "blocked",
-        });
-        this.endStep("merge", "failed", "Rejected");
-        this.eventBus.emit(this.makeEvent("merge", "after", { merged: false }));
-
-        this.consecutiveRejections++;
-        if (this.consecutiveRejections >= 5) {
-          try {
-            await this.pipelineHealthCheck(projectPath);
-          } catch (err) {
-            log.warn("Pipeline health check failed", err);
-          }
-          this.consecutiveRejections = 0;
-        }
-      }
-
-      // 12. Periodic chain scan
-      this.tasksCompleted++;
-      const { chainScan } = this.config.values.brain;
-      if (chainScan.enabled && this.tasksCompleted % chainScan.interval === 0) {
-        try {
-          this.eventBus.emit(this.makeEvent("deep-review", "before"));
-          await this.chainScanner.scanNext(projectPath);
-          this.eventBus.emit(this.makeEvent("deep-review", "after"));
-        } catch (err) {
-          log.warn("Chain scan failed", err);
-        }
-      }
-
-      // 13. Periodic CLAUDE.md maintenance
-      const {
-        claudeMdMaintenanceEnabled: maintEnabled,
-        claudeMdMaintenanceInterval: maintInterval,
-      } = this.config.values.brain;
-      if (
-        maintEnabled &&
-        maintInterval > 0 &&
-        this.tasksCompleted % maintInterval === 0
-      ) {
-        try {
-          await this.claudeMdMaintenance(projectPath);
-        } catch (err) {
-          log.warn("CLAUDE.md maintenance failed", err);
-        }
-      }
+      // 12-13. Periodic tasks
+      this.doPeriodicTasks(projectPath);
     } catch (err) {
       log.error("Task execution error", err);
-      // Mark ALL active steps as failed (not just the first one)
       this.tracker.setCycleSteps(
         _failAllActiveSteps([...this.tracker.getCycleSteps()], String(err)),
       );
@@ -1478,207 +549,1045 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
     return true;
   }
 
-  // --- Brain session (delegated to BrainPhase) ---
+  // --- Pipeline sub-methods (called only from runCycle) ---
 
-  private async brainDecide(projectPath: string) {
-    return this.brain.brainDecide(projectPath);
-  }
-
-  private async gatherBrainContext(projectPath: string): Promise<string> {
-    return this.brain.gatherBrainContext(projectPath);
-  }
-
-  private async brainDecideDirective(projectPath: string) {
-    return this.brain.brainDecideDirective(projectPath);
-  }
-
-  // --- Worker session ---
-
-  private async workerExecute(
-    task: Task,
-    opts?: {
-      persona?: string;
-      taskType?: string;
-      complexity?: string;
-      subtaskDescription?: string;
-      workInstructions?: WorkInstructions;
-      approvedPlan?: string;
-      resumeSessionId?: string;
-    },
-  ): Promise<SessionResult> {
-    return this.workerPhase.workerExecute(task, opts);
-  }
-
-  private async executeSubtasks(
-    task: Task,
-    subtasks: Array<{ description: string; order: number }>,
-    opts: {
-      persona?: string;
-      taskType?: string;
-      complexity?: string;
-      workInstructions?: WorkInstructions;
-      baseline: VerifyBaseline;
-      startCommit: string;
-    },
-  ): Promise<{
-    success: boolean;
-    sessionId?: string;
-    reason?: string;
-    failureKind?: "task-gone" | "subtask-not-found";
-    totalVerifyMs: number;
-  }> {
-    return this.workerPhase.executeSubtasks(task, subtasks, opts);
-  }
-
-  private async workerFix(
-    sessionId: string,
-    errors: string,
-    task: Task,
-  ): Promise<SessionResult> {
-    return this.workerPhase.workerFix(sessionId, errors, task);
-  }
-
-  // --- Hard verification (delegates to MaintenancePhase) ---
-
-  private async hardVerify(
-    baseline: VerifyBaseline,
-    startCommit: string,
+  /** Drain queue or ask brain for a new task. Returns null to abort the cycle. */
+  private async decideTask(
     projectPath: string,
-  ): Promise<{ passed: boolean; reason?: string }> {
-    return this.maintenance.hardVerify(baseline, startCommit, projectPath);
-  }
+  ): Promise<{ task: Task; brainOpts?: BrainOpts } | null> {
+    this.setState("scanning");
+    this.beginStep("decide");
 
-  // --- Spec compliance review (DEPRECATED: replaced by codeReview + brainReviewDecision) ---
+    // 0. Drain queued tasks first — skip brain entirely if work is waiting
+    const queued = await this.taskQueue.getNext(projectPath);
 
-  /** @deprecated Replaced by codeReview() + brainReviewDecision() in the new pipeline. */
-  private async specReview(
-    task: Task,
-    startCommit: string,
-    projectPath: string,
-    workInstructions?: WorkInstructions,
-  ): Promise<{
-    passed: boolean;
-    missing: string[];
-    extra: string[];
-    concerns: string[];
-  }> {
-    return this.review.specReview(
-      task,
-      startCommit,
+    if (queued) {
+      const task = queued;
+      await this.taskStore.updateTask(task.id, {
+        status: "active",
+        phase: "executing",
+      });
+      this.setCurrentTaskId(task.id);
+
+      // Reconstruct brainOpts from stored plan (JSONB)
+      let brainOpts: BrainOpts | undefined;
+      const plan = task.plan as Record<string, unknown> | null;
+      if (plan) {
+        brainOpts = {
+          persona: typeof plan.persona === "string" ? plan.persona : undefined,
+          taskType: typeof plan.type === "string" ? plan.type : undefined,
+          complexity:
+            typeof plan.estimatedComplexity === "string"
+              ? (
+                  { low: "S", medium: "M", high: "L" } as Record<
+                    string,
+                    string
+                  >
+                )[plan.estimatedComplexity]
+              : undefined,
+          workInstructions:
+            typeof plan.workInstructions === "string"
+              ? plan.workInstructions
+              : undefined,
+        };
+      }
+
+      log.info(
+        `Queue pickup: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`,
+      );
+      this.tracker.setCurrentTaskDescription(task.task_description);
+      this.eventBus.emit(
+        this.makeEvent("decide", "after", {
+          taskDescription: task.task_description,
+        }),
+      );
+      this.endStep("decide", "done", "Queue pickup");
+      this.endStep("create-task", "skipped");
+      return { task, brainOpts };
+    }
+
+    // 1. Brain decides what to do
+    this.eventBus.emit(this.makeEvent("decide", "before"));
+    let decision = await this.brain.brainDecide(projectPath);
+    if (decision.costUsd > 0)
+      await this.taskStore.addDailyCost(decision.costUsd);
+
+    // Layer 2: directive fallback if brain returned null
+    if (!decision.taskDescription) {
+      log.warn("Brain returned no task — retrying with directive prompt");
+      const directive = await this.brain.brainDecideDirective(projectPath);
+      if (directive.costUsd > 0)
+        await this.taskStore.addDailyCost(directive.costUsd);
+      if (directive.taskDescription) {
+        decision = directive;
+      }
+    }
+
+    // Layer 3: if still null, short sleep will retry (handled by start())
+    if (!decision.taskDescription) {
+      log.warn(
+        "Brain: no task after directive retry. Short sleep then retry.",
+      );
+      this.endStep("decide", "failed", "No task found");
+      this.skipRemainingSteps("decide");
+      this.setState("idle");
+      return null;
+    }
+
+    // Dedup check: avoid creating duplicate or recently-failed tasks
+    const similar = await this.taskStore.findSimilarTask(
       projectPath,
-      workInstructions,
+      decision.taskDescription,
     );
-  }
+    if (
+      similar &&
+      (similar.status === "queued" ||
+        similar.status === "active" ||
+        similar.status === "done")
+    ) {
+      log.info(
+        `Dedup: skipping task similar to [${similar.status}] "${truncate(similar.task_description, 80)}"`,
+      );
+      this.endStep("decide", "skipped", "Dedup");
+      this.skipRemainingSteps("decide");
+      this.setState("idle");
+      return null;
+    }
+    if (
+      await this.taskStore.hasRecentlyFailedSimilar(
+        projectPath,
+        decision.taskDescription,
+      )
+    ) {
+      log.info(
+        `Cooldown: skipping task similar to recently failed one: "${truncate(decision.taskDescription, 80)}"`,
+      );
+      this.endStep("decide", "skipped", "Cooldown");
+      this.skipRemainingSteps("decide");
+      this.setState("idle");
+      return null;
+    }
 
-  // --- Analysis phase (M/L/XL only) ---
+    this.tracker.setCurrentTaskDescription(decision.taskDescription);
+    this.eventBus.emit(
+      this.makeEvent("decide", "after", {
+        taskDescription: decision.taskDescription,
+      }),
+    );
+    this.endStep("decide", "done");
 
-  /**
-   * Worker analyzes code in read-only mode to produce a concrete change proposal.
-   * Uses the WorkerAdapter.analyze() method (read-only).
-   */
-  private async workerAnalyze(
-    task: Task,
-    brainOpts?: {
-      persona?: string;
-      taskType?: string;
-      complexity?: string;
-      workInstructions?: WorkInstructions;
-    },
-    revision?: {
-      resumeSessionId: string;
-      revisionPrompt: string;
-    },
-  ): Promise<{
-    proposal: string;
-    costUsd: number;
-    isError: boolean;
-    sessionId?: string;
-  }> {
-    return this.workerPhase.workerAnalyze(task, brainOpts, revision);
-  }
-
-  /**
-   * Review a change proposal (reviewer is automatically the opposite of worker).
-   * Uses the ReviewAdapter to ensure mutual exclusion.
-   */
-  private async reviewPlan(
-    proposal: string,
-    task: Task,
-    reviewerOverride?: ReviewAdapter,
-  ): Promise<ReviewResult> {
-    return this.review.reviewPlan(proposal, task, reviewerOverride);
-  }
-
-  private async brainSynthesizePlan(
-    proposal: string,
-    planReview: ReviewResult,
-    task: Task,
-  ) {
-    return this.brain.brainSynthesizePlan(proposal, planReview, task);
-  }
-
-  // --- Decision phase (post-review) ---
-
-  private async brainReviewDecision(
-    task: Task,
-    reviewResult: ReviewResult,
-    diff: string,
-    isRetry: boolean,
-  ) {
-    return this.brain.brainReviewDecision(task, reviewResult, diff, isRetry);
-  }
-
-  /**
-   * Worker fixes issues found in code review (delegates to WorkerPhase).
-   */
-  private async workerReviewFix(
-    task: Task,
-    fixInstructions: string,
-    sessionId?: string,
-  ): Promise<{ costUsd: number; sessionId?: string; isError: boolean }> {
-    return this.workerPhase.workerReviewFix(task, fixInstructions, sessionId);
-  }
-
-  /**
-   * Unified code review entry point.
-   * Automatically selects the reviewer that is mutually exclusive with the worker.
-   * worker=claude → codex reviews; worker=codex → claude reviews.
-   */
-  private async codeReview(
-    task: Task,
-    startCommit: string,
-    projectPath: string,
-    reviewerOverride?: ReviewAdapter,
-  ): Promise<ReviewResult & { reviewDiff: string }> {
-    return this.review.codeReview(
-      task,
-      startCommit,
+    // 2. Create task record
+    this.beginStep("create-task");
+    this.setState("planning");
+    const task = await this.taskStore.createTask(
       projectPath,
-      reviewerOverride,
+      decision.taskDescription,
+      decision.priority ?? 2,
     );
+    this.setCurrentTaskId(task.id);
+    log.info(
+      `Task: ${truncate(decision.taskDescription, TASK_DESC_MAX_LENGTH)}`,
+    );
+    this.eventBus.emit(
+      this.makeEvent("create-task", "after", {
+        taskId: task.id,
+        taskDescription: decision.taskDescription,
+      }),
+    );
+
+    // Store complexity and subtasks metadata from brain decision
+    if (
+      decision.complexity ||
+      (decision.subtasks && decision.subtasks.length > 0)
+    ) {
+      const updates: Record<string, unknown> = {};
+      if (decision.complexity) {
+        updates.plan = { complexity: decision.complexity };
+      }
+      if (decision.subtasks && decision.subtasks.length > 0) {
+        const rawOrders = decision.subtasks.map((st, i) =>
+          coerceSubtaskOrder(st.order, i + 1),
+        );
+        const hasDuplicates = new Set(rawOrders).size !== rawOrders.length;
+        updates.subtasks = decision.subtasks.map((st, i) => {
+          const coerced = coerceSubtaskOrder(st.order, i + 1);
+          return {
+            id: String(i + 1),
+            description: st.description,
+            executor: "claude" as const,
+            status: "pending" as const,
+            order: hasDuplicates ? i + 1 : coerced,
+          };
+        });
+      }
+      await this.taskStore.updateTask(task.id, updates);
+    }
+
+    const brainOpts: BrainOpts = {
+      persona: decision.persona,
+      taskType: decision.taskType,
+      complexity: decision.complexity,
+      subtasks: decision.subtasks,
+      workInstructions: decision.workInstructions,
+    };
+
+    // Enqueue extra tasks from brain's batch output
+    if (decision.extraTasks && decision.extraTasks.length > 0) {
+      try {
+        const planTasks: PlanTask[] = decision.extraTasks.map((et, i) => ({
+          id: `extra-${i + 1}`,
+          description: et.task,
+          priority: et.priority ?? 2,
+          executor: "claude" as const,
+          subtasks: (et.subtasks ?? []).map((st, si) => ({
+            id: `extra-${i + 1}-sub-${si + 1}`,
+            description: st.description,
+            executor: "claude" as const,
+          })),
+          dependsOn: [],
+          estimatedComplexity:
+            (
+              { S: "low", M: "medium", L: "high", XL: "high" } as Record<
+                string,
+                "low" | "medium" | "high"
+              >
+            )[et.complexity ?? "M"] ?? "medium",
+          type: et.taskType as TaskType | undefined,
+          // BMAD: pass through workInstructions + persona to queue
+          workInstructions: et.workInstructions
+            ? typeof et.workInstructions === "string"
+              ? et.workInstructions
+              : formatWorkInstructions(et.workInstructions) || undefined
+            : undefined,
+          persona: et.persona,
+        }));
+        const plan: TaskPlan = {
+          tasks: planTasks,
+          reasoning: "Extra tasks from brain batch output",
+        };
+        const enqueuedIds = await this.taskQueue.enqueue(projectPath, plan);
+        if (enqueuedIds.length > 0) {
+          log.info(
+            `Enqueued ${enqueuedIds.length} extra task(s) from brain batch`,
+          );
+        }
+      } catch (err) {
+        log.warn(`Failed to enqueue extra tasks: ${err}`);
+      }
+    }
+
+    this.endStep("create-task", "done");
+    return { task, brainOpts };
   }
 
-  // --- Brain reflection (delegated to BrainPhase) ---
-
-  private async brainReflect(
+  /** Analyze → Review → Synthesize loop for M/L/XL tasks. Returns null to abort. */
+  private async analyzeTask(
     task: Task,
-    outcome: string,
-    verification: { passed: boolean; reason?: string },
-    projectPath: string,
+    brainOpts: BrainOpts | undefined,
+    ctx: PipelineCtx,
+  ): Promise<{ approvedPlan?: string } | null> {
+    const complexity = brainOpts?.complexity ?? "M";
+    if (complexity === "S") {
+      this.endStep("analyze", "skipped");
+      return {};
+    }
+
+    this.beginStep("analyze");
+    this.setState("planning");
+    await this.taskStore.updateTask(task.id, { phase: "analyzing" });
+
+    const maxRevisions = 2;
+    let revisionRound = 0;
+    let analyzeSessionId: string | undefined;
+    let revisionCtx:
+      | { resumeSessionId: string; revisionPrompt: string }
+      | undefined;
+    let planApproved = false;
+    let approvedPlan: string | undefined;
+
+    while (revisionRound <= maxRevisions) {
+      // Worker produces a concrete change proposal (read-only)
+      const analyzeResult = await this.workerPhase.workerAnalyze(
+        task,
+        brainOpts,
+        revisionCtx,
+      );
+      analyzeSessionId = analyzeResult.sessionId;
+
+      if (analyzeResult.isError) {
+        const maxAnalyzeRetries = 2;
+        const nextIteration = task.iteration + 1;
+        if (nextIteration > maxAnalyzeRetries) {
+          log.warn(
+            `Worker analyze failed ${nextIteration} times — blocking task (max ${maxAnalyzeRetries} retries)`,
+          );
+          this.endStep(
+            "analyze",
+            "failed",
+            "Empty or error proposal (retries exhausted)",
+          );
+          this.skipRemainingSteps("analyze");
+          await this.taskStore.updateTask(task.id, {
+            status: "blocked",
+            phase: "blocked",
+            iteration: nextIteration,
+          });
+        } else {
+          log.warn(
+            `Worker analyze failed — requeuing task (attempt ${nextIteration}/${maxAnalyzeRetries})`,
+          );
+          this.endStep(
+            "analyze",
+            "failed",
+            `Empty or error proposal, requeuing (attempt ${nextIteration})`,
+          );
+          this.skipRemainingSteps("analyze");
+          await this.taskStore.updateTask(task.id, {
+            status: "queued",
+            phase: "init",
+            iteration: nextIteration,
+          });
+        }
+        await switchBranch(ctx.originalBranch, ctx.projectPath).catch(
+          () => {},
+        );
+        await this.cleanupTaskBranch(ctx.branchName, { force: true });
+        this.setCurrentTaskId(null);
+        this.tracker.setCurrentTaskDescription(null);
+        this.setState("idle");
+        return null;
+      }
+
+      // Reviewer evaluates the proposal (mutually exclusive with worker)
+      const planReview = await this.review.reviewPlan(
+        analyzeResult.proposal,
+        task,
+        ctx.taskReviewer,
+      );
+
+      // Brain synthesizes proposal + feedback into final plan
+      const synthesis = await this.brain.brainSynthesizePlan(
+        analyzeResult.proposal,
+        planReview,
+        task,
+      );
+
+      if (synthesis.decision === "approved") {
+        approvedPlan = synthesis.finalPlan;
+        planApproved = true;
+        break;
+      }
+
+      if (synthesis.decision === "revise" && analyzeSessionId) {
+        revisionRound++;
+        if (revisionRound > maxRevisions) {
+          log.warn(
+            `Plan revisions exhausted (${maxRevisions} rounds) — blocking task`,
+          );
+          break;
+        }
+        log.info(
+          `Brain requested plan revision (round ${revisionRound}/${maxRevisions})`,
+        );
+
+        // Build full revision context: brain instructions + reviewer issues
+        const reviewerIssues = planReview.issues
+          .map((i) => `- [${i.severity}] ${i.description}`)
+          .join("\n");
+        const revisionPrompt = `## Revision Required (Round ${revisionRound}/${maxRevisions})
+
+### Brain's Direction
+${synthesis.reviseInstructions ?? "Revise the proposal to address reviewer concerns."}
+
+### Reviewer's Specific Issues
+${reviewerIssues || "No specific issues listed."}
+
+Revise your previous proposal to address ALL issues above. Produce a complete updated proposal in the same structured format.`;
+
+        revisionCtx = {
+          resumeSessionId: analyzeSessionId,
+          revisionPrompt,
+        };
+        continue;
+      }
+
+      // REJECTED or REVISE without sessionId (e.g. Codex)
+      log.warn("Brain rejected analysis plan — blocking task");
+      break;
+    }
+
+    if (!planApproved) {
+      this.endStep("analyze", "failed", "Plan rejected by brain");
+      this.skipRemainingSteps("analyze");
+      await this.taskStore.updateTask(task.id, {
+        status: "blocked",
+        phase: "blocked",
+      });
+      await switchBranch(ctx.originalBranch, ctx.projectPath).catch(() => {});
+      await this.cleanupTaskBranch(ctx.branchName, { force: true });
+      this.setCurrentTaskId(null);
+      this.tracker.setCurrentTaskDescription(null);
+      this.setState("idle");
+      return null;
+    }
+
+    this.endStep("analyze", "done");
+    return { approvedPlan };
+  }
+
+  /** Execute task (subtasks or single-shot) + hard verification + fix retries. Returns null to abort. */
+  private async executeAndVerify(
+    task: Task,
+    brainOpts: BrainOpts | undefined,
+    ctx: PipelineCtx & { approvedPlan?: string },
+  ): Promise<{
+    workerPassed: boolean;
+    workerSessionId?: string;
+    verification: { passed: boolean; reason?: string };
+  } | null> {
+    this.beginStep("execute");
+    this.setState("executing");
+
+    const guardErrors = await this.eventBus.emitAndWait(
+      this.makeEvent("execute", "before", {
+        taskDescription: task.task_description,
+      }),
+    );
+    if (guardErrors.length > 0) {
+      log.warn(`Guard blocked execution: ${guardErrors[0].message}`);
+      this.endStep("execute", "failed", "Guard blocked");
+      this.skipRemainingSteps("execute");
+      await this.taskStore.updateTask(task.id, {
+        status: "blocked",
+        phase: "blocked",
+      });
+      await switchBranch(ctx.originalBranch, ctx.projectPath).catch(() => {});
+      await this.cleanupTaskBranch(ctx.branchName, { force: true });
+      this.setCurrentTaskId(null);
+      this.tracker.setCurrentTaskDescription(null);
+      this.setState("idle");
+      return null;
+    }
+
+    let workerPassed: boolean;
+    let workerSessionId: string | undefined;
+    const verification: { passed: boolean; reason?: string } = {
+      passed: true,
+    };
+
+    if (brainOpts?.subtasks && brainOpts.subtasks.length > 0) {
+      // Normalize orders to match persisted subtasks
+      const normalizedSubtasks = brainOpts.subtasks.map((st, i) => ({
+        ...st,
+        order: coerceSubtaskOrder(st.order, i + 1),
+      }));
+      // Deduplicate: if any orders collide, fall back to sequential
+      const orderSet = new Set(normalizedSubtasks.map((s) => s.order));
+      const subtasksForExec =
+        orderSet.size !== normalizedSubtasks.length
+          ? normalizedSubtasks.map((st, i) => ({ ...st, order: i + 1 }))
+          : normalizedSubtasks;
+      // Subtask execution loop
+      const executeStart = Date.now();
+      const result = await this.workerPhase.executeSubtasks(
+        task,
+        subtasksForExec,
+        {
+          persona: brainOpts.persona,
+          taskType: brainOpts.taskType,
+          complexity: brainOpts.complexity,
+          workInstructions: brainOpts.workInstructions,
+          baseline: ctx.baseline,
+          startCommit: ctx.startCommit,
+        },
+      );
+      workerPassed = result.success;
+      verification.passed = result.success;
+      if (!result.success)
+        verification.reason = result.reason || "Subtask verification failed";
+      const executeDurationMs =
+        Date.now() - executeStart - result.totalVerifyMs;
+      this.endStep(
+        "execute",
+        result.success ? "done" : "failed",
+        undefined,
+        Math.max(0, executeDurationMs),
+      );
+      this.eventBus.emit(
+        this.makeEvent("execute", "after", {
+          startCommit: ctx.startCommit,
+          result: { costUsd: 0, durationMs: 0 },
+        }),
+      );
+      this.beginStep("verify");
+      this.eventBus.emit(
+        this.makeEvent("verify", "after", {
+          verification,
+          startCommit: ctx.startCommit,
+        }),
+      );
+      this.endStep(
+        "verify",
+        result.success ? "done" : "failed",
+        verification.reason,
+        result.totalVerifyMs,
+      );
+    } else {
+      // Single-shot execution (with optional approved plan)
+      const workerResult = await this.workerPhase.workerExecute(task, {
+        ...brainOpts,
+        approvedPlan: ctx.approvedPlan,
+      });
+      if (workerResult.costUsd > 0)
+        await this.costTracker.addCost(task.id, workerResult.costUsd);
+
+      await this.taskStore.addLog({
+        task_id: task.id,
+        phase: "execute",
+        agent: "claude-code",
+        input_summary: task.task_description,
+        output_summary: workerResult.text,
+        cost_usd: workerResult.costUsd,
+        duration_ms: workerResult.durationMs,
+      });
+      // isError is a warning, not a gate — hardVerify makes the final call
+      let workerErrMsg: string | undefined;
+      if (workerResult.isError) {
+        workerErrMsg = `Worker reported error: ${workerResult.errors.join("; ") || "unknown error"}`;
+        log.warn(workerErrMsg);
+        await this.taskStore.addLog({
+          task_id: task.id,
+          phase: "execute",
+          agent: "worker",
+          input_summary: "worker reported isError",
+          output_summary: workerErrMsg,
+          cost_usd: 0,
+          duration_ms: 0,
+        });
+      }
+      // Hard verification — always runs regardless of workerResult.isError
+      this.endStep("execute", "done");
+      this.eventBus.emit(
+        this.makeEvent("execute", "after", {
+          startCommit: ctx.startCommit,
+          result: {
+            costUsd: workerResult.costUsd,
+            durationMs: workerResult.durationMs,
+          },
+        }),
+      );
+      try {
+        this.beginStep("verify");
+        this.setState("reviewing");
+        const verifyStart = Date.now();
+        const singleVerify = await this.maintenance.hardVerify(
+          ctx.baseline,
+          ctx.startCommit,
+          ctx.projectPath,
+        );
+        await this.taskStore.addLog({
+          task_id: task.id,
+          phase: "verify",
+          agent: "tsc",
+          input_summary: `baseline=${JSON.stringify(ctx.baseline)}, startCommit=${ctx.startCommit}${workerResult.isError ? ", workerError=true" : ""}`,
+          output_summary: singleVerify.passed
+            ? "PASS"
+            : `FAIL: ${singleVerify.reason}`,
+          cost_usd: 0,
+          duration_ms: Date.now() - verifyStart,
+        });
+        this.eventBus.emit(
+          this.makeEvent("verify", "after", {
+            verification: singleVerify,
+            startCommit: ctx.startCommit,
+          }),
+        );
+
+        // HALT retry loop: fix up to maxRetries times
+        const maxRetries = this.config.values.autonomy.maxRetries;
+        let fixAttempts = 0;
+        let currentSessionId = workerResult.sessionId;
+
+        while (
+          !singleVerify.passed &&
+          currentSessionId &&
+          fixAttempts < maxRetries
+        ) {
+          fixAttempts++;
+          log.warn(
+            `Hard verification failed (attempt ${fixAttempts}/${maxRetries}): ${singleVerify.reason}`,
+          );
+          const fixResult = await this.workerPhase.workerFix(
+            currentSessionId,
+            singleVerify.reason ?? "Unknown error",
+            task,
+          );
+          if (fixResult.costUsd > 0)
+            await this.costTracker.addCost(task.id, fixResult.costUsd);
+          currentSessionId = fixResult.sessionId ?? currentSessionId;
+
+          const changedFilesForCommit = await getModifiedAndAddedFiles(
+            ctx.projectPath,
+          ).catch(() => []);
+          try {
+            await commitAll(
+              "db-coder: fix verification issues",
+              ctx.projectPath,
+              changedFilesForCommit,
+            );
+          } catch (commitErr) {
+            log.error(
+              `commitAll failed during verification retry ${fixAttempts}: ${commitErr}`,
+            );
+            singleVerify.reason = `commitAll failed: ${commitErr}`;
+            break;
+          }
+          const reVerify = await this.maintenance.hardVerify(
+            ctx.baseline,
+            ctx.startCommit,
+            ctx.projectPath,
+          );
+          singleVerify.passed = reVerify.passed;
+          singleVerify.reason = reVerify.reason;
+          this.eventBus.emit(
+            this.makeEvent("fix", "after", { verification: singleVerify }),
+          );
+        }
+
+        if (!singleVerify.passed && fixAttempts >= maxRetries) {
+          log.warn(
+            `HALT after ${fixAttempts} fix attempts: ${singleVerify.reason}`,
+          );
+          await this.taskStore.addLog({
+            task_id: task.id,
+            phase: "halt-learning",
+            agent: "system",
+            input_summary: "HALT triggered",
+            output_summary: `HALT triggered: ${singleVerify.reason} (after ${fixAttempts} attempts)`,
+            cost_usd: 0,
+            duration_ms: 0,
+          });
+        }
+
+        workerPassed = singleVerify.passed;
+        workerSessionId = currentSessionId;
+        verification.passed = singleVerify.passed;
+        verification.reason = singleVerify.reason;
+
+        this.endStep(
+          "verify",
+          singleVerify.passed ? "done" : "failed",
+          singleVerify.reason,
+        );
+        if (!singleVerify.passed) {
+          const executeStep = this.tracker
+            .getCycleSteps()
+            .find((s) => s.phase === "execute");
+          if (executeStep?.finishedAt != null) {
+            this.updateStepStatus("execute", "failed", singleVerify.reason);
+          } else if (executeStep) {
+            log.info(
+              "Skipping execute step status update: step not yet finished",
+              {
+                hasStep: !!executeStep,
+                finishedAt: executeStep?.finishedAt,
+              },
+            );
+          } else {
+            log.info("Skipping execute step status update: step not found");
+          }
+        }
+      } catch (verifyErr) {
+        const errMsg =
+          verifyErr instanceof Error ? verifyErr.message : String(verifyErr);
+        try {
+          this.endStep("verify", "failed", `Exception: ${errMsg}`);
+        } catch (statusErr) {
+          log.warn(
+            "endStep('verify') failed in catch(verifyErr), preserving original error",
+            { statusErr },
+          );
+        }
+        const finished = findFinishedStepsByPhase(
+          [...this.tracker.getCycleSteps()],
+          "execute",
+        );
+        if (finished) {
+          try {
+            this.updateStepStatus(
+              "execute",
+              "failed",
+              `Verification phase exception: ${errMsg}`,
+            );
+          } catch (statusErr) {
+            log.warn(
+              "updateStepStatus('execute') failed in catch(verifyErr), preserving original error",
+              { statusErr },
+            );
+          }
+        } else {
+          const execStepExists = this.tracker
+            .getCycleSteps()
+            .some((s) => s.phase === "execute");
+          log.warn(
+            "Skipping updateStepStatus('execute') in catch(verifyErr): execute step not found or not finished",
+            { exists: execStepExists },
+          );
+          if (execStepExists) {
+            try {
+              await this.taskStore.addLog({
+                task_id: task.id,
+                phase: "execute",
+                agent: "system",
+                input_summary: "execute step status persistence fallback",
+                output_summary: `execute step not finished when verification threw: ${errMsg}`,
+                cost_usd: 0,
+                duration_ms: 0,
+              });
+            } catch (logErr) {
+              log.warn(
+                "taskStore.addLog fallback failed in catch(verifyErr)",
+                { logErr },
+              );
+            }
+          }
+        }
+        throw verifyErr;
+      }
+    }
+
+    return { workerPassed, workerSessionId, verification };
+  }
+
+  /** Code review + brain decision + fix/rewrite loop. Returns whether to merge. */
+  private async reviewTask(
+    task: Task,
+    ctx: PipelineCtx & {
+      workerPassed: boolean;
+      workerSessionId?: string;
+      verification: { passed: boolean; reason?: string };
+    },
+  ): Promise<boolean> {
+    this.beginStep("review");
+    let shouldMerge = false;
+
+    if (ctx.workerPassed) {
+      this.setState("reviewing");
+      const reviewResult = await this.review.codeReview(
+        task,
+        ctx.startCommit,
+        ctx.projectPath,
+        ctx.taskReviewer,
+      );
+
+      // Store review results for traceability
+      await this.taskStore.updateTask(task.id, {
+        review_results: reviewResult.issues ?? [],
+      });
+
+      if (!reviewResult.passed) {
+        log.info(`Code review: FAIL — ${reviewResult.summary}`, {
+          issues: (reviewResult.issues ?? []).length,
+          reviewer: ctx.taskReviewer.name,
+        });
+      } else {
+        log.info(`Code review: PASS — ${reviewResult.summary}`);
+      }
+
+      // 8. Brain decision phase
+      if (ctx.workerPassed && reviewResult.passed) {
+        // Both verify and review passed → merge
+        shouldMerge = true;
+      } else if (ctx.workerPassed) {
+        // Verify passed but review failed → brain decides
+        const decision = await this.brain.brainReviewDecision(
+          task,
+          reviewResult,
+          reviewResult.reviewDiff,
+          false,
+        );
+        log.info(
+          `Brain decision: ${decision.decision} — ${decision.reasoning}`,
+        );
+
+        switch (decision.decision) {
+          case "ignore":
+            shouldMerge = true;
+            break;
+
+          case "block":
+            // Leave shouldMerge = false
+            break;
+
+          case "split": {
+            shouldMerge = true; // merge current work
+            // Create new tasks for unresolved issues
+            if (decision.newTasks) {
+              for (const newTaskDesc of decision.newTasks) {
+                const { duplicate, reason } =
+                  await this.taskStore.isDuplicateTask(
+                    ctx.projectPath,
+                    newTaskDesc,
+                  );
+                if (duplicate) {
+                  log.info(
+                    `Split dedup: ${reason} — "${truncate(newTaskDesc, 100)}"`,
+                  );
+                  continue;
+                }
+                await this.taskStore.createTask(
+                  ctx.projectPath,
+                  newTaskDesc,
+                  2,
+                );
+                log.info(
+                  `Split: created follow-up task: ${truncate(newTaskDesc, 100)}`,
+                );
+              }
+            }
+            break;
+          }
+
+          case "fix":
+          case "rewrite": {
+            // Fix/rewrite loop (at most maxReviewFixes rounds)
+            const maxFixes = this.config.values.autonomy.maxReviewFixes;
+            let fixSessionId: string | undefined = ctx.workerSessionId;
+
+            for (let fixRound = 0; fixRound < maxFixes; fixRound++) {
+              const fixResult = await this.workerPhase.workerReviewFix(
+                task,
+                decision.fixInstructions ?? decision.reasoning,
+                fixSessionId,
+              );
+              fixSessionId = fixResult.sessionId;
+
+              // Commit fix changes
+              const changedFilesForCommit = await getModifiedAndAddedFiles(
+                ctx.projectPath,
+              ).catch(() => []);
+              try {
+                await commitAll(
+                  "db-coder: fix review issues",
+                  ctx.projectPath,
+                  changedFilesForCommit,
+                );
+              } catch (commitErr) {
+                log.error(
+                  `commitAll failed during review fix round ${fixRound + 1}: ${commitErr}`,
+                );
+                shouldMerge = false;
+                break;
+              }
+
+              // Re-verify
+              const reVerify = await this.maintenance.hardVerify(
+                ctx.baseline,
+                ctx.startCommit,
+                ctx.projectPath,
+              );
+              if (!reVerify.passed) {
+                log.warn(
+                  `Review fix: hardVerify failed — ${reVerify.reason}`,
+                );
+                break; // Will fall through to block
+              }
+
+              // Re-review
+              const reReview = await this.review.codeReview(
+                task,
+                ctx.startCommit,
+                ctx.projectPath,
+                ctx.taskReviewer,
+              );
+              if (reReview.passed) {
+                shouldMerge = true;
+                break;
+              }
+
+              // Still failing — brain makes final decision (only ignore/block/split)
+              const finalDecision = await this.brain.brainReviewDecision(
+                task,
+                reReview,
+                reReview.reviewDiff,
+                true, // isRetry: restricts to ignore/block/split
+              );
+              log.info(
+                `Brain final decision: ${finalDecision.decision} — ${finalDecision.reasoning}`,
+              );
+
+              if (finalDecision.decision === "ignore") {
+                shouldMerge = true;
+              } else if (finalDecision.decision === "split") {
+                shouldMerge = true;
+                if (finalDecision.newTasks) {
+                  for (const newTaskDesc of finalDecision.newTasks) {
+                    const { duplicate, reason } =
+                      await this.taskStore.isDuplicateTask(
+                        ctx.projectPath,
+                        newTaskDesc,
+                      );
+                    if (duplicate) {
+                      log.info(
+                        `Split dedup: ${reason} — "${truncate(newTaskDesc, 100)}"`,
+                      );
+                      continue;
+                    }
+                    await this.taskStore.createTask(
+                      ctx.projectPath,
+                      newTaskDesc,
+                      2,
+                    );
+                    log.info(
+                      `Split: created follow-up task: ${truncate(newTaskDesc, 100)}`,
+                    );
+                  }
+                }
+              }
+              // else: block (shouldMerge stays false)
+              break; // Only 1 retry round in the loop
+            }
+            break;
+          }
+        }
+      }
+    }
+
+    this.endStep(
+      "review",
+      shouldMerge ? "done" : "failed",
+      shouldMerge ? "PASS" : "Review rejected",
+    );
+    this.eventBus.emit(
+      this.makeEvent("review", "after", { passed: shouldMerge }),
+    );
+    return shouldMerge;
+  }
+
+  /** Brain reflects + merge or cleanup. */
+  private async reflectAndMerge(
+    task: Task,
+    shouldMerge: boolean,
+    ctx: PipelineCtx & { verification: { passed: boolean; reason?: string } },
   ): Promise<void> {
-    return this.brain.brainReflect(task, outcome, verification, projectPath);
+    // 9. Brain reflects and learns
+    this.beginStep("reflect");
+    this.setState("reflecting");
+    const outcome = shouldMerge ? "success" : "failed";
+    try {
+      await this.brain.brainReflect(
+        task,
+        outcome,
+        ctx.verification,
+        ctx.projectPath,
+      );
+      this.endStep("reflect", "done");
+      this.eventBus.emit(this.makeEvent("reflect", "after"));
+    } catch (reflectErr) {
+      log.warn(
+        `brainReflect failed (non-fatal, continuing merge flow): ${reflectErr}`,
+      );
+      this.endStep("reflect", "failed", `brainReflect error: ${reflectErr}`);
+      this.eventBus.emit(
+        this.makeEvent("reflect", "after", { error: true }),
+      );
+    }
+
+    // 10. Merge or cleanup
+    this.beginStep("merge");
+    if (shouldMerge) {
+      await switchBranch(ctx.originalBranch, ctx.projectPath);
+      await mergeBranch(ctx.branchName, ctx.projectPath);
+      try {
+        await deleteBranch(ctx.branchName, ctx.projectPath);
+      } catch (delErr) {
+        log.warn(
+          `deleteBranch failed (non-fatal, merge already succeeded): ${delErr}`,
+        );
+      }
+      log.info(
+        `Task completed and merged: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`,
+      );
+      await this.taskStore.updateTask(task.id, {
+        status: "done",
+        phase: "done",
+      });
+      this.endStep("merge", "done", "Merged");
+      this.consecutiveRejections = 0;
+      this.eventBus.emit(
+        this.makeEvent("merge", "after", {
+          merged: true,
+          taskDescription: task.task_description,
+        }),
+      );
+
+      // Self-modification: rebuild after merging own code changes
+      if (this.isSelfProject()) {
+        const buildResult = await safeBuild(ctx.projectPath);
+        if (buildResult.success) {
+          this.restartPending = true;
+          log.info("Self-build succeeded, restart pending");
+        } else {
+          this.writeBuildError(buildResult.error);
+        }
+      }
+    } else {
+      await switchBranch(ctx.originalBranch, ctx.projectPath).catch(() => {});
+      await this.cleanupTaskBranch(ctx.branchName, {
+        startCommit: ctx.startCommit,
+      });
+      log.warn(
+        `Task rejected: ${truncate(task.task_description, TASK_DESC_MAX_LENGTH)}`,
+      );
+      await this.taskStore.updateTask(task.id, {
+        status: "blocked",
+        phase: "blocked",
+      });
+      this.endStep("merge", "failed", "Rejected");
+      this.eventBus.emit(
+        this.makeEvent("merge", "after", { merged: false }),
+      );
+
+      this.consecutiveRejections++;
+      if (this.consecutiveRejections >= 5) {
+        try {
+          await this.maintenance.pipelineHealthCheck(ctx.projectPath);
+        } catch (err) {
+          log.warn("Pipeline health check failed", err);
+        }
+        this.consecutiveRejections = 0;
+      }
+    }
   }
 
-  // --- Pipeline health check (auto-diagnosis) ---
+  /** Fire-and-forget periodic tasks (chain scan, CLAUDE.md maintenance). */
+  private doPeriodicTasks(projectPath: string): void {
+    this.tasksCompleted++;
+    const { chainScan } = this.config.values.brain;
+    if (
+      chainScan.enabled &&
+      this.tasksCompleted % chainScan.interval === 0
+    ) {
+      (async () => {
+        this.eventBus.emit(this.makeEvent("deep-review", "before"));
+        await this.chainScanner.scanNext(projectPath);
+        this.eventBus.emit(this.makeEvent("deep-review", "after"));
+      })().catch((err) => log.warn("Chain scan failed", err));
+    }
 
-  private async pipelineHealthCheck(projectPath: string): Promise<void> {
-    return this.maintenance.pipelineHealthCheck(projectPath);
-  }
-
-  // --- Periodic CLAUDE.md maintenance ---
-
-  private async claudeMdMaintenance(projectPath: string): Promise<void> {
-    return this.maintenance.claudeMdMaintenance(projectPath);
+    const {
+      claudeMdMaintenanceEnabled: maintEnabled,
+      claudeMdMaintenanceInterval: maintInterval,
+    } = this.config.values.brain;
+    if (
+      maintEnabled &&
+      maintInterval > 0 &&
+      this.tasksCompleted % maintInterval === 0
+    ) {
+      this.maintenance
+        .claudeMdMaintenance(projectPath)
+        .catch((err) => log.warn("CLAUDE.md maintenance failed", err));
+    }
   }
 
   // --- State management (delegates to CycleStepTracker) ---
