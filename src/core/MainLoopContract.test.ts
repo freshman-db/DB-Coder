@@ -22,6 +22,10 @@ import { MainLoop } from "./MainLoop.js";
 import { CYCLE_PIPELINE } from "./types.js";
 import type { StatusSnapshot, CycleStep } from "./types.js";
 import { CycleStepTracker } from "./StepTracker.js";
+import {
+  MaintenancePhase,
+  setCleanupBranchDepsForTests,
+} from "./phases/MaintenancePhase.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -542,64 +546,75 @@ describe("MainLoop contract: skipRemainingSteps", () => {
 // ---------------------------------------------------------------------------
 
 describe("MainLoop contract: cleanupTaskBranch", () => {
-  it("preserves branch when worker has commits (branchHead !== startCommit)", async () => {
-    const loop = createStub();
-    const any = loop as unknown as Record<string, unknown>;
-    const logged: string[] = [];
-
-    // Mock getBranchHeadCommit to return different commit
-    any.cleanupTaskBranch = async (
-      branch: string,
-      opts?: { force?: boolean; startCommit?: string },
-    ) => {
-      // Reproduce the logic: if branchHead !== startCommit, preserve
-      if (opts?.force) {
-        logged.push(`force-deleted:${branch}`);
-        return;
-      }
-      if (opts?.startCommit) {
-        const branchHead = "commit-abc"; // different from startCommit
-        if (branchHead === opts.startCommit) {
-          logged.push(`deleted:${branch}`);
-          return;
-        }
-      }
-      logged.push(`preserved:${branch}`);
+  /**
+   * Wire a real MaintenancePhase into the stub so calls go through
+   * MainLoop.cleanupTaskBranch → MaintenancePhase.cleanupTaskBranch → mocked git.
+   */
+  function wireMaintenancePhase(loop: MainLoop): void {
+    const phase = Object.create(MaintenancePhase.prototype) as MaintenancePhase;
+    (phase as unknown as Record<string, unknown>).config = {
+      projectPath: "/tmp/contract-test",
     };
+    (loop as unknown as Record<string, unknown>).maintenance = phase;
+  }
 
-    await (any.cleanupTaskBranch as Function)("db-coder/task-1", {
+  it("preserves branch when worker has commits (branchHead !== startCommit)", async (t) => {
+    const loop = createStub();
+    wireMaintenancePhase(loop);
+    const deleted: string[] = [];
+
+    setCleanupBranchDepsForTests({
+      getBranchHeadCommit: async () => "commit-abc",
+      forceDeleteBranch: async (b) => {
+        deleted.push(b);
+      },
+    });
+    t.after(() => setCleanupBranchDepsForTests());
+
+    const any = loop as unknown as Record<string, Function>;
+    await any.cleanupTaskBranch("db-coder/task-1", {
       startCommit: "commit-000",
     });
-    assert.equal(logged[0], "preserved:db-coder/task-1");
+    assert.equal(deleted.length, 0, "branch should be preserved, not deleted");
   });
 
-  it("deletes branch when no worker output (branchHead === startCommit)", async () => {
+  it("deletes branch when no worker output (branchHead === startCommit)", async (t) => {
     const loop = createStub();
-    const any = loop as unknown as Record<string, unknown>;
-    const logged: string[] = [];
+    wireMaintenancePhase(loop);
+    const deleted: string[] = [];
 
-    any.cleanupTaskBranch = async (
-      branch: string,
-      opts?: { force?: boolean; startCommit?: string },
-    ) => {
-      if (opts?.force) {
-        logged.push(`force-deleted:${branch}`);
-        return;
-      }
-      if (opts?.startCommit) {
-        const branchHead = opts.startCommit; // same as startCommit
-        if (branchHead === opts.startCommit) {
-          logged.push(`deleted:${branch}`);
-          return;
-        }
-      }
-      logged.push(`preserved:${branch}`);
-    };
+    setCleanupBranchDepsForTests({
+      getBranchHeadCommit: async () => "commit-abc",
+      forceDeleteBranch: async (b) => {
+        deleted.push(b);
+      },
+    });
+    t.after(() => setCleanupBranchDepsForTests());
 
-    await (any.cleanupTaskBranch as Function)("db-coder/task-1", {
+    const any = loop as unknown as Record<string, Function>;
+    await any.cleanupTaskBranch("db-coder/task-1", {
       startCommit: "commit-abc",
     });
-    assert.equal(logged[0], "deleted:db-coder/task-1");
+    assert.equal(deleted.length, 1);
+    assert.equal(deleted[0], "db-coder/task-1");
+  });
+
+  it("force-deletes branch regardless of commits", async (t) => {
+    const loop = createStub();
+    wireMaintenancePhase(loop);
+    const deleted: string[] = [];
+
+    setCleanupBranchDepsForTests({
+      forceDeleteBranch: async (b) => {
+        deleted.push(b);
+      },
+    });
+    t.after(() => setCleanupBranchDepsForTests());
+
+    const any = loop as unknown as Record<string, Function>;
+    await any.cleanupTaskBranch("db-coder/task-1", { force: true });
+    assert.equal(deleted.length, 1);
+    assert.equal(deleted[0], "db-coder/task-1");
   });
 });
 

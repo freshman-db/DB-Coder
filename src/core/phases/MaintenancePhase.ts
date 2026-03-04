@@ -35,6 +35,30 @@ import { join, basename } from "node:path";
 import { homedir } from "node:os";
 
 // ---------------------------------------------------------------------------
+// cleanupTaskBranch — DI seam for testing
+// ---------------------------------------------------------------------------
+
+type CleanupBranchDeps = {
+  forceDeleteBranch: (branch: string, cwd: string) => Promise<void>;
+  getBranchHeadCommit: (branch: string, cwd: string) => Promise<string>;
+};
+
+const defaultCleanupBranchDeps: CleanupBranchDeps = {
+  forceDeleteBranch,
+  getBranchHeadCommit,
+};
+
+let cleanupBranchDeps: CleanupBranchDeps = defaultCleanupBranchDeps;
+
+export function setCleanupBranchDepsForTests(
+  overrides?: Partial<CleanupBranchDeps>,
+): void {
+  cleanupBranchDeps = overrides
+    ? { ...defaultCleanupBranchDeps, ...overrides }
+    : defaultCleanupBranchDeps;
+}
+
+// ---------------------------------------------------------------------------
 // countTscErrors — DI seam for testing
 // ---------------------------------------------------------------------------
 
@@ -207,17 +231,23 @@ export class MaintenancePhase {
   ): Promise<void> {
     try {
       if (opts?.force) {
-        await forceDeleteBranch(branch, this.config.projectPath);
+        await cleanupBranchDeps.forceDeleteBranch(
+          branch,
+          this.config.projectPath,
+        );
         return;
       }
       // Compare branch HEAD with startCommit: identical means no worker output
       if (opts?.startCommit) {
-        const branchHead = await getBranchHeadCommit(
+        const branchHead = await cleanupBranchDeps.getBranchHeadCommit(
           branch,
           this.config.projectPath,
         );
         if (branchHead === opts.startCommit) {
-          await forceDeleteBranch(branch, this.config.projectPath);
+          await cleanupBranchDeps.forceDeleteBranch(
+            branch,
+            this.config.projectPath,
+          );
           return;
         }
       }

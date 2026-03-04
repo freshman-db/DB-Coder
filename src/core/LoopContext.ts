@@ -1,8 +1,9 @@
 /**
- * LoopContext — Read-only service bag shared by all phases.
+ * LoopContext — Planned: read-only service bag for all phases.
  *
- * Every phase receives a LoopContext at construction time.
- * The context is built once in MainLoop's constructor and never mutated.
+ * NOT YET WIRED — phases currently receive dependencies via their constructors.
+ * This interface defines the target shape for consolidating phase construction
+ * into a single context object. Do not reference until wiring is implemented.
  */
 
 import type { Config } from "../config/Config.js";
