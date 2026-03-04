@@ -105,6 +105,9 @@ CREATE TABLE IF NOT EXISTS plan_chat_messages (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE INDEX IF NOT EXISTS idx_plan_chat_messages_first_user_msg
+  ON plan_chat_messages (session_id, role, created_at ASC);
+
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS evaluation_score JSONB;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS evaluation_reasoning TEXT DEFAULT '';
 
@@ -733,17 +736,24 @@ export class TaskStore {
     status?: PlanReviewStatus,
   ): Promise<PlanDraft[]> {
     const sql = this.getSql();
+    const firstMsgSubquery = sql`(
+      SELECT LEFT(content, 100) FROM plan_chat_messages
+      WHERE session_id = pd.id AND role = 'user'
+      ORDER BY created_at ASC LIMIT 1
+    )`;
     if (status) {
       return sql<PlanDraft[]>`
-        SELECT * FROM plan_drafts
-        WHERE project_path = ${projectPath} AND status = ${status}
-        ORDER BY created_at DESC
+        SELECT pd.*, ${firstMsgSubquery} AS first_message
+        FROM plan_drafts pd
+        WHERE pd.project_path = ${projectPath} AND pd.status = ${status}
+        ORDER BY pd.created_at DESC
       `;
     }
     return sql<PlanDraft[]>`
-      SELECT * FROM plan_drafts
-      WHERE project_path = ${projectPath}
-      ORDER BY created_at DESC
+      SELECT pd.*, ${firstMsgSubquery} AS first_message
+      FROM plan_drafts pd
+      WHERE pd.project_path = ${projectPath}
+      ORDER BY pd.created_at DESC
     `;
   }
 
@@ -809,6 +819,20 @@ export class TaskStore {
     await sql`
       UPDATE plan_drafts SET chat_status = ${status} WHERE id = ${draftId}
     `;
+  }
+
+  /** Close chat sessions stuck in active states (chatting/researching/generating)
+   *  for the given project. Called on startup since in-memory state is lost. */
+  async closeStaleChatSessions(projectPath: string): Promise<number> {
+    const sql = this.getSql();
+    const rows = await sql`
+      UPDATE plan_drafts
+      SET chat_status = 'closed'
+      WHERE project_path = ${projectPath}
+        AND chat_status IN ('chatting', 'researching', 'generating')
+      RETURNING id
+    `;
+    return rows.length;
   }
 
   async updateChatSessionId(

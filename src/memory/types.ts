@@ -181,6 +181,7 @@ export interface PlanDraft {
   chat_status: ChatStatus | null; // chat lifecycle status
   created_at: Date;
   reviewed_at: Date | null;
+  first_message?: string; // first user message (populated by listPlanDrafts)
 }
 
 export interface ChatMessage {

@@ -1390,10 +1390,11 @@ async function renderPlans() {
                 const st = chatSt || planSt;
                 const taskCount = d.plan?.tasks?.length ?? 0;
                 const title = d.chat_status
-                  ? (d.markdown || "").split("\\n")[0].slice(0, 80) ||
-                    "对话 #" + d.id
+                  ? (d.first_message || d.markdown || "")
+                      .split("\n")[0]
+                      .slice(0, 80) || "对话 #" + d.id
                   : (d.markdown || d.reasoning || "")
-                      .split("\\n")[0]
+                      .split("\n")[0]
                       .slice(0, 80) || "计划 #" + d.id;
                 return `
             <div class="list-item" data-action="navigate" data-id="#/plans/${escapeHtml(String(d.id ?? ""))}">

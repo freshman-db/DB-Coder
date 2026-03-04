@@ -136,6 +136,9 @@ program
     );
     const patrolManager = new PatrolManager(mainLoop, taskStore, projectPath);
     const planChat = new PlanChatManager(taskStore, config);
+    const staleClosed = await taskStore.closeStaleChatSessions(projectPath);
+    if (staleClosed > 0)
+      log.info(`Closed ${staleClosed} stale chat session(s)`);
 
     const server = new Server(
       config,
