@@ -408,3 +408,21 @@ test("tryParseReview coerces file: null to undefined", () => {
   const parsed = tryParseReview(json);
   assert.equal(parsed.issues[0].file, undefined);
 });
+
+test("tryParseReview filters out non-object array elements (null, array, number)", () => {
+  const json = JSON.stringify({
+    passed: false,
+    issues: [
+      null,
+      [],
+      { severity: "high", description: "real issue" },
+      42,
+      { severity: "medium", description: "another real issue" },
+    ],
+    summary: "",
+  });
+  const parsed = tryParseReview(json);
+  assert.equal(parsed.issues.length, 2);
+  assert.equal(parsed.issues[0].severity, "high");
+  assert.equal(parsed.issues[1].severity, "medium");
+});
