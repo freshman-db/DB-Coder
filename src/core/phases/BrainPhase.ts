@@ -522,8 +522,8 @@ ${analysisReport}
       parts.push(
         `Health: passRate=${metrics.taskPassRate}%, dailyCost=$${metrics.dailyCostUsd.toFixed(2)}, queue=${metrics.queueDepth}`,
       );
-    } catch {
-      /* metrics not critical */
+    } catch (e) {
+      log.debug("gatherBrainContext: metrics failed:", e);
     }
 
     // Strategy context (quality alerts + priority suggestions)
@@ -534,8 +534,8 @@ ${analysisReport}
         const priorityCtx =
           await this.strategies.dynamicPriority.getContextForBrain();
         if (priorityCtx) parts.push(priorityCtx);
-      } catch {
-        /* priority suggestions not critical */
+      } catch (e) {
+        log.debug("gatherBrainContext: priority suggestions failed:", e);
       }
     }
 
@@ -549,8 +549,8 @@ ${analysisReport}
         );
         parts.push(`## Recent Reflection Lessons\n${lines.join("\n")}`);
       }
-    } catch {
-      /* reflections not critical */
+    } catch (e) {
+      log.debug("gatherBrainContext: reflections failed:", e);
     }
 
     // claude-mem: semantic experience search
@@ -587,8 +587,8 @@ ${analysisReport}
             );
           }
         }
-      } catch {
-        /* claude-mem not critical */
+      } catch (e) {
+        log.debug("gatherBrainContext: claude-mem failed:", e);
       }
     }
 
@@ -614,8 +614,8 @@ ${analysisReport}
           );
         }
       }
-    } catch {
-      /* hot files not critical */
+    } catch (e) {
+      log.debug("gatherBrainContext: hot files failed:", e);
     }
 
     return parts.join("\n\n");
