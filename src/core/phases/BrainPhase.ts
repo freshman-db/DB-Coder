@@ -484,13 +484,22 @@ ${analysisReport}
       15,
     );
     const recentTasks = recentResult.tasks ?? [];
-    if (recentTasks.length > 0) {
-      const reflections = await this.taskStore.getRecentReflections(
+    let recentReflections: Array<{
+      task_description: string;
+      status: string;
+      lesson: string;
+    }> = [];
+    try {
+      recentReflections = await this.taskStore.getRecentReflections(
         projectPath,
         15,
       );
+    } catch (error) {
+      if (recentTasks.length > 0) throw error;
+    }
+    if (recentTasks.length > 0) {
       const lessonByDesc = new Map(
-        reflections.map((r) => [r.task_description, r.lesson]),
+        recentReflections.map((r) => [r.task_description, r.lesson]),
       );
       const lines = recentTasks.map((t: Task) => {
         const lesson = lessonByDesc.get(t.task_description) ?? "";
@@ -537,10 +546,7 @@ ${analysisReport}
 
     // Recent reflection lessons (close the feedback loop)
     try {
-      const reflections = await this.taskStore.getRecentReflections(
-        projectPath,
-        5,
-      );
+      const reflections = recentReflections.slice(0, 5);
       if (reflections.length > 0) {
         const lines = reflections.map(
           (r) =>
