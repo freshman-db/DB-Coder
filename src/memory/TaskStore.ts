@@ -821,18 +821,18 @@ export class TaskStore {
     `;
   }
 
-  /** Close chat sessions stuck in active states (chatting/researching/generating)
-   *  for the given project. Called on startup since in-memory state is lost. */
-  async closeStaleChatSessions(projectPath: string): Promise<number> {
+  /** Return chat sessions in active states (chatting/researching/generating)
+   *  for the given project. Used on startup to restore in-memory session map. */
+  async getActiveChatSessions(
+    projectPath: string,
+  ): Promise<Pick<PlanDraft, "id" | "chat_session_id" | "chat_status">[]> {
     const sql = this.getSql();
-    const rows = await sql`
-      UPDATE plan_drafts
-      SET chat_status = 'closed'
+    return sql<Pick<PlanDraft, "id" | "chat_session_id" | "chat_status">[]>`
+      SELECT id, chat_session_id, chat_status
+      FROM plan_drafts
       WHERE project_path = ${projectPath}
         AND chat_status IN ('chatting', 'researching', 'generating')
-      RETURNING id
     `;
-    return rows.length;
   }
 
   async updateChatSessionId(

@@ -194,6 +194,39 @@ export class PlanChatManager {
     return created;
   }
 
+  /** Restore in-memory session map from DB on startup (no processes to check —
+   *  Claude Code sessions are file-based and always resumable).
+   *  Normalises DB status to 'chatting' for any mid-flight states
+   *  (researching/generating) since the process that was running is gone. */
+  async restoreSessions(): Promise<number> {
+    const rows = await this.taskStore.getActiveChatSessions(
+      this.config.projectPath,
+    );
+    let restored = 0;
+    for (const row of rows) {
+      if (this.sessions.has(row.id)) continue;
+      if (row.chat_status !== "chatting") {
+        try {
+          await this.taskStore.updateChatStatus(row.id, "chatting");
+        } catch (err) {
+          log.warn("Failed to normalise chat status for session", {
+            draftId: row.id,
+            error: err,
+          });
+        }
+      }
+      this.sessions.set(row.id, {
+        draftId: row.id,
+        sessionId: row.chat_session_id || "",
+        status: "chatting",
+        listeners: new Set(),
+        accumulatedText: "",
+      });
+      restored++;
+    }
+    return restored;
+  }
+
   async closeSession(draftId: number): Promise<void> {
     const session = this.sessions.get(draftId);
     if (session) {

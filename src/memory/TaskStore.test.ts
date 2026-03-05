@@ -388,16 +388,18 @@ describe("TaskStore plan draft JSONB columns", () => {
     assert.deepEqual(taggedCalls[0].values[3], { __json: {} });
   });
 
-  test("closeStaleChatSessions scopes update to given projectPath", async () => {
-    const { sql, taggedCalls } = createSqlMock(() => [{ id: 5 }, { id: 9 }]);
+  test("getActiveChatSessions returns rows for given projectPath", async () => {
+    const { sql, taggedCalls } = createSqlMock(() => [
+      { id: 5, chat_session_id: "sess-a", chat_status: "chatting" },
+      { id: 9, chat_session_id: null, chat_status: "researching" },
+    ]);
     const store = createTaskStore(sql);
 
-    const count = await store.closeStaleChatSessions("/my/project");
+    const rows = await store.getActiveChatSessions("/my/project");
 
-    assert.equal(count, 2);
+    assert.equal(rows.length, 2);
     assert.equal(taggedCalls.length, 1);
     assert.ok(taggedCalls[0].text.includes("project_path = $1"));
-    assert.ok(taggedCalls[0].text.includes("chat_status = 'closed'"));
     assert.ok(
       taggedCalls[0].text.includes(
         "chat_status IN ('chatting', 'researching', 'generating')",
