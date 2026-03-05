@@ -49,6 +49,28 @@ type PlanOutput = {
   tasks: { description: string; priority: number }[];
 };
 
+/**
+ * Validate raw LLM JSON output into a PlanOutput.
+ * Invalid task elements are filtered out rather than rejecting the whole plan.
+ * @internal exported for unit testing only
+ */
+export function validatePlanOutput(raw: unknown): PlanOutput | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj["summary"] !== "string") return undefined;
+  if (!Array.isArray(obj["tasks"])) return undefined;
+
+  const validTasks = (obj["tasks"] as unknown[]).filter(
+    (t): t is { description: string; priority: number } =>
+      typeof t === "object" &&
+      t !== null &&
+      typeof (t as Record<string, unknown>)["description"] === "string" &&
+      typeof (t as Record<string, unknown>)["priority"] === "number",
+  );
+
+  return { summary: obj["summary"], tasks: validTasks };
+}
+
 export class PlanChatManager {
   private sessions = new Map<number, ActiveSession>();
 
@@ -149,7 +171,7 @@ export class PlanChatManager {
 
       session.sessionId = result.sessionId;
 
-      const plan = result.json as PlanOutput | undefined;
+      const plan = validatePlanOutput(result.json);
       if (plan?.tasks?.length) {
         await this.taskStore.updatePlanDraftPlan(draftId, {
           plan: { tasks: plan.tasks },

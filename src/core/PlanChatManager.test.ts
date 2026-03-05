@@ -1,6 +1,6 @@
 import { describe, test, mock } from "node:test";
 import assert from "node:assert/strict";
-import { PlanChatManager } from "./PlanChatManager.js";
+import { PlanChatManager, validatePlanOutput } from "./PlanChatManager.js";
 import type { TaskStore } from "../memory/TaskStore.js";
 import type { Config } from "../config/Config.js";
 
@@ -29,6 +29,106 @@ function createMockConfig(projectPath = "/test/project"): Config {
     values: { brain: { model: "sonnet", maxScanBudget: 1 } },
   } as unknown as Config;
 }
+
+describe("validatePlanOutput", () => {
+  test("returns undefined for null", () => {
+    assert.equal(validatePlanOutput(null), undefined);
+  });
+
+  test("returns undefined for non-object primitives", () => {
+    assert.equal(validatePlanOutput("string"), undefined);
+    assert.equal(validatePlanOutput(42), undefined);
+    assert.equal(validatePlanOutput(true), undefined);
+  });
+
+  test("returns undefined when summary is missing", () => {
+    assert.equal(validatePlanOutput({ tasks: [] }), undefined);
+  });
+
+  test("returns undefined when summary is not a string", () => {
+    assert.equal(validatePlanOutput({ summary: 123, tasks: [] }), undefined);
+  });
+
+  test("returns undefined when tasks is missing", () => {
+    assert.equal(validatePlanOutput({ summary: "ok" }), undefined);
+  });
+
+  test("returns undefined when tasks is not an array", () => {
+    assert.equal(
+      validatePlanOutput({ summary: "ok", tasks: "bad" }),
+      undefined,
+    );
+  });
+
+  test("returns valid plan with all valid tasks", () => {
+    const result = validatePlanOutput({
+      summary: "Plan summary",
+      tasks: [
+        { description: "task one", priority: 1 },
+        { description: "task two", priority: 2 },
+      ],
+    });
+    assert.deepEqual(result, {
+      summary: "Plan summary",
+      tasks: [
+        { description: "task one", priority: 1 },
+        { description: "task two", priority: 2 },
+      ],
+    });
+  });
+
+  test("filters out tasks with missing description", () => {
+    const result = validatePlanOutput({
+      summary: "s",
+      tasks: [{ priority: 1 }, { description: "good task", priority: 2 }],
+    });
+    assert.deepEqual(result, {
+      summary: "s",
+      tasks: [{ description: "good task", priority: 2 }],
+    });
+  });
+
+  test("filters out tasks with non-string description", () => {
+    const result = validatePlanOutput({
+      summary: "s",
+      tasks: [
+        { description: 99, priority: 1 },
+        { description: "valid", priority: 0 },
+      ],
+    });
+    assert.deepEqual(result, {
+      summary: "s",
+      tasks: [{ description: "valid", priority: 0 }],
+    });
+  });
+
+  test("filters out tasks with non-number priority", () => {
+    const result = validatePlanOutput({
+      summary: "s",
+      tasks: [
+        { description: "bad prio", priority: "high" },
+        { description: "good", priority: 1 },
+      ],
+    });
+    assert.deepEqual(result, {
+      summary: "s",
+      tasks: [{ description: "good", priority: 1 }],
+    });
+  });
+
+  test("returns plan with empty tasks array when all tasks are invalid", () => {
+    const result = validatePlanOutput({
+      summary: "s",
+      tasks: [{ description: 1, priority: "bad" }, null, "string item"],
+    });
+    assert.deepEqual(result, { summary: "s", tasks: [] });
+  });
+
+  test("returns plan with empty tasks array for empty tasks input", () => {
+    const result = validatePlanOutput({ summary: "no tasks yet", tasks: [] });
+    assert.deepEqual(result, { summary: "no tasks yet", tasks: [] });
+  });
+});
 
 describe("PlanChatManager.restoreSessions", () => {
   test("restores chatting sessions without DB write-back", async () => {
