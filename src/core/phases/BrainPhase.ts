@@ -967,8 +967,13 @@ LESSON: <one sentence the brain should remember for next task selection>`;
           this.config.projectPath,
           `db-coder-${task.id}`,
         )
-        .catch(() => {
-          // claude-mem unavailable — not critical
+        .then((saved) => {
+          if (!saved) {
+            log.warn(`claude-mem save returned false (task ${task.id})`);
+          }
+        })
+        .catch((err: unknown) => {
+          log.warn(`claude-mem save threw (task ${task.id})`, err);
         });
     }
   }
