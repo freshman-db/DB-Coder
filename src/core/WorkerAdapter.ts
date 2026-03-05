@@ -262,7 +262,12 @@ function parseClaudeReviewOutput(text: string): Omit<ReviewResult, "cost_usd"> {
       const parsed = JSON.parse(jsonMatch[0]);
       if (typeof parsed.passed === "boolean") {
         const issues = Array.isArray(parsed.issues)
-          ? parsed.issues.map((i: Record<string, unknown>) => ({
+          ? parsed.issues
+            .filter(
+              (i: unknown): i is Record<string, unknown> =>
+                i !== null && typeof i === "object" && !Array.isArray(i),
+            )
+            .map((i: Record<string, unknown>) => ({
               severity:
                 typeof i.severity === "string" &&
                 VALID_SEVERITIES.has(i.severity as ValidSeverity)
