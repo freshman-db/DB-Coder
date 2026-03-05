@@ -106,7 +106,7 @@ test('execute runs codex with expected args and parses JSON output', async () =>
 
     const outputArgIndex = call.args.indexOf('-o');
     assert.ok(outputArgIndex >= 0);
-    assert.match(call.args[outputArgIndex + 1] ?? '', /codex-\d+\.json$/);
+    assert.match(call.args[outputArgIndex + 1] ?? '', /codex-\d+-[0-9a-f-]+\.json$/);
 
     assert.equal(call.args[outputArgIndex + 2], '--instructions');
     assert.equal(call.args[outputArgIndex + 3], 'Return JSON only');
