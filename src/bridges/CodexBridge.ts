@@ -99,12 +99,22 @@ export class CodexBridge implements CodingAgent {
     let output = "";
     try {
       output = readFileSync(outFile, "utf-8");
-      unlinkSync(outFile);
     } catch (err) {
       log.debug("CodexBridge invokeCodex output file read failed", {
         error: err,
         inputPreview: String(args.at(-1) ?? "").slice(0, 200),
       });
+    } finally {
+      try {
+        unlinkSync(outFile);
+      } catch (cleanupErr: unknown) {
+        if ((cleanupErr as NodeJS.ErrnoException).code !== "ENOENT") {
+          log.debug("CodexBridge invokeCodex temp file cleanup failed", {
+            error: cleanupErr,
+            outFile,
+          });
+        }
+      }
     }
 
     return { output, events, exitCode, stderr };
