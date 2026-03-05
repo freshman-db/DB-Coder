@@ -26,8 +26,6 @@ export async function runBrainThink(
     cwd: config.projectPath,
     timeout: 900_000,
     model: resolveModelId(config.values.brain.model),
-    thinking: { type: "adaptive" },
-    effort: "high",
     disallowedTools: ["Edit", "Write", "NotebookEdit"],
     appendSystemPrompt: isResume
       ? undefined

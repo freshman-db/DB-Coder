@@ -930,8 +930,6 @@ LESSON: <one sentence the brain should remember for next task selection>`;
       cwd: projectPath,
       timeout: 900_000,
       model: resolveModelId(this.config.values.brain.model),
-      thinking: { type: "adaptive" },
-      effort: "medium",
       appendSystemPrompt:
         "You are reflecting on a task. Do not modify source code. Do not edit CLAUDE.md unless absolutely necessary.",
       allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],

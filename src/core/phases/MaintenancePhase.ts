@@ -284,8 +284,6 @@ Multiple tasks have been rejected consecutively, suggesting a systemic pipeline 
         cwd: projectPath,
         timeout: 600_000,
         model: resolveModelId(this.config.values.brain.model),
-        thinking: { type: "adaptive" },
-        effort: "medium",
         allowedTools: [
           "Read",
           "Glob",
@@ -338,8 +336,6 @@ Rules:
         cwd: projectPath,
         timeout: 3_600_000,
         model: resolveModelId(this.config.values.brain.model),
-        thinking: { type: "adaptive" },
-        effort: "medium",
         allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
         appendSystemPrompt:
           "You are maintaining CLAUDE.md. You CAN edit CLAUDE.md. Do not modify source code.",
