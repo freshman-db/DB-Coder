@@ -1546,7 +1546,11 @@ Revise the previous proposal to address ALL issues above. Produce a complete upd
   private async doPeriodicTasks(projectPath: string): Promise<void> {
     this.tasksCompleted++;
     const { chainScan } = this.config.values.brain;
-    if (chainScan.enabled && this.tasksCompleted % chainScan.interval === 0) {
+    if (
+      chainScan.enabled &&
+      chainScan.interval > 0 &&
+      this.tasksCompleted % chainScan.interval === 0
+    ) {
       try {
         this.eventBus.emit(this.makeEvent("deep-review", "before"));
         await this.chainScanner.scanNext(projectPath);
