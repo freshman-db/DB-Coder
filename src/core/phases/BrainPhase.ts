@@ -48,10 +48,7 @@ const CLAUDE_MEM_CONTEXT_MAX_CHARS = 3500;
 // Standalone helper functions (exported for MainLoop runCycle)
 // ---------------------------------------------------------------------------
 
-export function coerceSubtaskOrder(
-  value: unknown,
-  fallback: number,
-): number {
+export function coerceSubtaskOrder(value: unknown, fallback: number): number {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 1 || !Number.isInteger(n)) return fallback;
   return n;
@@ -484,13 +481,20 @@ ${analysisReport}
       15,
     );
     const recentTasks = recentResult.tasks ?? [];
-    if (recentTasks.length > 0) {
-      const reflections = await this.taskStore.getRecentReflections(
+    let recentReflections: Awaited<
+      ReturnType<TaskStore["getRecentReflections"]>
+    > = [];
+    try {
+      recentReflections = await this.taskStore.getRecentReflections(
         projectPath,
         15,
       );
+    } catch (error) {
+      log.warn("Failed to fetch recent reflections", error);
+    }
+    if (recentTasks.length > 0) {
       const lessonByDesc = new Map(
-        reflections.map((r) => [r.task_description, r.lesson]),
+        recentReflections.map((r) => [r.task_description, r.lesson]),
       );
       const lines = recentTasks.map((t: Task) => {
         const lesson = lessonByDesc.get(t.task_description) ?? "";
@@ -537,10 +541,7 @@ ${analysisReport}
 
     // Recent reflection lessons (close the feedback loop)
     try {
-      const reflections = await this.taskStore.getRecentReflections(
-        projectPath,
-        5,
-      );
+      const reflections = recentReflections.slice(0, 5);
       if (reflections.length > 0) {
         const lines = reflections.map(
           (r) =>
