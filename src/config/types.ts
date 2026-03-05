@@ -41,7 +41,7 @@ export interface AutonomyConfig {
   maxRetries: number;
   retryBaseDelayMs: number;
   subtaskTimeout: number; // seconds
-  worker: "claude" | "codex"; // which model executes coding tasks (default "claude")
+  worker: "claude" | "codex"; // which worker executes coding tasks; reviewer auto-selects the opposite (default "claude")
   maxReviewFixes: number; // max rounds of fix-after-review (default 1)
 }
 

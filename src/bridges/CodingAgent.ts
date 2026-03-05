@@ -4,6 +4,7 @@ export interface AgentResult {
   cost_usd: number;
   duration_ms: number;
   structured?: unknown;
+  sessionId?: string; // session/thread ID for resume support
   toolSummaries?: string[]; // SDK tool_use_summary messages (zero-cost)
   numTurns?: number; // SDK result.num_turns
   stopReason?: string; // SDK result.stop_reason (e.g. 'maxTurns')

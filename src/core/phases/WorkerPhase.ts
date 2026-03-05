@@ -4,27 +4,18 @@
  * Methods extracted from MainLoop:
  * - workerExecute, workerFix, workerReviewFix, workerAnalyze
  * - executeSubtasks, patchSubtask
- * - codexResultToSessionResult, COMPLEXITY_CONFIG
+ * - COMPLEXITY_CONFIG
  */
 
 import type { Config } from "../../config/Config.js";
 import { resolveModelId } from "../../config/Config.js";
 import type { TaskStore } from "../../memory/TaskStore.js";
 import type { CostTracker } from "../../utils/cost.js";
-import type {
-  ClaudeCodeSession,
-  SessionResult,
-} from "../../bridges/ClaudeCodeSession.js";
-import type { CodexBridge } from "../../bridges/CodexBridge.js";
-import type { WorkerAdapter } from "../WorkerAdapter.js";
-import type { AgentResult } from "../../bridges/CodingAgent.js";
+import type { WorkerAdapter, WorkerResult } from "../WorkerAdapter.js";
 import type { Task, SubTaskRecord } from "../../memory/types.js";
 import type { VerifyBaseline } from "../ProjectVerifier.js";
 import type { PersonaLoader, WorkInstructions } from "../PersonaLoader.js";
-import {
-  getModifiedAndAddedFiles,
-  commitAll,
-} from "../../utils/git.js";
+import { getModifiedAndAddedFiles, commitAll } from "../../utils/git.js";
 import { log } from "../../utils/logger.js";
 import { truncate } from "../../utils/parse.js";
 import { randomUUID } from "node:crypto";
@@ -52,58 +43,15 @@ interface ComplexityConfig {
   maxTurns: number;
   maxBudget: number;
   timeout: number;
-  worker: "claude" | "codex";
-  model?: string;
+  model?: string; // Claude model override (e.g. "sonnet", "opus"); ignored by Codex
 }
 
 export const COMPLEXITY_CONFIG: Record<string, ComplexityConfig> = {
-  S: { maxTurns: 100, maxBudget: 5.0, timeout: 600_000, worker: "codex" },
-  M: {
-    maxTurns: 200,
-    maxBudget: 10.0,
-    timeout: 1_200_000,
-    worker: "claude",
-    model: "sonnet",
-  },
-  L: {
-    maxTurns: 200,
-    maxBudget: 15.0,
-    timeout: 2_400_000,
-    worker: "claude",
-    model: "opus",
-  },
-  XL: {
-    maxTurns: 200,
-    maxBudget: 20.0,
-    timeout: 3_600_000,
-    worker: "claude",
-    model: "opus",
-  },
+  S: { maxTurns: 100, maxBudget: 5.0, timeout: 600_000, model: "sonnet" },
+  M: { maxTurns: 200, maxBudget: 10.0, timeout: 1_200_000, model: "sonnet" },
+  L: { maxTurns: 200, maxBudget: 15.0, timeout: 2_400_000, model: "opus" },
+  XL: { maxTurns: 200, maxBudget: 20.0, timeout: 3_600_000, model: "opus" },
 };
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function codexResultToSessionResult(r: AgentResult): SessionResult {
-  return {
-    text: r.output,
-    costUsd: r.cost_usd,
-    durationMs: r.duration_ms,
-    sessionId: "",
-    isError: !r.success,
-    errors: r.success ? [] : [r.output],
-    json: r.structured ?? null,
-    exitCode: r.success ? 0 : 1,
-    numTurns: r.numTurns ?? 0,
-    usage: {
-      inputTokens: 0,
-      outputTokens: 0,
-      cacheCreationInputTokens: 0,
-      cacheReadInputTokens: 0,
-    },
-  };
-}
 
 // ---------------------------------------------------------------------------
 // WorkerPhase class
@@ -115,8 +63,6 @@ export class WorkerPhase {
     private readonly taskStore: TaskStore,
     private readonly costTracker: CostTracker,
     private readonly worker: WorkerAdapter,
-    private readonly workerSession: ClaudeCodeSession,
-    private readonly codex: CodexBridge,
     private readonly personaLoader: PersonaLoader,
     private readonly hardVerify: HardVerifyFn,
   ) {}
@@ -134,7 +80,7 @@ export class WorkerPhase {
       approvedPlan?: string;
       resumeSessionId?: string;
     },
-  ): Promise<SessionResult> {
+  ): Promise<WorkerResult> {
     const description = opts?.subtaskDescription ?? task.task_description;
     const { prompt: basePrompt, systemPrompt } =
       await this.personaLoader.buildWorkerPrompt({
@@ -144,13 +90,16 @@ export class WorkerPhase {
         workInstructions: opts?.workInstructions,
       });
 
-    const isResume = !!opts?.resumeSessionId;
+    // Full prompt for new sessions or when resume fails silently (e.g. Codex
+    // with non-full-auto sandbox).  Adapter uses resumePrompt when it can
+    // actually resume, falling back to the full prompt otherwise.
+    const prompt = opts?.approvedPlan
+      ? `${basePrompt}\n\n## Approved Implementation Plan\nFollow this plan that was reviewed and approved:\n\n${opts.approvedPlan}`
+      : basePrompt;
 
-    const prompt = isResume
+    const resumePrompt = opts?.resumeSessionId
       ? `--- NEXT SUBTASK ---\n${description}\n\n${opts?.approvedPlan ? `## Approved Plan\n${opts.approvedPlan}\n\n` : ""}Continue working in this session.`
-      : opts?.approvedPlan
-        ? `${basePrompt}\n\n## Approved Implementation Plan\nFollow this plan that was reviewed and approved:\n\n${opts.approvedPlan}`
-        : basePrompt;
+      : undefined;
 
     const complexity =
       opts?.complexity ??
@@ -159,51 +108,23 @@ export class WorkerPhase {
         | undefined);
     const cConfig = COMPLEXITY_CONFIG[complexity ?? "M"];
 
-    // Route to Codex for S-level tasks (unless resuming a Claude session)
-    if (cConfig.worker === "codex" && !isResume) {
-      log.info(`workerExecute: routing ${complexity ?? "M"} task to Codex`);
-      const codexResult = await this.codex.execute(
-        prompt,
-        this.config.projectPath,
-        {
-          systemPrompt,
-          maxTurns: cConfig.maxTurns,
-          maxBudget: cConfig.maxBudget,
-          timeout: cConfig.timeout,
-        },
-      );
-      return codexResultToSessionResult(codexResult);
-    }
-
     const model = cConfig.model
       ? resolveModelId(cConfig.model)
       : resolveModelId(this.config.values.claude.model);
 
-    const result = await this.workerSession.run(prompt, {
-      permissionMode: "bypassPermissions",
+    return this.worker.execute(prompt, {
+      cwd: this.config.projectPath,
       maxTurns: cConfig.maxTurns,
       maxBudget: Math.min(
         cConfig.maxBudget,
         this.config.values.claude.maxTaskBudget,
       ),
-      cwd: this.config.projectPath,
       timeout: cConfig.timeout,
       model,
-      thinking: { type: "adaptive" },
-      effort: "medium",
-      appendSystemPrompt: isResume ? undefined : systemPrompt,
+      appendSystemPrompt: systemPrompt,
       resumeSessionId: opts?.resumeSessionId,
+      resumePrompt,
     });
-
-    if (isResume) {
-      const u = result.usage;
-      const total = u.inputTokens || 1;
-      log.info(
-        `workerExecute resume cache: read=${u.cacheReadInputTokens}/${total} (${((u.cacheReadInputTokens / total) * 100).toFixed(0)}%)`,
-      );
-    }
-
-    return result;
   }
 
   // --- Worker fix (resume session to fix verification errors) ---
@@ -212,19 +133,16 @@ export class WorkerPhase {
     sessionId: string,
     errors: string,
     task: Task,
-  ): Promise<SessionResult> {
-    return this.workerSession.run(
+  ): Promise<WorkerResult> {
+    return this.worker.fix(
       `The previous changes failed verification:\n${errors}\n\nFix these issues. The original task was: ${task.task_description}\n\nUse superpowers:systematic-debugging to investigate the root cause.\nFollow all 4 phases: investigate → analyze → hypothesize → implement.\nDo NOT guess or "try changing X". Find the actual root cause first.`,
       {
-        permissionMode: "bypassPermissions",
+        cwd: this.config.projectPath,
         maxTurns: 100,
         maxBudget: this.config.values.claude.maxTaskBudget,
-        cwd: this.config.projectPath,
         timeout: 600_000,
-        thinking: { type: "adaptive" },
-        effort: "medium",
-        resumeSessionId: sessionId,
         model: resolveModelId(this.config.values.claude.model),
+        resumeSessionId: sessionId,
       },
     );
   }
@@ -287,7 +205,7 @@ Fix these issues. Do not make unrelated changes.`;
       workInstructions?: WorkInstructions;
     },
     revision?: {
-      resumeSessionId: string;
+      resumeSessionId?: string;
       revisionPrompt: string;
     },
   ): Promise<{
@@ -337,8 +255,6 @@ Be specific: include function signatures, type definitions, and concrete code sn
       maxBudget: Math.min(cConfig.maxBudget, 5.0),
       timeout: Math.min(cConfig.timeout, 600_000),
       model: resolveModelId(this.config.values.claude.model),
-      thinking: { type: "adaptive" },
-      effort: "medium",
       resumeSessionId: revision?.resumeSessionId,
     });
 
@@ -493,7 +409,7 @@ Be specific: include function signatures, type definitions, and concrete code sn
       await this.taskStore.addLog({
         task_id: task.id,
         phase: "execute",
-        agent: "claude-code",
+        agent: this.worker.name,
         input_summary: `subtask ${i + 1}/${sorted.length}: ${truncate(st.description, 80)}`,
         output_summary: result.text,
         cost_usd: result.costUsd,

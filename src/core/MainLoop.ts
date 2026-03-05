@@ -54,7 +54,7 @@ import type { RegisteredStrategies } from "./strategies/index.js";
 import { ProjectMemory } from "../memory/ProjectMemory.js";
 import { MaintenancePhase } from "./phases/MaintenancePhase.js";
 import { ReviewPhase } from "./phases/ReviewPhase.js";
-import { WorkerPhase, COMPLEXITY_CONFIG } from "./phases/WorkerPhase.js";
+import { WorkerPhase } from "./phases/WorkerPhase.js";
 import { BrainPhase, coerceSubtaskOrder } from "./phases/BrainPhase.js";
 // Re-export pure functions from StepTracker for backward compatibility
 export {
@@ -79,7 +79,6 @@ import {
 const PAUSE_INTERVAL_MS = 5000;
 const ERROR_RECOVERY_MS = 30_000;
 const BRANCH_ID_LENGTH = 8;
-// COMPLEXITY_CONFIG is imported from WorkerPhase
 // coerceSubtaskOrder is imported from BrainPhase
 
 // countTscErrors + setCountTscErrorsDepsForTests are defined in
@@ -205,8 +204,6 @@ export class MainLoop {
       taskStore,
       costTracker,
       this.worker,
-      this.workerSession,
-      codex,
       this.personaLoader,
       (baseline, startCommit, projectPath) =>
         this.maintenance.hardVerify(baseline, startCommit, projectPath),
@@ -226,11 +223,6 @@ export class MainLoop {
       this.projectMemory,
       this.memoryProject,
     );
-  }
-
-  /** Select the reviewer that's opposite to the given worker type */
-  private reviewerFor(workerType: "claude" | "codex"): ReviewAdapter {
-    return workerType === "codex" ? this.claudeReviewer : this.codexReviewer;
   }
 
   private makeEvent(
@@ -486,15 +478,12 @@ export class MainLoop {
       });
 
       const complexity = brainOpts?.complexity ?? "M";
-      const taskReviewer = this.reviewerFor(
-        COMPLEXITY_CONFIG[complexity].worker,
-      );
       const pipeCtx: PipelineCtx = {
         branchName,
         originalBranch,
         baseline,
         startCommit,
-        taskReviewer,
+        taskReviewer: this.reviewer,
         projectPath,
       };
 
@@ -795,7 +784,7 @@ export class MainLoop {
     let revisionRound = 0;
     let analyzeSessionId: string | undefined;
     let revisionCtx:
-      | { resumeSessionId: string; revisionPrompt: string }
+      | { resumeSessionId?: string; revisionPrompt: string }
       | undefined;
     let planApproved = false;
     let approvedPlan: string | undefined;
@@ -871,7 +860,7 @@ export class MainLoop {
         break;
       }
 
-      if (synthesis.decision === "revise" && analyzeSessionId) {
+      if (synthesis.decision === "revise") {
         revisionRound++;
         if (revisionRound > maxRevisions) {
           log.warn(
@@ -883,11 +872,18 @@ export class MainLoop {
           `Brain requested plan revision (round ${revisionRound}/${maxRevisions})`,
         );
 
-        // Build full revision context: brain instructions + reviewer issues
+        // Build self-contained revision context so it works with or without
+        // session resume (Codex analyze can't resume in read-only mode).
         const reviewerIssues = planReview.issues
           .map((i) => `- [${i.severity}] ${i.description}`)
           .join("\n");
         const revisionPrompt = `## Revision Required (Round ${revisionRound}/${maxRevisions})
+
+### Original Task
+${task.task_description}
+
+### Previous Proposal
+${analyzeResult.proposal}
 
 ### Brain's Direction
 ${synthesis.reviseInstructions ?? "Revise the proposal to address reviewer concerns."}
@@ -895,7 +891,7 @@ ${synthesis.reviseInstructions ?? "Revise the proposal to address reviewer conce
 ### Reviewer's Specific Issues
 ${reviewerIssues || "No specific issues listed."}
 
-Revise your previous proposal to address ALL issues above. Produce a complete updated proposal in the same structured format.`;
+Revise the previous proposal to address ALL issues above. Produce a complete updated proposal in the same structured format.`;
 
         revisionCtx = {
           resumeSessionId: analyzeSessionId,
@@ -904,7 +900,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
         continue;
       }
 
-      // REJECTED or REVISE without sessionId (e.g. Codex)
+      // REJECTED
       log.warn("Brain rejected analysis plan — blocking task");
       break;
     }
@@ -1037,7 +1033,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
       await this.taskStore.addLog({
         task_id: task.id,
         phase: "execute",
-        agent: "claude-code",
+        agent: this.worker.name,
         input_summary: task.task_description,
         output_summary: workerResult.text,
         cost_usd: workerResult.costUsd,

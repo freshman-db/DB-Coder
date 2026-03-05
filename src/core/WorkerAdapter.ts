@@ -30,6 +30,9 @@ export interface WorkerExecOpts {
   model?: string;
   appendSystemPrompt?: string;
   resumeSessionId?: string;
+  /** Short prompt for resumed sessions; adapter falls back to main prompt
+   *  if resume is not possible (e.g. Codex with non-full-auto sandbox). */
+  resumePrompt?: string;
   thinking?: ThinkingConfig;
   effort?: "low" | "medium" | "high" | "max";
 }
@@ -77,18 +80,22 @@ export class ClaudeWorkerAdapter implements WorkerAdapter {
   constructor(private session: ClaudeCodeSession) {}
 
   async execute(prompt: string, opts: WorkerExecOpts): Promise<WorkerResult> {
-    const result = await this.session.run(prompt, {
-      permissionMode: "bypassPermissions",
-      maxTurns: opts.maxTurns,
-      maxBudget: opts.maxBudget,
-      cwd: opts.cwd,
-      timeout: opts.timeout,
-      model: opts.model,
-      thinking: opts.thinking,
-      effort: opts.effort,
-      appendSystemPrompt: opts.appendSystemPrompt,
-      resumeSessionId: opts.resumeSessionId,
-    });
+    const isResume = !!opts.resumeSessionId;
+    const result = await this.session.run(
+      isResume ? (opts.resumePrompt ?? prompt) : prompt,
+      {
+        permissionMode: "bypassPermissions",
+        maxTurns: opts.maxTurns,
+        maxBudget: opts.maxBudget,
+        cwd: opts.cwd,
+        timeout: opts.timeout,
+        model: opts.model,
+        thinking: opts.thinking,
+        effort: opts.effort,
+        appendSystemPrompt: isResume ? undefined : opts.appendSystemPrompt,
+        resumeSessionId: opts.resumeSessionId,
+      },
+    );
     return sessionToWorkerResult(result);
   }
 
@@ -132,19 +139,20 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       maxTurns: opts.maxTurns,
       maxBudget: opts.maxBudget,
       timeout: opts.timeout ? opts.timeout : undefined,
+      resumeSessionId: opts.resumeSessionId,
+      resumePrompt: opts.resumePrompt,
     });
     return {
       text: result.output,
       costUsd: result.cost_usd,
       durationMs: result.duration_ms,
-      // Codex has no session resume
+      sessionId: result.sessionId,
       isError: !result.success,
       errors: result.success ? [] : [result.output],
     };
   }
 
   async fix(prompt: string, opts: WorkerExecOpts): Promise<WorkerResult> {
-    // Codex has no session resume — execute with full context
     return this.execute(prompt, opts);
   }
 
@@ -152,6 +160,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
     prompt: string,
     opts: WorkerAnalyzeOpts,
   ): Promise<WorkerResult> {
+    // Codex plan() does not support resume — codex exec resume lacks
+    // --sandbox read-only, so resuming would break the read-only guarantee.
+    // Revision context is carried by the prompt itself (revisionPrompt).
     const result = await this.codex.plan(prompt, opts.cwd, {
       maxTurns: opts.maxTurns,
     });
@@ -159,6 +170,7 @@ export class CodexWorkerAdapter implements WorkerAdapter {
       text: result.output,
       costUsd: result.cost_usd,
       durationMs: result.duration_ms,
+      sessionId: result.sessionId,
       isError: !result.success,
       errors: result.success ? [] : [result.output],
     };
@@ -180,8 +192,6 @@ export class ClaudeReviewAdapter implements ReviewAdapter {
         maxTurns: 200,
         cwd,
         timeout: 600_000,
-        thinking: { type: "adaptive" },
-        effort: "medium",
         disallowedTools: ["Edit", "Write", "NotebookEdit"],
         appendSystemPrompt:
           "You are an adversarial code reviewer. Do NOT modify files — only read and analyze.",
