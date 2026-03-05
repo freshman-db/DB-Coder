@@ -1,5 +1,5 @@
-import { log } from '../utils/logger.js';
-import type { OperationalMetrics, Task, TaskLog } from '../memory/types.js';
+import { log } from "../utils/logger.js";
+import type { OperationalMetrics, Task, TaskLog } from "../memory/types.js";
 
 // --- Typed response interfaces matching routes.ts ---
 
@@ -42,21 +42,21 @@ export class Client {
   private baseUrl: string;
   private apiToken?: string;
 
-  constructor(port = 18800, host = '127.0.0.1', apiToken?: string) {
+  constructor(port = 18801, host = "127.0.0.1", apiToken?: string) {
     this.baseUrl = `http://${host}:${port}`;
     this.apiToken = apiToken;
   }
 
   async status(): Promise<StatusResponse> {
-    return this.get('/api/status');
+    return this.get("/api/status");
   }
 
   async addTask(description: string, priority = 2): Promise<Task> {
-    return this.post('/api/tasks', { description, priority });
+    return this.post("/api/tasks", { description, priority });
   }
 
   async listTasks(): Promise<ListTasksResponse> {
-    return this.get('/api/tasks');
+    return this.get("/api/tasks");
   }
 
   async getTask(id: string): Promise<GetTaskResponse> {
@@ -68,7 +68,7 @@ export class Client {
   }
 
   async pendingReviewTasks(): Promise<Task[]> {
-    return this.get('/api/tasks/pending-review');
+    return this.get("/api/tasks/pending-review");
   }
 
   async approveTask(id: string): Promise<{ ok: boolean; status: string }> {
@@ -80,44 +80,49 @@ export class Client {
   }
 
   async pause(): Promise<{ paused: boolean }> {
-    return this.post('/api/control/pause');
+    return this.post("/api/control/pause");
   }
 
   async resume(): Promise<{ paused: boolean }> {
-    return this.post('/api/control/resume');
+    return this.post("/api/control/resume");
   }
 
-  async triggerScan(depth = 'normal'): Promise<{ triggered: boolean; depth: string }> {
-    return this.post('/api/control/scan', { depth });
+  async triggerScan(
+    depth = "normal",
+  ): Promise<{ triggered: boolean; depth: string }> {
+    return this.post("/api/control/scan", { depth });
   }
 
   async getCost(): Promise<CostResponse> {
-    return this.get('/api/cost');
+    return this.get("/api/cost");
   }
 
   async metrics(): Promise<MetricsResponse> {
-    return this.get('/api/metrics');
+    return this.get("/api/metrics");
   }
 
   async patrolStart(): Promise<{ ok: boolean; patrolling: boolean }> {
-    return this.post('/api/patrol/start');
+    return this.post("/api/patrol/start");
   }
 
   async patrolStop(): Promise<{ ok: boolean; patrolling: boolean }> {
-    return this.post('/api/patrol/stop');
+    return this.post("/api/patrol/stop");
   }
 
-  async followLogs(onEntry: (entry: unknown) => void, signal?: AbortSignal): Promise<void> {
+  async followLogs(
+    onEntry: (entry: unknown) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const res = await fetch(`${this.baseUrl}/api/logs?follow=true`, {
       headers: this.getAuthHeaders(),
       signal,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     const reader = res.body?.getReader();
-    if (!reader) throw new Error('No response body');
+    if (!reader) throw new Error("No response body");
 
     const decoder = new TextDecoder();
-    let buffer = '';
+    let buffer = "";
 
     try {
       while (true) {
@@ -125,16 +130,16 @@ export class Client {
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
 
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
+          if (line.startsWith("data: ")) {
             try {
               const entry = JSON.parse(line.slice(6));
               onEntry(entry);
             } catch (err) {
-              log.debug('Failed to parse SSE log entry', { error: err, line });
+              log.debug("Failed to parse SSE log entry", { error: err, line });
             }
           }
         }
@@ -155,8 +160,8 @@ export class Client {
 
   private async post<T = unknown>(path: string, body?: unknown): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
-      method: 'POST',
-      headers: { ...this.getAuthHeaders(), 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { ...this.getAuthHeaders(), "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(10000),
     });
@@ -166,7 +171,7 @@ export class Client {
 
   private async del<T = unknown>(path: string): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
-      method: 'DELETE',
+      method: "DELETE",
       headers: this.getAuthHeaders(),
       signal: AbortSignal.timeout(10000),
     });

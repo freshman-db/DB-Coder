@@ -35,7 +35,7 @@ DB-Coder is a fully autonomous AI coding system that continuously improves targe
 │  CLAUDE.md + claude-mem          TaskStore (PostgreSQL)       │
 │  (rules / experience)           (tasks / logs / costs)       │
 ├──────────────────────────────────────────────────────────────┤
-│                HTTP Server (:18800)                           │
+│                HTTP Server (:18801)                           │
 │         REST API + Web SPA + SSE Streaming                   │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -124,7 +124,7 @@ Global config: `~/.db-coder/config.json`
   "memory": {
     "pgConnectionString": "postgresql://db:db@localhost:5432/db_coder"
   },
-  "server": { "port": 18800, "host": "127.0.0.1" }
+  "server": { "port": 18801, "host": "127.0.0.1" }
 }
 ```
 
@@ -143,7 +143,7 @@ db-coder serve --project /path/to/your/project
 nohup bash supervisor.sh > logs/nohup.out 2>&1 &
 ```
 
-Open `http://127.0.0.1:18800` in a browser. The API token is shown in startup logs or found in `~/.db-coder/config.json`.
+Open `http://127.0.0.1:18801` in a browser. The API token is shown in startup logs or found in `~/.db-coder/config.json`.
 
 ### CLI Commands
 
@@ -168,7 +168,7 @@ db-coder pause / resume      # Pause / Resume
 
 ## API
 
-The server runs on `http://127.0.0.1:18800`. All APIs require Bearer Token authentication.
+The server runs on `http://127.0.0.1:18801`. All APIs require Bearer Token authentication.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|

@@ -60,7 +60,7 @@ function createValidConfig(): DbCoderConfig {
       protectedBranches: ["main", "master"],
       branchRetentionDays: 7,
     },
-    server: { host: "127.0.0.1", port: 18800 },
+    server: { host: "127.0.0.1", port: 18801 },
     mcp: { enabled: true },
     plugins: {},
     evolution: {

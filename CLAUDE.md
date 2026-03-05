@@ -16,7 +16,7 @@
   ├── 程序化 Hooks (PreToolUse/PostToolUse 观察)
   ├── 插件自动发现 (~/.claude/plugins/cache)
   ├── 硬验证 (tsc 错误计数对比)
-  └── Web UI + API (SPA :18800)
+  └── Web UI + API (SPA :18801)
 ```
 
 核心循环: `brainDecide() → [workerAnalyze → reviewPlan → brainSynthesizePlan (M/L/XL)] → workerExecute() → hardVerify() → codeReview() → brainReviewDecision() → [workerReviewFix 循环] → brainReflect() → mergeBranch() → [chainScan] → [claudeMdMaintenance]`

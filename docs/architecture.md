@@ -42,7 +42,7 @@
 │                                                         │
 │  ┌───────────────┐  ┌──────────────────┐               │
 │  │  HTTP Server  │  │   CLAUDE.md      │               │
-│  │  :18800       │  │   + claude-mem   │               │
+│  │  :18801       │  │   + claude-mem   │               │
 │  │  API + Web UI │  │   (经验积累)     │               │
 │  └───────────────┘  └──────────────────┘               │
 │                                                         │
@@ -198,7 +198,7 @@ review_events, goal_progress, prompt_versions, config_proposals
 
 ## 服务端架构
 
-### HTTP Server (:18800)
+### HTTP Server (:18801)
 
 同一服务同时提供 REST API 和 Web UI:
 
@@ -344,7 +344,7 @@ src/
   "memory": {
     "pgConnectionString": "postgresql://db:db@localhost:5432/db_coder"
   },
-  "server": { "port": 18800, "host": "127.0.0.1" },
+  "server": { "port": 18801, "host": "127.0.0.1" },
   "git": { "branchPrefix": "db-coder/", "protectedBranches": ["main", "master"] }
 }
 ```
