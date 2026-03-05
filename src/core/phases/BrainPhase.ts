@@ -48,10 +48,7 @@ const CLAUDE_MEM_CONTEXT_MAX_CHARS = 3500;
 // Standalone helper functions (exported for MainLoop runCycle)
 // ---------------------------------------------------------------------------
 
-export function coerceSubtaskOrder(
-  value: unknown,
-  fallback: number,
-): number {
+export function coerceSubtaskOrder(value: unknown, fallback: number): number {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 1 || !Number.isInteger(n)) return fallback;
   return n;
@@ -484,18 +481,16 @@ ${analysisReport}
       15,
     );
     const recentTasks = recentResult.tasks ?? [];
-    let recentReflections: Array<{
-      task_description: string;
-      status: string;
-      lesson: string;
-    }> = [];
+    let recentReflections: Awaited<
+      ReturnType<TaskStore["getRecentReflections"]>
+    > = [];
     try {
       recentReflections = await this.taskStore.getRecentReflections(
         projectPath,
         15,
       );
     } catch (error) {
-      if (recentTasks.length > 0) throw error;
+      log.warn("Failed to fetch recent reflections", error);
     }
     if (recentTasks.length > 0) {
       const lessonByDesc = new Map(
