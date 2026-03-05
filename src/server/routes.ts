@@ -626,24 +626,34 @@ route("GET", "/api/plans/:id/stream", async (req, res, ctx, params) => {
   const planChat = requirePlanChat(ctx);
   const id = parseRouteId(params, "id", "plan ID");
 
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-    "Access-Control-Allow-Origin": "*",
-  });
-  res.write(":ok\n\n");
+  const releaseConnection = reserveSseConnection("/api/plans/stream", res);
+  if (!releaseConnection) {
+    return;
+  }
 
-  const unsubscribe = planChat.addListener(id, (event, data) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  let removeListener: (() => void) | null = null;
+  let pendingCleanup = false;
+
+  const stream = createSseStream(req, res, {
+    onCleanup: () => {
+      releaseConnection();
+      if (removeListener) {
+        removeListener();
+        removeListener = null;
+      } else {
+        pendingCleanup = true;
+      }
+    },
   });
 
-  const onClose = () => {
-    unsubscribe();
-    res.end();
-  };
-  req.on("close", onClose);
-  req.on("error", onClose);
+  removeListener = planChat.addListener(id, (event, data) => {
+    stream.write(event, data);
+  });
+
+  if (pendingCleanup) {
+    removeListener();
+    removeListener = null;
+  }
 });
 
 route("POST", "/api/plans/:id/generate", async (_req, res, ctx, params) => {

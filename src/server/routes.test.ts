@@ -9,6 +9,7 @@ import type { GlobalMemory } from "../memory/GlobalMemory.js";
 import type { TaskStore } from "../memory/TaskStore.js";
 import type { OperationalMetrics } from "../memory/types.js";
 import type { CostTracker } from "../utils/cost.js";
+import type { PlanChatManager } from "../core/PlanChatManager.js";
 import { log } from "../utils/logger.js";
 import {
   createMockRequest,
@@ -38,6 +39,7 @@ interface ServerFixtureOptions {
   taskStore?: Partial<TaskStore>;
   costTracker?: Partial<CostTracker>;
   modeManager?: Partial<PatrolManager>;
+  planChat?: Partial<PlanChatManager>;
 }
 
 interface ServerFixture {
@@ -112,6 +114,7 @@ function createServerFixture(
       costTracker,
       undefined,
       modeManager,
+      options.planChat as unknown as import("../core/PlanChatManager.js").PlanChatManager,
     ),
     token,
   };
@@ -1173,4 +1176,123 @@ test("POST /api/plans/:id/message returns 503 when planChat not injected", async
   assert.deepEqual(parseJson<{ error: string }>(state), {
     error: "Plan chat not available",
   });
+});
+
+test("GET /api/plans/:id/stream returns SSE headers and cleans up listener on close", async () => {
+  let removeCalls = 0;
+  let listenerAttached = false;
+
+  const { server, token } = createServerFixture({
+    planChat: {
+      addListener: () => {
+        listenerAttached = true;
+        return () => {
+          removeCalls += 1;
+        };
+      },
+    },
+  });
+  const listener = getRequestListener(server);
+  const req = createMockRequest({
+    method: "GET",
+    url: "/api/plans/5/stream",
+    token,
+  });
+  const { response, state } = createMockResponse();
+
+  await listener(req, response);
+
+  assert.equal(state.statusCode, 200);
+  assert.equal(state.headers["content-type"], "text/event-stream");
+  assert.equal(state.headers["cache-control"], "no-cache");
+  assert.equal(listenerAttached, true);
+
+  req.emit("close");
+  assert.equal(removeCalls, 1);
+});
+
+test("GET /api/plans/:id/stream enforces max SSE connections and releases slots on close", async () => {
+  const { server, token } = createServerFixture({
+    planChat: {
+      addListener: () => () => {},
+    },
+  });
+  const listener = getRequestListener(server);
+  const openRequests: IncomingMessage[] = [];
+
+  for (let i = 0; i < 50; i += 1) {
+    const req = createMockRequest({
+      method: "GET",
+      url: "/api/plans/1/stream",
+      token,
+    });
+    const { response, state } = createMockResponse();
+    await listener(req, response);
+    assert.equal(state.statusCode, 200);
+    openRequests.push(req);
+  }
+
+  const overflowReq = createMockRequest({
+    method: "GET",
+    url: "/api/plans/1/stream",
+    token,
+  });
+  const { response: overflowRes, state: overflowState } = createMockResponse();
+  await listener(overflowReq, overflowRes);
+  assert.equal(overflowState.statusCode, 503);
+  assert.deepEqual(parseJson<{ error: string }>(overflowState), {
+    error: "SSE connection limit exceeded. Please retry later.",
+  });
+
+  const releasedReq = openRequests.shift();
+  releasedReq?.emit("close");
+
+  const replacementReq = createMockRequest({
+    method: "GET",
+    url: "/api/plans/1/stream",
+    token,
+  });
+  const { response: replacementRes, state: replacementState } =
+    createMockResponse();
+  await listener(replacementReq, replacementRes);
+  assert.equal(replacementState.statusCode, 200);
+
+  for (const req of openRequests) {
+    req.emit("close");
+  }
+  replacementReq.emit("close");
+});
+
+test("GET /api/plans/:id/stream handles sync first event during addListener without listener leak", async () => {
+  let removeCalls = 0;
+
+  const { server, token } = createServerFixture({
+    planChat: {
+      addListener: (
+        _id: number,
+        cb: (event: string, data: unknown) => void,
+      ) => {
+        // Simulate real PlanChatManager: fires initial status synchronously
+        cb("status", { status: "active" });
+        return () => {
+          removeCalls += 1;
+        };
+      },
+    },
+  });
+  const reqListener = getRequestListener(server);
+  const req = createMockRequest({
+    method: "GET",
+    url: "/api/plans/3/stream",
+    token,
+  });
+  const { response, state } = createMockResponse();
+
+  await reqListener(req, response);
+
+  assert.equal(state.statusCode, 200);
+  assert.match(state.body, /event: status/);
+
+  req.emit("close");
+  assert.equal(removeCalls, 1);
 });
