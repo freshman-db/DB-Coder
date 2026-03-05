@@ -1262,3 +1262,37 @@ test("GET /api/plans/:id/stream enforces max SSE connections and releases slots 
   }
   replacementReq.emit("close");
 });
+
+test("GET /api/plans/:id/stream handles sync first event during addListener without listener leak", async () => {
+  let removeCalls = 0;
+
+  const { server, token } = createServerFixture({
+    planChat: {
+      addListener: (
+        _id: number,
+        cb: (event: string, data: unknown) => void,
+      ) => {
+        // Simulate real PlanChatManager: fires initial status synchronously
+        cb("status", { status: "active" });
+        return () => {
+          removeCalls += 1;
+        };
+      },
+    },
+  });
+  const reqListener = getRequestListener(server);
+  const req = createMockRequest({
+    method: "GET",
+    url: "/api/plans/3/stream",
+    token,
+  });
+  const { response, state } = createMockResponse();
+
+  await reqListener(req, response);
+
+  assert.equal(state.statusCode, 200);
+  assert.match(state.body, /event: status/);
+
+  req.emit("close");
+  assert.equal(removeCalls, 1);
+});

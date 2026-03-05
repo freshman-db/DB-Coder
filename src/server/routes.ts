@@ -631,18 +631,29 @@ route("GET", "/api/plans/:id/stream", async (req, res, ctx, params) => {
     return;
   }
 
-  let removeListener = () => {};
+  let removeListener: (() => void) | null = null;
+  let pendingCleanup = false;
+
   const stream = createSseStream(req, res, {
     onCleanup: () => {
       releaseConnection();
-      removeListener();
-      removeListener = () => {};
+      if (removeListener) {
+        removeListener();
+        removeListener = null;
+      } else {
+        pendingCleanup = true;
+      }
     },
   });
 
   removeListener = planChat.addListener(id, (event, data) => {
     stream.write(event, data);
   });
+
+  if (pendingCleanup) {
+    removeListener();
+    removeListener = null;
+  }
 });
 
 route("POST", "/api/plans/:id/generate", async (_req, res, ctx, params) => {
