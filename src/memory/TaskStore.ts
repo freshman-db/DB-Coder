@@ -314,8 +314,11 @@ export class TaskStore {
 
   async deleteTask(id: string): Promise<void> {
     const sql = this.getSql();
-    await sql`DELETE FROM task_logs WHERE task_id = ${id}`;
-    await sql`DELETE FROM tasks WHERE id = ${id}`;
+    await sql.begin(async (tx) => {
+      const tsql = tx as unknown as postgres.Sql;
+      await tsql`DELETE FROM task_logs WHERE task_id = ${id}`;
+      await tsql`DELETE FROM tasks WHERE id = ${id}`;
+    });
   }
 
   async recoverActiveTasks(projectPath: string): Promise<number> {
