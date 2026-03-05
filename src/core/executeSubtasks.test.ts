@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { WorkerPhase } from "./phases/WorkerPhase.js";
 import type { Task, SubTaskRecord } from "../memory/types.js";
-import type { SessionResult } from "../bridges/ClaudeCodeSession.js";
+import type { WorkerResult } from "./WorkerAdapter.js";
 
 /**
  * Creates a minimal WorkerPhase instance with mocked internals,
@@ -18,14 +18,14 @@ function buildStub(overrides: {
   workerExecute: (
     task: Task,
     opts?: Record<string, unknown>,
-  ) => Promise<SessionResult>;
+  ) => Promise<WorkerResult>;
   hardVerify: () => Promise<{ passed: boolean; reason?: string }>;
   costTracker: { addCost: (...args: unknown[]) => Promise<void> };
   workerFix?: (
     sessionId: string,
     errors: string,
     task: Task,
-  ) => Promise<SessionResult>;
+  ) => Promise<WorkerResult>;
   maxRetries?: number;
 }) {
   // Bypass constructor completely
@@ -41,6 +41,9 @@ function buildStub(overrides: {
     projectPath: "/tmp/test",
     values: { autonomy: { maxRetries: overrides.maxRetries ?? 0 } },
   };
+
+  // Mock worker adapter (provides .name for logging)
+  any.worker = { name: "claude" };
 
   // Replace public methods / injected callbacks
   any.workerExecute = overrides.workerExecute;
@@ -73,22 +76,14 @@ function makeTask(subtasks: SubTaskRecord[]): Task {
   };
 }
 
-function makeSessionResult(overrides?: Partial<SessionResult>): SessionResult {
+function makeWorkerResult(overrides?: Partial<WorkerResult>): WorkerResult {
   return {
     text: "done",
     costUsd: 0,
     sessionId: "sess-1",
-    exitCode: 0,
-    numTurns: 1,
     durationMs: 100,
     isError: false,
     errors: [],
-    usage: {
-      inputTokens: 100,
-      outputTokens: 50,
-      cacheReadInputTokens: 0,
-      cacheCreationInputTokens: 0,
-    },
     ...overrides,
   };
 }
@@ -134,7 +129,7 @@ describe("executeSubtasks", () => {
         },
         addLog: async () => {},
       },
-      workerExecute: async () => makeSessionResult(),
+      workerExecute: async () => makeWorkerResult(),
       hardVerify: async () => ({ passed: true }),
       costTracker: { addCost: async () => {} },
     });
@@ -208,7 +203,7 @@ describe("executeSubtasks", () => {
       },
       // Worker reports error — triggers the error path that writes workerError
       workerExecute: async () =>
-        makeSessionResult({ isError: true, errors: ["compile error"] }),
+        makeWorkerResult({ isError: true, errors: ["compile error"] }),
       hardVerify: async () => ({ passed: true }),
       costTracker: { addCost: async () => {} },
     });
@@ -278,7 +273,7 @@ describe("executeSubtasks", () => {
       },
       workerExecute: async () => {
         workerCalled = true;
-        return makeSessionResult();
+        return makeWorkerResult();
       },
       hardVerify: async () => ({ passed: true }),
       costTracker: { addCost: async () => {} },
@@ -350,7 +345,7 @@ describe("executeSubtasks", () => {
       },
       workerExecute: async () => {
         workerCalled = true;
-        return makeSessionResult();
+        return makeWorkerResult();
       },
       hardVerify: async () => ({ passed: true }),
       costTracker: { addCost: async () => {} },
@@ -430,7 +425,7 @@ describe("executeSubtasks", () => {
         },
       },
       workerExecute: async () =>
-        makeSessionResult({ isError: true, errors: ["compile error"] }),
+        makeWorkerResult({ isError: true, errors: ["compile error"] }),
       hardVerify: async () => ({ passed: true }),
       costTracker: { addCost: async () => {} },
     });
@@ -503,7 +498,7 @@ describe("executeSubtasks", () => {
           addLogCalls.push(entry);
         },
       },
-      workerExecute: async () => makeSessionResult(),
+      workerExecute: async () => makeWorkerResult(),
       hardVerify: async () => ({ passed: true }),
       costTracker: { addCost: async () => {} },
     });
@@ -583,7 +578,7 @@ describe("executeSubtasks", () => {
         },
         addLog: async () => {},
       },
-      workerExecute: async () => makeSessionResult(),
+      workerExecute: async () => makeWorkerResult(),
       hardVerify: async () => ({ passed: true }),
       costTracker: { addCost: async () => {} },
     });
@@ -650,7 +645,7 @@ describe("executeSubtasks", () => {
           },
           addLog: async () => {},
         },
-        workerExecute: async () => makeSessionResult(),
+        workerExecute: async () => makeWorkerResult(),
         hardVerify: async () => {
           hardVerifyCalls++;
           // Advance time by 50ms during each verify call
@@ -709,7 +704,7 @@ describe("executeSubtasks", () => {
         updateTask: async () => {},
         addLog: async () => {},
       },
-      workerExecute: async () => makeSessionResult(),
+      workerExecute: async () => makeWorkerResult(),
       hardVerify: async () => ({ passed: true }),
       costTracker: { addCost: async () => {} },
     });
@@ -760,7 +755,7 @@ describe("executeSubtasks", () => {
           },
           addLog: async () => {},
         },
-        workerExecute: async () => makeSessionResult(),
+        workerExecute: async () => makeWorkerResult(),
         hardVerify: async () => {
           hardVerifyCalls++;
           // Advance time by 30ms per verify call
@@ -770,7 +765,7 @@ describe("executeSubtasks", () => {
         workerFix: async () => {
           // Advance time by 200ms for fix work — now counted in totalVerifyMs
           mock.timers.tick(200);
-          return makeSessionResult();
+          return makeWorkerResult();
         },
         costTracker: { addCost: async () => {} },
         maxRetries: 1,
@@ -835,7 +830,7 @@ describe("executeSubtasks", () => {
       },
       workerExecute: async () => {
         workerCalled = true;
-        return makeSessionResult();
+        return makeWorkerResult();
       },
       hardVerify: async () => ({ passed: true }),
       costTracker: { addCost: async () => {} },
@@ -914,7 +909,7 @@ describe("executeSubtasks", () => {
         // Track via subtaskDescription option — works even for sentinel IDs
         const desc = (opts as Record<string, unknown>)?.subtaskDescription;
         if (typeof desc === "string") executedDescriptions.push(desc);
-        return makeSessionResult();
+        return makeWorkerResult();
       },
       hardVerify: async () => ({ passed: true }),
       costTracker: { addCost: async () => {} },
@@ -984,7 +979,7 @@ describe("executeSubtasks", () => {
       workerExecute: async (_task, opts) => {
         const desc = (opts as Record<string, unknown>)?.subtaskDescription;
         if (typeof desc === "string") executedDescriptions.push(desc);
-        return makeSessionResult();
+        return makeWorkerResult();
       },
       hardVerify: async () => ({ passed: true }),
       costTracker: { addCost: async () => {} },
@@ -1065,7 +1060,7 @@ describe("executeSubtasks", () => {
         },
         addLog: async () => {},
       },
-      workerExecute: async () => makeSessionResult(),
+      workerExecute: async () => makeWorkerResult(),
       hardVerify: async () => ({ passed: true }),
       costTracker: { addCost: async () => {} },
     });
@@ -1158,7 +1153,7 @@ describe("executeSubtasks", () => {
       workerExecute: async (_task, opts) => {
         const desc = (opts as Record<string, unknown>)?.subtaskDescription;
         if (typeof desc === "string") executedDescriptions.push(desc);
-        return makeSessionResult();
+        return makeWorkerResult();
       },
       hardVerify: async () => ({ passed: true }),
       costTracker: { addCost: async () => {} },
@@ -1230,7 +1225,7 @@ describe("executeSubtasks", () => {
         },
         addLog: async () => {},
       },
-      workerExecute: async () => makeSessionResult(),
+      workerExecute: async () => makeWorkerResult(),
       hardVerify: async () => ({ passed: true }),
       costTracker: { addCost: async () => {} },
     });
@@ -1323,7 +1318,7 @@ describe("executeSubtasks", () => {
         },
         addLog: async () => {},
       },
-      workerExecute: async () => makeSessionResult(),
+      workerExecute: async () => makeWorkerResult(),
       hardVerify: async () => ({ passed: true }),
       costTracker: { addCost: async () => {} },
     });
