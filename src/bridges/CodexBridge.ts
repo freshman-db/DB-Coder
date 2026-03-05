@@ -108,7 +108,10 @@ export class CodexBridge implements CodingAgent {
       try {
         unlinkSync(outFile);
       } catch (cleanupErr: unknown) {
-        if ((cleanupErr as NodeJS.ErrnoException).code !== "ENOENT") {
+        const isEnoent =
+          cleanupErr instanceof Error &&
+          (cleanupErr as NodeJS.ErrnoException).code === "ENOENT";
+        if (!isEnoent) {
           log.debug("CodexBridge invokeCodex temp file cleanup failed", {
             error: cleanupErr,
             outFile,
