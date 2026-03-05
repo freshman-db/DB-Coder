@@ -41,7 +41,7 @@ export class CostTracker {
     }
 
     // Warning threshold (only warn once per session)
-    const dailyRatio = daily.total_cost_usd / this.budget.maxPerDay;
+    const dailyRatio = this.budget.maxPerDay > 0 ? daily.total_cost_usd / this.budget.maxPerDay : 0;
     if (dailyRatio >= this.budget.warningThreshold && !this.warnedDailyThreshold) {
       log.warn(`Daily cost at ${(dailyRatio * 100).toFixed(0)}% of budget ($${daily.total_cost_usd}/$${this.budget.maxPerDay})`);
       this.warnedDailyThreshold = true;
