@@ -16,8 +16,20 @@ const SENSITIVE_FILE_REGEXES = SENSITIVE_PATTERNS.map(patternToRegex);
 /** Max files per git-add invocation to stay within OS ARG_MAX limits. */
 const GIT_ADD_BATCH_SIZE = 100;
 
-async function git(args: string[], cwd: string): Promise<ProcessResult> {
+/** Run git and return result without throwing — for commands where non-zero exit is meaningful. */
+async function gitRaw(args: string[], cwd: string): Promise<ProcessResult> {
   return runProcess("git", args, { cwd });
+}
+
+/** Run git and throw if exit code is non-zero. */
+async function git(args: string[], cwd: string): Promise<ProcessResult> {
+  const result = await runProcess("git", args, { cwd });
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `git ${args.join(" ")} failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+    );
+  }
+  return result;
 }
 
 function patternToRegex(pattern: string): RegExp {
@@ -239,6 +251,6 @@ export async function getDiffSince(
 }
 
 export async function isGitRepo(cwd: string): Promise<boolean> {
-  const r = await git(["rev-parse", "--git-dir"], cwd);
+  const r = await gitRaw(["rev-parse", "--git-dir"], cwd);
   return r.exitCode === 0;
 }
