@@ -14,6 +14,7 @@ import {
   commitAll,
   getModifiedAndAddedFiles,
   mergeBranch,
+  resetToCommit,
   switchBranch,
 } from "./git.js";
 import type { LogEntry } from "./logger.js";
@@ -325,6 +326,30 @@ test("switchBranch throws when git exits with code 1 (non-existent branch)", asy
 
     await assert.rejects(
       () => switchBranch("non-existent-branch", repo),
+      (err: Error) => {
+        assert.ok(err instanceof Error, "Should throw an Error");
+        assert.match(
+          err.message,
+          /failed \(exit \d+\)/,
+          "Error message should include exit code",
+        );
+        return true;
+      },
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("resetToCommit throws when git exits with non-zero code (invalid commit)", async () => {
+  const repo = await createRepo("db-coder-git-reset-fail-");
+  try {
+    writeFileSync(join(repo, "file.txt"), "content\n", "utf-8");
+    await git(repo, ["add", "file.txt"]);
+    await git(repo, ["commit", "-m", "initial"]);
+
+    await assert.rejects(
+      () => resetToCommit("deadbeefdeadbeef", repo),
       (err: Error) => {
         assert.ok(err instanceof Error, "Should throw an Error");
         assert.match(
