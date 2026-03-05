@@ -522,7 +522,7 @@ export class MainLoop {
       });
 
       // 12-13. Periodic tasks
-      this.doPeriodicTasks(projectPath);
+      await this.doPeriodicTasks(projectPath);
     } catch (err) {
       log.error("Task execution error", err);
       this.tracker.setCycleSteps(
@@ -579,10 +579,7 @@ export class MainLoop {
           complexity:
             typeof plan.estimatedComplexity === "string"
               ? (
-                  { low: "S", medium: "M", high: "L" } as Record<
-                    string,
-                    string
-                  >
+                  { low: "S", medium: "M", high: "L" } as Record<string, string>
                 )[plan.estimatedComplexity]
               : undefined,
           workInstructions:
@@ -625,9 +622,7 @@ export class MainLoop {
 
     // Layer 3: if still null, short sleep will retry (handled by start())
     if (!decision.taskDescription) {
-      log.warn(
-        "Brain: no task after directive retry. Short sleep then retry.",
-      );
+      log.warn("Brain: no task after directive retry. Short sleep then retry.");
       this.endStep("decide", "failed", "No task found");
       this.skipRemainingSteps("decide");
       this.setState("idle");
@@ -848,9 +843,7 @@ export class MainLoop {
             iteration: nextIteration,
           });
         }
-        await switchBranch(ctx.originalBranch, ctx.projectPath).catch(
-          () => {},
-        );
+        await switchBranch(ctx.originalBranch, ctx.projectPath).catch(() => {});
         await this.cleanupTaskBranch(ctx.branchName, { force: true });
         this.setCurrentTaskId(null);
         this.tracker.setCurrentTaskDescription(null);
@@ -1245,10 +1238,9 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
                 duration_ms: 0,
               });
             } catch (logErr) {
-              log.warn(
-                "taskStore.addLog fallback failed in catch(verifyErr)",
-                { logErr },
-              );
+              log.warn("taskStore.addLog fallback failed in catch(verifyErr)", {
+                logErr,
+              });
             }
           }
         }
@@ -1387,9 +1379,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
                 ctx.projectPath,
               );
               if (!reVerify.passed) {
-                log.warn(
-                  `Review fix: hardVerify failed — ${reVerify.reason}`,
-                );
+                log.warn(`Review fix: hardVerify failed — ${reVerify.reason}`);
                 break; // Will fall through to block
               }
 
@@ -1488,9 +1478,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
         `brainReflect failed (non-fatal, continuing merge flow): ${reflectErr}`,
       );
       this.endStep("reflect", "failed", `brainReflect error: ${reflectErr}`);
-      this.eventBus.emit(
-        this.makeEvent("reflect", "after", { error: true }),
-      );
+      this.eventBus.emit(this.makeEvent("reflect", "after", { error: true }));
     }
 
     // 10. Merge or cleanup
@@ -1544,9 +1532,7 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
         phase: "blocked",
       });
       this.endStep("merge", "failed", "Rejected");
-      this.eventBus.emit(
-        this.makeEvent("merge", "after", { merged: false }),
-      );
+      this.eventBus.emit(this.makeEvent("merge", "after", { merged: false }));
 
       this.consecutiveRejections++;
       if (this.consecutiveRejections >= 5) {
@@ -1560,19 +1546,18 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
     }
   }
 
-  /** Fire-and-forget periodic tasks (chain scan, CLAUDE.md maintenance). */
-  private doPeriodicTasks(projectPath: string): void {
+  /** Periodic tasks (chain scan, CLAUDE.md maintenance). Non-fatal: errors are logged but do not abort the cycle. */
+  private async doPeriodicTasks(projectPath: string): Promise<void> {
     this.tasksCompleted++;
     const { chainScan } = this.config.values.brain;
-    if (
-      chainScan.enabled &&
-      this.tasksCompleted % chainScan.interval === 0
-    ) {
-      (async () => {
+    if (chainScan.enabled && this.tasksCompleted % chainScan.interval === 0) {
+      try {
         this.eventBus.emit(this.makeEvent("deep-review", "before"));
         await this.chainScanner.scanNext(projectPath);
         this.eventBus.emit(this.makeEvent("deep-review", "after"));
-      })().catch((err) => log.warn("Chain scan failed", err));
+      } catch (err) {
+        log.warn("Chain scan failed", err);
+      }
     }
 
     const {
@@ -1584,9 +1569,11 @@ Revise your previous proposal to address ALL issues above. Produce a complete up
       maintInterval > 0 &&
       this.tasksCompleted % maintInterval === 0
     ) {
-      this.maintenance
-        .claudeMdMaintenance(projectPath)
-        .catch((err) => log.warn("CLAUDE.md maintenance failed", err));
+      try {
+        await this.maintenance.claudeMdMaintenance(projectPath);
+      } catch (err) {
+        log.warn("CLAUDE.md maintenance failed", err);
+      }
     }
   }
 
