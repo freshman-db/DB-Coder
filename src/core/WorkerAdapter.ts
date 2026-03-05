@@ -8,6 +8,11 @@ import type { CodexBridge } from "../bridges/CodexBridge.js";
 import type { ReviewResult } from "../bridges/CodingAgent.js";
 import type { CodexConfig } from "../config/types.js";
 import { log } from "../utils/logger.js";
+import {
+  parsePreExistingIssues,
+  VALID_SEVERITIES,
+  type ValidSeverity,
+} from "../utils/parse.js";
 
 // --- Unified Worker Result ---
 
@@ -258,11 +263,16 @@ function parseClaudeReviewOutput(text: string): Omit<ReviewResult, "cost_usd"> {
       if (typeof parsed.passed === "boolean") {
         const issues = Array.isArray(parsed.issues)
           ? parsed.issues.map((i: Record<string, unknown>) => ({
-              severity: (i.severity as string) ?? "medium",
+              severity:
+                typeof i.severity === "string" &&
+                VALID_SEVERITIES.has(i.severity as ValidSeverity)
+                  ? (i.severity as ValidSeverity)
+                  : ("medium" as const),
               description: String(i.description ?? ""),
-              file: i.file as string | undefined,
-              line: i.line as number | undefined,
-              suggestion: i.suggestion as string | undefined,
+              file: typeof i.file === "string" ? i.file : undefined,
+              line: typeof i.line === "number" ? i.line : undefined,
+              suggestion:
+                typeof i.suggestion === "string" ? i.suggestion : undefined,
               source: "claude" as const,
               confidence:
                 typeof i.confidence === "number" ? i.confidence : undefined,
@@ -272,9 +282,7 @@ function parseClaudeReviewOutput(text: string): Omit<ReviewResult, "cost_usd"> {
           passed: parsed.passed,
           issues,
           summary: typeof parsed.summary === "string" ? parsed.summary : "",
-          preExistingIssues: Array.isArray(parsed.preExistingIssues)
-            ? parsed.preExistingIssues
-            : undefined,
+          preExistingIssues: parsePreExistingIssues(parsed.preExistingIssues),
         };
       }
     }

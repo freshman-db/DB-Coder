@@ -6,6 +6,7 @@ import {
   getErrorMessage,
   isPositiveFinite,
   isRecord,
+  parsePreExistingIssues,
   truncate,
   tryParseJson,
   tryParseReview,
@@ -340,4 +341,70 @@ test("tryParseReview inferSeverity classifies security terms as critical", () =>
   const parsed = tryParseReview(input);
   assert.equal(parsed.issues.length, 1);
   assert.equal(parsed.issues[0].severity, "critical");
+});
+
+// --- parsePreExistingIssues ---
+
+test("parsePreExistingIssues returns empty array for non-array input", () => {
+  assert.deepEqual(parsePreExistingIssues(null), []);
+  assert.deepEqual(parsePreExistingIssues(undefined), []);
+  assert.deepEqual(parsePreExistingIssues(42), []);
+  assert.deepEqual(parsePreExistingIssues("string"), []);
+});
+
+test("parsePreExistingIssues filters items without string description", () => {
+  const result = parsePreExistingIssues([
+    { description: "valid issue" },
+    { description: 42 },
+    { description: null },
+    {},
+  ]);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].description, "valid issue");
+});
+
+test("parsePreExistingIssues coerces file: null to undefined", () => {
+  const result = parsePreExistingIssues([
+    { description: "issue", file: null },
+  ]);
+  assert.equal(result[0].file, undefined);
+});
+
+test("parsePreExistingIssues coerces severity: number to undefined", () => {
+  const result = parsePreExistingIssues([
+    { description: "issue", severity: 99 },
+  ]);
+  assert.equal(result[0].severity, undefined);
+});
+
+// --- tryParseReview: malformed issue fields ---
+
+test("tryParseReview coerces line: string '42' to undefined", () => {
+  const json = JSON.stringify({
+    passed: false,
+    issues: [{ severity: "high", description: "bug", line: "42" }],
+    summary: "",
+  });
+  const parsed = tryParseReview(json);
+  assert.equal(parsed.issues[0].line, undefined);
+});
+
+test("tryParseReview filters out issues where severity is a number", () => {
+  const json = JSON.stringify({
+    passed: false,
+    issues: [{ severity: 99, description: "bug" }],
+    summary: "",
+  });
+  const parsed = tryParseReview(json);
+  assert.equal(parsed.issues.length, 0);
+});
+
+test("tryParseReview coerces file: null to undefined", () => {
+  const json = JSON.stringify({
+    passed: false,
+    issues: [{ severity: "high", description: "bug", file: null }],
+    summary: "",
+  });
+  const parsed = tryParseReview(json);
+  assert.equal(parsed.issues[0].file, undefined);
 });
