@@ -4,6 +4,7 @@ import { runProcess, spawnWithJsonl, type JsonlEvent } from '../utils/process.js
 import { log } from '../utils/logger.js';
 import { isPositiveFinite, tryParseJson, tryParseReview } from '../utils/parse.js';
 import { readFileSync, unlinkSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -50,7 +51,10 @@ export class CodexBridge implements CodingAgent {
     exitCode: number;
     stderr: string;
   }> {
-    const outFile = join(tmpdir(), `${opts?.outFilePrefix ?? 'codex'}-${Date.now()}.json`);
+    const outFile = join(
+      tmpdir(),
+      `${opts?.outFilePrefix ?? 'codex'}-${Date.now()}-${randomUUID()}.json`,
+    );
     const jsonFlagIndex = args.indexOf('--json');
     const invokeArgs = jsonFlagIndex >= 0
       ? [...args.slice(0, jsonFlagIndex + 1), '-o', outFile, ...args.slice(jsonFlagIndex + 1)]
