@@ -1553,6 +1553,9 @@ Revise the previous proposal to address ALL issues above. Produce a complete upd
         this.eventBus.emit(this.makeEvent("deep-review", "after"));
       } catch (err) {
         log.warn("Chain scan failed", err);
+        this.eventBus.emit(
+          this.makeEvent("deep-review", "after", { error: true }),
+        );
       }
     }
 
