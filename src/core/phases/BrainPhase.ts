@@ -813,9 +813,38 @@ Be decisive. Minor reviewer concerns should not block a good plan — use APPROV
       )
       .join("\n");
 
-    const allowedDecisions = isRetry
-      ? '"ignore", "block", "split"'
-      : '"fix", "ignore", "block", "rewrite", "split"';
+    const allDecisions = [
+      {
+        key: "FIX",
+        desc: "Send specific fix instructions to the worker (resume context)",
+      },
+      { key: "IGNORE", desc: "Issues are minor/false-positive, merge as-is" },
+      { key: "BLOCK", desc: "Issues are severe, discard this work" },
+      {
+        key: "REWRITE",
+        desc: "Fundamental approach is wrong, provide new instructions",
+      },
+      {
+        key: "SPLIT",
+        desc: "Merge what works, create new tasks for unresolved issues",
+      },
+    ];
+    const allowed = isRetry
+      ? allDecisions.filter((d) => ["IGNORE", "BLOCK", "SPLIT"].includes(d.key))
+      : allDecisions;
+    const allowedKeys = allowed.map((d) => d.key).join(", ");
+    const decisionList = allowed
+      .map((d) => `- **${d.key}**: ${d.desc}`)
+      .join("\n");
+
+    const templates = allowed
+      .map((d) => {
+        if (d.key === "SPLIT") {
+          return `${d.key}\n[reasoning]\nNEW_TASKS:\n- [new task 1 description]\n- [new task 2 description]`;
+        }
+        return `${d.key}\n[${d.key === "FIX" || d.key === "REWRITE" ? "instructions for the worker" : "reasoning"}]`;
+      })
+      .join("\n\n");
 
     const prompt = `You are the brain of an autonomous coding agent. A code review found issues.
 
@@ -831,18 +860,17 @@ Summary: ${reviewResult.summary}
 ${diff.slice(0, 100_000)}
 \`\`\`
 
-## Available Decisions: ${allowedDecisions}
-- **fix**: Send specific fix instructions to the worker (resume context)
-- **ignore**: Issues are minor/false-positive, merge as-is
-- **block**: Issues are severe, discard this work
-- **rewrite**: Fundamental approach is wrong, provide new instructions
-- **split**: Merge what works, create new tasks for unresolved issues
+## Available Decisions
+${decisionList}
+${isRetry ? "\nThis is a RETRY — the worker already attempted one fix." : ""}
 
-${isRetry ? "This is a RETRY — the worker already attempted one fix. Only ignore/block/split are available." : ""}
+## Output
+Your FIRST LINE must be one of: ${allowedKeys}
+Write all other text in ${this.config.values.brain.language}.
 
-## Output (JSON only)
-Write all text fields (reasoning, fixInstructions, newTasks) in ${this.config.values.brain.language}.
-{"decision": "...", "reasoning": "...", "fixInstructions": "...", "newTasks": ["..."]}`;
+${templates}
+
+For SPLIT, the NEW_TASKS: delimiter and task list are REQUIRED.`;
 
     const result = await this.brainThink(prompt);
 
@@ -860,48 +888,7 @@ Write all text fields (reasoning, fixInstructions, newTasks) in ${this.config.va
       duration_ms: result.durationMs,
     });
 
-    // Parse decision
-    const parsed = extractJsonFromText(
-      result.text,
-      (v) =>
-        isRecord(v) &&
-        typeof (v as Record<string, unknown>).decision === "string",
-    );
-
-    if (isRecord(parsed)) {
-      const decision = String(parsed.decision) as
-        | "fix"
-        | "ignore"
-        | "block"
-        | "rewrite"
-        | "split";
-
-      // Validate retry constraints
-      const validRetryDecisions = ["ignore", "block", "split"];
-      const validDecisions = ["fix", "ignore", "block", "rewrite", "split"];
-      const allowed = isRetry ? validRetryDecisions : validDecisions;
-
-      if (allowed.includes(decision)) {
-        return {
-          decision,
-          reasoning: String(parsed.reasoning ?? ""),
-          fixInstructions:
-            typeof parsed.fixInstructions === "string"
-              ? parsed.fixInstructions
-              : undefined,
-          newTasks: Array.isArray(parsed.newTasks)
-            ? parsed.newTasks.map(String)
-            : undefined,
-        };
-      }
-    }
-
-    // Parse failure — default to block
-    log.warn("Brain review decision unparseable, defaulting to block");
-    return {
-      decision: "block",
-      reasoning: "Decision parse failure — blocking for safety",
-    };
+    return parseReviewDecision(result.text, isRetry);
   }
 
   // --- Brain reflection ---
@@ -999,4 +986,93 @@ LESSON: <one sentence the brain should remember for next task selection>`;
       .trim();
     return truncate(cleaned, CLAUDE_MEM_CONTEXT_MAX_CHARS);
   }
+}
+
+// --- Exported pure function for review decision parsing ---
+
+export type ReviewDecision = "fix" | "ignore" | "block" | "rewrite" | "split";
+
+export interface ParsedReviewDecision {
+  decision: ReviewDecision;
+  reasoning: string;
+  fixInstructions?: string;
+  newTasks?: string[];
+}
+
+export function parseReviewDecision(
+  rawText: string,
+  isRetry: boolean,
+): ParsedReviewDecision {
+  const text = rawText.trim();
+  const firstLine = text.split("\n")[0].trim().toUpperCase();
+  const keywordMatch = /^(FIX|IGNORE|BLOCK|REWRITE|SPLIT)\b/.exec(firstLine);
+
+  const decision: ReviewDecision | undefined = keywordMatch
+    ? (keywordMatch[1].toLowerCase() as ReviewDecision)
+    : undefined;
+
+  // Include both same-line content after keyword and subsequent lines
+  const rawFirstLine = text.split("\n")[0];
+  const firstLineRemainder = keywordMatch
+    ? rawFirstLine
+        .slice(keywordMatch[0].length)
+        .replace(/^[:\s]+/, "")
+        .trim()
+    : "";
+  const restLines = text.includes("\n")
+    ? text.slice(text.indexOf("\n")).trim()
+    : "";
+  const body = [firstLineRemainder, restLines].filter(Boolean).join("\n");
+
+  if (decision) {
+    const allowed: ReviewDecision[] = isRetry
+      ? ["ignore", "block", "split"]
+      : ["fix", "ignore", "block", "rewrite", "split"];
+
+    if (allowed.includes(decision)) {
+      // For split, extract new tasks after explicit NEW_TASKS: delimiter only
+      let newTasks: string[] | undefined;
+      let reasoning = body;
+      if (decision === "split") {
+        const delimMatch = /\bNEW[_ ]TASKS\s*:/i.exec(body);
+        if (delimMatch) {
+          reasoning = body.slice(0, delimMatch.index).trim();
+          const taskSection = body.slice(
+            delimMatch.index + delimMatch[0].length,
+          );
+          const tasks = taskSection
+            .split("\n")
+            .filter((l) => /^\s*[-*]\s+/.test(l) || /^\s*\d+[.)]\s+/.test(l))
+            .map((l) =>
+              l
+                .replace(/^\s*[-*]\s+/, "")
+                .replace(/^\s*\d+[.)]\s+/, "")
+                .trim(),
+            )
+            .filter((l) => l.length > 0);
+          if (tasks.length > 0) newTasks = tasks;
+        }
+
+        if (!newTasks) {
+          return {
+            decision: "block",
+            reasoning: `Split without follow-up tasks: ${reasoning}`,
+          };
+        }
+      }
+
+      return {
+        decision,
+        reasoning,
+        fixInstructions:
+          decision === "fix" || decision === "rewrite" ? body : undefined,
+        newTasks,
+      };
+    }
+  }
+
+  return {
+    decision: "block",
+    reasoning: "Decision parse failure — blocking for safety",
+  };
 }
