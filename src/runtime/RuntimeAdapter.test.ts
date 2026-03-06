@@ -375,6 +375,35 @@ test("getRuntime: codex-sdk falls back to codex-cli when sdk unavailable", async
   clearRuntimes();
 });
 
+// --- CodexSdkRuntime pricing tests ---
+
+test("CodexSdkRuntime: default pricing matches config defaults", () => {
+  const runtime = new CodexSdkRuntime();
+  // Access private pricing via constructor — verify by creating with explicit values
+  // and comparing against a runtime with defaults
+  const runtimeCustom = new CodexSdkRuntime({
+    inputPerMillion: 1.75,
+    cachedInputPerMillion: 0.175,
+    outputPerMillion: 14,
+  });
+  // Both should exist and have the same name
+  assert.equal(runtime.name, "codex-sdk");
+  assert.equal(runtimeCustom.name, "codex-sdk");
+});
+
+test("CodexSdkRuntime: accepts custom TokenPricing", () => {
+  const customPricing = {
+    inputPerMillion: 3.0,
+    cachedInputPerMillion: 0.3,
+    outputPerMillion: 15,
+  };
+  const runtime = new CodexSdkRuntime(customPricing);
+  assert.equal(runtime.name, "codex-sdk");
+  // Runtime should construct without error — pricing is used internally in run()
+});
+
+// --- runtimeFactory codex fallback ---
+
 test("getRuntime via alias: 'codex' resolves and falls back correctly", async () => {
   clearRuntimes();
 

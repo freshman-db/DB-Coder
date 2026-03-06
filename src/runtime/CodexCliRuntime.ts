@@ -43,15 +43,12 @@ export class CodexCliRuntime implements RuntimeAdapter {
       ? ("workspace-read" as const)
       : undefined;
 
-    // Model override: if caller requests a specific model, create a bridge
-    // with that model configured. CodexBridge itself doesn't pass --model
-    // to the CLI yet (TODO: A-4 will add --model flag), but the config
-    // will be used when CodexBridge is updated to support it.
     const result = await this.bridge.execute(prompt, opts.cwd, {
       systemPrompt: opts.systemPrompt,
       maxTurns: opts.maxTurns,
       maxBudget: opts.maxBudget,
       timeout: opts.timeout,
+      model: opts.model,
       sandboxOverride,
       resumeSessionId: opts.resumeSessionId,
       resumePrompt: opts.resumePrompt,
@@ -73,8 +70,6 @@ export class CodexCliRuntime implements RuntimeAdapter {
   }
 
   supportsModel(modelId: string): boolean {
-    return CODEX_MODEL_PREFIXES.some((prefix) =>
-      modelId.startsWith(prefix),
-    );
+    return CODEX_MODEL_PREFIXES.some((prefix) => modelId.startsWith(prefix));
   }
 }

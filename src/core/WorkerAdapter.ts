@@ -138,8 +138,6 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
   constructor(private codex: CodexBridge) {}
 
-  // TODO(A-2): pass opts.model to codex once CodexSdkRuntime replaces this adapter.
-  // Currently codex model is configured globally in ~/.codex/config.toml.
   async execute(prompt: string, opts: WorkerExecOpts): Promise<WorkerResult> {
     const result = await this.codex.execute(prompt, opts.cwd, {
       systemPrompt: opts.appendSystemPrompt,

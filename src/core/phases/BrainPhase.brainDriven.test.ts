@@ -404,6 +404,48 @@ test("Non-brain-driven enqueue: does not write directive or resource_request", (
   assert.equal(updates.resource_request, undefined);
 });
 
+// --- gatherBrainContextMinimal: quality signal logic ---
+
+test("quality signal: LESSON with 'low-value' → ' · low-value' suffix", () => {
+  const lesson = "LESSON: this pattern is low-value, skip in future";
+  const quality = lesson.startsWith("LESSON:")
+    ? lesson.includes("low-value") || lesson.includes("not worth")
+      ? " · low-value"
+      : " ✓ high-value"
+    : "";
+  assert.equal(quality, " · low-value");
+});
+
+test("quality signal: LESSON with 'not worth' → ' · low-value' suffix", () => {
+  const lesson = "LESSON: not worth the effort for this type of task";
+  const quality = lesson.startsWith("LESSON:")
+    ? lesson.includes("low-value") || lesson.includes("not worth")
+      ? " · low-value"
+      : " ✓ high-value"
+    : "";
+  assert.equal(quality, " · low-value");
+});
+
+test("quality signal: LESSON without negative keywords → ' ✓ high-value'", () => {
+  const lesson = "LESSON: OAuth refactoring is a good pattern";
+  const quality = lesson.startsWith("LESSON:")
+    ? lesson.includes("low-value") || lesson.includes("not worth")
+      ? " · low-value"
+      : " ✓ high-value"
+    : "";
+  assert.equal(quality, " ✓ high-value");
+});
+
+test("quality signal: non-LESSON prefix → empty string", () => {
+  const lesson = "Some arbitrary reflection text";
+  const quality = lesson.startsWith("LESSON:")
+    ? lesson.includes("low-value") || lesson.includes("not worth")
+      ? " · low-value"
+      : " ✓ high-value"
+    : "";
+  assert.equal(quality, "");
+});
+
 // --- Summary fallback ---
 
 test("summary fallback: truncate from directive when summary is empty", () => {

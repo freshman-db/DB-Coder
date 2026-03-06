@@ -131,6 +131,7 @@ export class CodexBridge implements CodingAgent {
       maxTurns?: number;
       maxBudget?: number;
       timeout?: number;
+      model?: string;
       sandboxOverride?: CodexConfig["sandbox"];
       resumeSessionId?: string;
       /** Short prompt for resumed sessions; used only when resume is possible. */
@@ -152,20 +153,20 @@ export class CodexBridge implements CodingAgent {
       if (canResume) {
         // codex exec resume [OPTIONS] <SESSION_ID> <PROMPT>
         const effectivePrompt = options!.resumePrompt ?? prompt;
-        args = [
-          "exec",
-          "resume",
-          "--full-auto",
-          "--json",
-          options!.resumeSessionId!,
-          effectivePrompt,
-        ];
+        args = ["exec", "resume", "--full-auto", "--json"];
+        if (options?.model) {
+          args.push("--model", options.model);
+        }
+        args.push(options!.resumeSessionId!, effectivePrompt);
       } else {
         args = [
           "exec",
           ...this.sandboxArgs(options?.sandboxOverride),
           "--json",
         ];
+        if (options?.model) {
+          args.push("--model", options.model);
+        }
         if (options?.systemPrompt) {
           args.push("--instructions", options.systemPrompt);
         }

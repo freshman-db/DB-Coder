@@ -13,6 +13,7 @@ import type {
   RunOptions,
   RunResult,
 } from "./RuntimeAdapter.js";
+import type { TokenPricing } from "../config/types.js";
 import { log } from "../utils/logger.js";
 
 // Lazy import to avoid hard crash when @openai/codex-sdk is not installed
@@ -34,6 +35,13 @@ async function loadSdk(): Promise<typeof import("@openai/codex-sdk").Codex> {
 
 const CODEX_MODEL_PREFIXES = ["gpt-", "o1-", "o3-", "o4-"];
 
+// Default pricing fallback (matches config defaults in Config.ts)
+const DEFAULT_PRICING: TokenPricing = {
+  inputPerMillion: 1.75,
+  cachedInputPerMillion: 0.175,
+  outputPerMillion: 14,
+};
+
 export class CodexSdkRuntime implements RuntimeAdapter {
   readonly name = "codex-sdk";
 
@@ -45,6 +53,12 @@ export class CodexSdkRuntime implements RuntimeAdapter {
     toolSurface: false,
     extendedThinking: false,
   };
+
+  private readonly pricing: TokenPricing;
+
+  constructor(pricing?: TokenPricing) {
+    this.pricing = pricing ?? DEFAULT_PRICING;
+  }
 
   async run(prompt: string, opts: RunOptions): Promise<RunResult> {
     const start = Date.now();
@@ -86,11 +100,16 @@ export class CodexSdkRuntime implements RuntimeAdapter {
         : null;
       turnOpts.signal = controller.signal;
 
-      // Use streamed run for event access
+      // Build effective prompt: prepend systemPrompt if provided
+      // (Codex SDK has no native instructions param; CLI uses --instructions)
+      let basePrompt = prompt;
+      if (opts.systemPrompt && !opts.resumeSessionId) {
+        basePrompt = `${opts.systemPrompt}\n\n${prompt}`;
+      }
       const effectivePrompt =
         opts.resumeSessionId && opts.resumePrompt
           ? opts.resumePrompt
-          : prompt;
+          : basePrompt;
 
       const streamed = await thread.runStreamed(effectivePrompt, turnOpts);
 
@@ -125,14 +144,9 @@ export class CodexSdkRuntime implements RuntimeAdapter {
             if (event.item.type === "agent_message") {
               textParts.push(event.item.text);
               if (opts.onText) opts.onText(event.item.text);
-            } else if (
-              event.item.type === "error" &&
-              "message" in event.item
-            ) {
+            } else if (event.item.type === "error" && "message" in event.item) {
               hasError = true;
-              errors.push(
-                (event.item as { message: string }).message,
-              );
+              errors.push((event.item as { message: string }).message);
             }
             break;
         }
@@ -143,12 +157,16 @@ export class CodexSdkRuntime implements RuntimeAdapter {
       const text = textParts.join("\n");
       const durationMs = Date.now() - start;
 
-      // Estimate cost from token usage (using codex pricing)
-      // Default pricing: $1.75/M input, $0.175/M cached, $7/M output
+      // Estimate cost from token usage using configured pricing
+      const nonCachedInput = Math.max(
+        0,
+        totalInputTokens - totalCachedInputTokens,
+      );
       const costUsd =
-        (totalInputTokens - totalCachedInputTokens) * (1.75 / 1_000_000) +
-        totalCachedInputTokens * (0.175 / 1_000_000) +
-        totalOutputTokens * (7.0 / 1_000_000);
+        nonCachedInput * (this.pricing.inputPerMillion / 1_000_000) +
+        totalCachedInputTokens *
+          (this.pricing.cachedInputPerMillion / 1_000_000) +
+        totalOutputTokens * (this.pricing.outputPerMillion / 1_000_000);
 
       // Attempt structured output extraction from last agent_message
       let structured: unknown;
@@ -193,8 +211,6 @@ export class CodexSdkRuntime implements RuntimeAdapter {
   }
 
   supportsModel(modelId: string): boolean {
-    return CODEX_MODEL_PREFIXES.some((prefix) =>
-      modelId.startsWith(prefix),
-    );
+    return CODEX_MODEL_PREFIXES.some((prefix) => modelId.startsWith(prefix));
   }
 }

@@ -897,17 +897,38 @@ ${context}
       );
     }
 
-    // Recent tasks (dedup signal)
+    // Recent tasks with quality signals (dedup + learning)
     const recentResult = await this.taskStore.listTasksPaged(
       projectPath,
       1,
       15,
     );
     const recentTasks = recentResult.tasks ?? [];
-    if (recentTasks.length > 0) {
-      const lines = recentTasks.map(
-        (t: Task) => `- [${t.status}] ${t.task_description}`,
+    let recentReflections: Awaited<
+      ReturnType<TaskStore["getRecentReflections"]>
+    > = [];
+    try {
+      recentReflections = await this.taskStore.getRecentReflections(
+        projectPath,
+        15,
       );
+    } catch (error) {
+      log.warn("gatherBrainContextMinimal: reflections fetch failed", error);
+    }
+
+    if (recentTasks.length > 0) {
+      const lessonByDesc = new Map(
+        recentReflections.map((r) => [r.task_description, r.lesson]),
+      );
+      const lines = recentTasks.map((t: Task) => {
+        const lesson = lessonByDesc.get(t.task_description) ?? "";
+        const quality = lesson.startsWith("LESSON:")
+          ? lesson.includes("low-value") || lesson.includes("not worth")
+            ? " · low-value"
+            : " \u2713 high-value"
+          : "";
+        return `- [${t.status}${quality}] ${t.task_description}`;
+      });
       parts.push(`Recent tasks (DO NOT duplicate these):\n${lines.join("\n")}`);
     }
 
@@ -927,6 +948,20 @@ ${context}
       );
     } catch (e) {
       log.debug("gatherBrainContextMinimal: metrics failed:", e);
+    }
+
+    // Recent reflection lessons (learning loop)
+    try {
+      const reflections = recentReflections.slice(0, 5);
+      if (reflections.length > 0) {
+        const lines = reflections.map(
+          (r) =>
+            `- [${r.status}] "${truncate(r.task_description, 60)}" → ${r.lesson}`,
+        );
+        parts.push(`## Recent Reflection Lessons\n${lines.join("\n")}`);
+      }
+    } catch (e) {
+      log.debug("gatherBrainContextMinimal: reflections render failed:", e);
     }
 
     return parts.join("\n\n");

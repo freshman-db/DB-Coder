@@ -525,6 +525,99 @@ test("execute keeps cost at zero without pricing even when usage tokens are pres
   );
 });
 
+// ─── --model passthrough tests ──────────────────────────────────────
+
+test("execute passes --model flag to CLI args when model is specified", async () => {
+  await withMockedSpawn(
+    (call) => {
+      const child = new FakeChildProcess();
+      const outFile = getOutputFilePath(call.args);
+
+      setImmediate(() => {
+        writeFileSync(outFile, JSON.stringify({ output: "done" }));
+        child.stdout.end();
+        child.emit("close", 0);
+      });
+
+      return child as unknown as ChildProcess;
+    },
+    async (calls) => {
+      const bridge = new CodexBridge(createCodexConfig());
+      await bridge.execute("Do work", process.cwd(), {
+        model: "o4-mini",
+      });
+
+      const args = calls[0].args;
+      const modelIdx = args.indexOf("--model");
+      assert.ok(modelIdx >= 0, "must include --model flag");
+      assert.equal(args[modelIdx + 1], "o4-mini");
+    },
+  );
+});
+
+test("execute does not include --model flag when model is not specified", async () => {
+  await withMockedSpawn(
+    (call) => {
+      const child = new FakeChildProcess();
+      const outFile = getOutputFilePath(call.args);
+
+      setImmediate(() => {
+        writeFileSync(outFile, JSON.stringify({ output: "done" }));
+        child.stdout.end();
+        child.emit("close", 0);
+      });
+
+      return child as unknown as ChildProcess;
+    },
+    async (calls) => {
+      const bridge = new CodexBridge(createCodexConfig());
+      await bridge.execute("Do work", process.cwd());
+
+      const args = calls[0].args;
+      assert.ok(
+        !args.includes("--model"),
+        "must NOT include --model when not specified",
+      );
+    },
+  );
+});
+
+test("execute resume passes --model flag when model is specified", async () => {
+  await withMockedSpawn(
+    (call) => {
+      const child = new FakeChildProcess();
+      const outFile = getOutputFilePath(call.args);
+
+      setImmediate(() => {
+        writeFileSync(outFile, JSON.stringify({ output: "resumed" }));
+        child.stdout.end();
+        child.emit("close", 0);
+      });
+
+      return child as unknown as ChildProcess;
+    },
+    async (calls) => {
+      const bridge = new CodexBridge({
+        ...createCodexConfig(),
+        sandbox: "full-auto",
+      });
+      await bridge.execute("Continue", process.cwd(), {
+        resumeSessionId: "sess-abc",
+        model: "gpt-5.3-codex",
+      });
+
+      const args = calls[0].args;
+      assert.ok(args.includes("resume"), "must use resume subcommand");
+      const modelIdx = args.indexOf("--model");
+      assert.ok(modelIdx >= 0, "resume must include --model flag");
+      assert.equal(args[modelIdx + 1], "gpt-5.3-codex");
+      // Session ID and prompt are the last two positional args
+      assert.equal(args[args.length - 2], "sess-abc");
+      assert.equal(args[args.length - 1], "Continue");
+    },
+  );
+});
+
 // ─── resume tests ───────────────────────────────────────────────────
 
 test("execute with resumeSessionId builds correct codex exec resume args", async () => {
