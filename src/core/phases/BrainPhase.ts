@@ -16,20 +16,10 @@ import { resolveModelId } from "../../config/Config.js";
 import type { TaskStore } from "../../memory/TaskStore.js";
 import type { CostTracker } from "../../utils/cost.js";
 import type {
-  ClaudeCodeSession,
-  SessionResult,
-} from "../../bridges/ClaudeCodeSession.js";
-import type { RuntimeAdapter } from "../../runtime/RuntimeAdapter.js";
+  RuntimeAdapter,
+  RunResult,
+} from "../../runtime/RuntimeAdapter.js";
 import type { ReviewResult } from "../../bridges/CodingAgent.js";
-
-// Thin seam: BrainPhase accepts either the legacy ClaudeCodeSession or
-// the new RuntimeAdapter. Phase 3 will remove ClaudeCodeSession from this union.
-export type BrainRuntime = ClaudeCodeSession | RuntimeAdapter;
-
-/** Type guard: distinguish RuntimeAdapter from ClaudeCodeSession */
-export function isRuntimeAdapter(rt: BrainRuntime): rt is RuntimeAdapter {
-  return "capabilities" in rt;
-}
 import type { Task, ResourceRequest } from "../../memory/types.js";
 import type { TaskQueue } from "../TaskQueue.js";
 import type { RegisteredStrategies } from "../strategies/index.js";
@@ -154,37 +144,41 @@ async function runGitLog(cwd: string): Promise<{ stdout: string }> {
 // ---------------------------------------------------------------------------
 
 export class BrainPhase {
+  /** Per-phase runtime overrides. Falls back to brainSession when undefined. */
+  private readonly planRuntime: RuntimeAdapter;
+  private readonly reflectRuntime: RuntimeAdapter;
+
   constructor(
     private readonly config: Config,
     private readonly taskStore: TaskStore,
     private readonly costTracker: CostTracker,
-    private readonly brainSession: BrainRuntime,
+    private readonly brainSession: RuntimeAdapter,
     private readonly taskQueue: TaskQueue,
     private readonly strategies: RegisteredStrategies | undefined,
     private readonly projectMemory: ProjectMemory | null,
     private readonly memoryProject: string,
-  ) {}
-
-  /**
-   * Narrow brainSession to ClaudeCodeSession for legacy code paths.
-   * Phase 3 will remove this once all call sites use RuntimeAdapter.run().
-   */
-  private get legacySession(): ClaudeCodeSession {
-    if (isRuntimeAdapter(this.brainSession)) {
-      throw new Error(
-        "BrainPhase: legacy code path called with RuntimeAdapter — migrate to RuntimeAdapter.run()",
-      );
-    }
-    return this.brainSession;
+    phaseRuntimes?: {
+      plan?: RuntimeAdapter;
+      reflect?: RuntimeAdapter;
+    },
+  ) {
+    this.planRuntime = phaseRuntimes?.plan ?? brainSession;
+    this.reflectRuntime = phaseRuntimes?.reflect ?? brainSession;
   }
 
   // --- Convenience wrapper ---
 
   private brainThink(
     prompt: string,
-    opts?: { jsonSchema?: object; resumeSessionId?: string },
-  ): Promise<SessionResult> {
-    return runBrainThink(this.legacySession, this.config, prompt, opts);
+    opts?: {
+      jsonSchema?: object;
+      resumeSessionId?: string;
+      model?: string;
+      runtime?: RuntimeAdapter;
+    },
+  ): Promise<RunResult> {
+    const runtime = opts?.runtime ?? this.brainSession;
+    return runBrainThink(runtime, this.config, prompt, opts);
   }
 
   // --- Brain decide (two-phase: explore + structured) ---
@@ -280,16 +274,15 @@ Write your analysis as a natural language report.`;
     log.info(
       `Brain phase1 (explore): cost=$${phase1Result.costUsd.toFixed(4)}, turns=${phase1Result.numTurns}, text=${phase1Result.text.length}chars`,
     );
-    if (phase1Result.isError || phase1Result.exitCode !== 0) {
+    if (phase1Result.isError) {
       log.warn(
-        `Brain phase1 errors (exitCode=${phase1Result.exitCode}, isError=${phase1Result.isError}): ${phase1Result.errors.join("; ")}`,
+        `Brain phase1 errors (isError=${phase1Result.isError}): ${phase1Result.errors.join("; ")}`,
       );
     }
 
-    const phase1SessionId =
-      !phase1Result.isError && phase1Result.exitCode === 0
-        ? phase1Result.sessionId
-        : undefined;
+    const phase1SessionId = !phase1Result.isError
+      ? phase1Result.sessionId
+      : undefined;
     const analysisReport = phase1Result.text;
 
     // --- Phase 2: Structured output (jsonSchema, converts analysis to tasks) ---
@@ -378,9 +371,9 @@ ${analysisReport}
     });
     totalCost += phase2Result.costUsd;
     log.info(
-      `Brain phase2 (structured): cost=$${phase2Result.costUsd.toFixed(4)}, exit=${phase2Result.exitCode}, json=${phase2Result.json ? "yes" : "no"}, text="${truncate(phase2Result.text, 200)}"`,
+      `Brain phase2 (structured): cost=$${phase2Result.costUsd.toFixed(4)}, error=${phase2Result.isError}, json=${phase2Result.structured ? "yes" : "no"}, text="${truncate(phase2Result.text, 200)}"`,
     );
-    if (phase2Result.isError || phase2Result.exitCode !== 0) {
+    if (phase2Result.isError) {
       log.warn(`Brain phase2 errors: ${phase2Result.errors.join("; ")}`);
     }
 
@@ -465,7 +458,9 @@ ${analysisReport}
     };
 
     // Primary: structured output from --json-schema
-    const parsed = isRecord(phase2Result.json) ? phase2Result.json : null;
+    const parsed = isRecord(phase2Result.structured)
+      ? phase2Result.structured
+      : null;
     if (parsed) {
       const result = parseTaskArray(parsed);
       if (result.taskDescription) return result;
@@ -602,14 +597,14 @@ ${context}
     });
     totalCost += result.costUsd;
     log.info(
-      `Brain (brain-driven): cost=$${result.costUsd.toFixed(4)}, exit=${result.exitCode}, json=${result.json ? "yes" : "no"}`,
+      `Brain (brain-driven): cost=$${result.costUsd.toFixed(4)}, error=${result.isError}, json=${result.structured ? "yes" : "no"}`,
     );
-    if (result.isError || result.exitCode !== 0) {
+    if (result.isError) {
       log.warn(`Brain (brain-driven) errors: ${result.errors.join("; ")}`);
     }
 
     // Parse the brain-driven output
-    const parsed = isRecord(result.json) ? result.json : null;
+    const parsed = isRecord(result.structured) ? result.structured : null;
     if (parsed && Array.isArray(parsed.tasks) && parsed.tasks.length > 0) {
       const parsedResult = this.parseBrainDrivenTasks(
         parsed.tasks as Record<string, unknown>[],
@@ -1050,11 +1045,11 @@ Respond with EXACTLY this JSON (no markdown):
       jsonSchema: directiveSchema,
     });
     log.info(
-      `Brain directive raw: cost=$${result.costUsd.toFixed(4)}, exit=${result.exitCode}, turns=${result.numTurns}, json=${result.json ? "yes" : "no"}, text="${truncate(result.text, 200)}"`,
+      `Brain directive raw: cost=$${result.costUsd.toFixed(4)}, error=${result.isError}, turns=${result.numTurns}, json=${result.structured ? "yes" : "no"}, text="${truncate(result.text, 200)}"`,
     );
 
     // Primary: structured output
-    const parsed = isRecord(result.json) ? result.json : null;
+    const parsed = isRecord(result.structured) ? result.structured : null;
     if (parsed && typeof parsed.task === "string") {
       return {
         taskDescription: parsed.task,
@@ -1137,7 +1132,10 @@ REJECTED
 Prefer REVISE over REJECTED when the proposal shows understanding of the problem but has gaps.
 Be decisive. Minor reviewer concerns should not block a good plan — use APPROVED.`;
 
-    const result = await this.brainThink(prompt);
+    const result = await this.brainThink(prompt, {
+      model: this.config.values.routing.plan.model,
+      runtime: this.planRuntime,
+    });
 
     if (result.costUsd > 0) {
       await this.costTracker.addCost(task.id, result.costUsd);
@@ -1309,13 +1307,15 @@ Verification: ${verification.passed ? "PASSED" : `FAILED — ${verification.reas
 After your reflection, output a single-line actionable lesson:
 LESSON: <one sentence the brain should remember for next task selection>`;
 
-    const result = await this.legacySession.run(prompt, {
-      permissionMode: "bypassPermissions",
-      maxTurns: 50,
+    const result = await this.reflectRuntime.run(prompt, {
       cwd: projectPath,
+      maxTurns: 50,
       timeout: 900_000,
-      model: resolveModelId(this.config.values.brain.model),
-      appendSystemPrompt:
+      model: resolveModelId(
+        this.config.values.routing.reflect.model ||
+          this.config.values.brain.model,
+      ),
+      systemPrompt:
         "You are reflecting on a task. Do not modify source code. Do not edit CLAUDE.md unless absolutely necessary.",
       allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
     });
@@ -1410,6 +1410,8 @@ LESSON: <one sentence the brain should remember for next task selection>`;
 
     const result = await this.brainThink(prompt, {
       jsonSchema: reflectionSchema,
+      model: this.config.values.routing.reflect.model,
+      runtime: this.reflectRuntime,
     });
 
     if (result.costUsd > 0)
@@ -1419,7 +1421,7 @@ LESSON: <one sentence the brain should remember for next task selection>`;
     let outputSummary: string;
     let details: Record<string, unknown> | null = null;
 
-    const parsed = isRecord(result.json) ? result.json : null;
+    const parsed = isRecord(result.structured) ? result.structured : null;
     if (parsed && typeof parsed.retrieval_lesson === "string") {
       outputSummary = `LESSON: ${parsed.retrieval_lesson}`;
       details = {
