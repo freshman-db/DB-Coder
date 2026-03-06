@@ -97,6 +97,10 @@ type BrainOpts = {
   complexity?: string;
   subtasks?: Array<{ description: string; order: number }>;
   workInstructions?: WorkInstructions;
+  // Brain-driven mode (B-1)
+  directive?: string;
+  resourceRequest?: import("../memory/types.js").ResourceRequest;
+  isBrainDriven?: boolean;
 };
 
 /** Context shared across pipeline sub-methods within a single cycle. */
@@ -575,7 +579,27 @@ export class MainLoop {
             typeof plan.workInstructions === "string"
               ? plan.workInstructions
               : undefined,
+          // Restore brain-driven fields (B-1)
+          directive:
+            typeof plan.directive === "string" ? plan.directive : undefined,
+          resourceRequest:
+            plan.resourceRequest != null &&
+            typeof plan.resourceRequest === "object" &&
+            !Array.isArray(plan.resourceRequest)
+              ? (plan.resourceRequest as BrainOpts["resourceRequest"])
+              : undefined,
+          isBrainDriven: plan.isBrainDriven === true ? true : undefined,
         };
+      }
+
+      // Also restore directive from task column (written by brain-decide path)
+      if (!brainOpts?.directive && task.directive) {
+        if (!brainOpts) brainOpts = {};
+        brainOpts.directive = task.directive;
+        brainOpts.isBrainDriven = true;
+        if (task.resource_request) {
+          brainOpts.resourceRequest = task.resource_request;
+        }
       }
 
       log.info(
@@ -707,15 +731,29 @@ export class MainLoop {
       await this.taskStore.updateTask(task.id, updates);
     }
 
+    // Store brain-driven fields (B-1)
+    if (decision.isBrainDriven) {
+      await this.taskStore.updateTask(task.id, {
+        directive: decision.directive ?? null,
+        strategy_note: decision.strategyNote ?? null,
+        verification_plan: decision.verificationPlan ?? null,
+        resource_request: decision.resourceRequest ?? null,
+      });
+    }
+
     const brainOpts: BrainOpts = {
       persona: decision.persona,
       taskType: decision.taskType,
       complexity: decision.complexity,
       subtasks: decision.subtasks,
       workInstructions: decision.workInstructions,
+      // Brain-driven: directive passthrough
+      directive: decision.directive,
+      resourceRequest: decision.resourceRequest,
+      isBrainDriven: decision.isBrainDriven,
     };
 
-    // Enqueue extra tasks from brain's batch output
+    // Enqueue extra tasks from brain's batch output (legacy path)
     if (decision.extraTasks && decision.extraTasks.length > 0) {
       try {
         const planTasks: PlanTask[] = decision.extraTasks.map((et, i) => ({
@@ -757,6 +795,40 @@ export class MainLoop {
         }
       } catch (err) {
         log.warn(`Failed to enqueue extra tasks: ${err}`);
+      }
+    }
+
+    // Enqueue extra tasks from brain-driven batch output (B-1 path)
+    if (
+      decision.extraDirectiveTasks &&
+      decision.extraDirectiveTasks.length > 0
+    ) {
+      try {
+        const planTasks: PlanTask[] = decision.extraDirectiveTasks.map(
+          (et, i) => ({
+            id: `extra-bd-${i + 1}`,
+            description: et.directive.slice(0, 120), // summary for queue display
+            priority: 2,
+            executor: "claude" as const,
+            subtasks: [],
+            dependsOn: [],
+            estimatedComplexity: "medium" as const,
+            // Brain-driven fields preserved in plan JSONB for queue pickup
+            directive: et.directive,
+            resourceRequest: et.resourceRequest,
+            isBrainDriven: true,
+          }),
+        );
+        const plan: TaskPlan = {
+          tasks: planTasks,
+          reasoning: "Extra tasks from brain-driven batch output",
+        };
+        const enqueuedIds = await this.taskQueue.enqueue(projectPath, plan);
+        if (enqueuedIds.length > 0) {
+          log.info(`Enqueued ${enqueuedIds.length} extra brain-driven task(s)`);
+        }
+      } catch (err) {
+        log.warn(`Failed to enqueue brain-driven extra tasks: ${err}`);
       }
     }
 

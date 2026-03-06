@@ -12,6 +12,16 @@ import { resolveModelId } from "../../config/Config.js";
 import type { TaskStore } from "../../memory/TaskStore.js";
 import type { CostTracker } from "../../utils/cost.js";
 import type { WorkerAdapter, WorkerResult } from "../WorkerAdapter.js";
+import type { RuntimeAdapter } from "../../runtime/RuntimeAdapter.js";
+
+// Thin seam: WorkerPhase accepts either the legacy WorkerAdapter or
+// the new RuntimeAdapter. Phase 3 will remove WorkerAdapter from this union.
+export type WorkerRuntime = WorkerAdapter | RuntimeAdapter;
+
+/** Type guard: distinguish RuntimeAdapter from WorkerAdapter */
+function isRuntimeAdapter(rt: WorkerRuntime): rt is RuntimeAdapter {
+  return "capabilities" in rt;
+}
 import type { Task, SubTaskRecord } from "../../memory/types.js";
 import type { VerifyBaseline } from "../ProjectVerifier.js";
 import type { PersonaLoader, WorkInstructions } from "../PersonaLoader.js";
@@ -53,6 +63,45 @@ export const COMPLEXITY_CONFIG: Record<string, ComplexityConfig> = {
   XL: { maxTurns: 200, maxBudget: 20.0, timeout: 3_600_000, model: "opus" },
 };
 
+/**
+ * Resolve a model ID from brain's resource_request.
+ * Handles both aliases ("opus" -> "claude-opus-4-6") and full IDs
+ * (e.g. "gpt-5.3-codex", "claude-opus-4-6").
+ *
+ * Decision chain:
+ * 1. Full model IDs (contain "-") pass through unchanged
+ * 2. Known aliases ("opus", "sonnet") resolve via MODEL_MAP
+ * 3. Unknown short names fall back to defaultModel with warning
+ */
+export function resolveModelForBrain(
+  brainModel: string,
+  defaultModel: string,
+): string {
+  // Full model IDs (contain "-") pass through — could be Claude, Codex, or any provider
+  if (brainModel.includes("-")) {
+    return brainModel;
+  }
+  // Short name: try alias resolution
+  const resolved = resolveModelId(brainModel);
+  if (resolved !== brainModel) {
+    // resolveModelId mapped it (or fell back to sonnet for unknown).
+    // Check if it's a known alias vs unknown fallback.
+    if (brainModel === "opus" || brainModel === "sonnet") {
+      return resolved; // known alias
+    }
+    // Unknown alias — resolveModelId silently fell back to sonnet.
+    // Use defaultModel instead to avoid silent downgrade.
+    log.warn(
+      `resource_request.model "${brainModel}" is not a recognized alias, using default "${defaultModel}"`,
+    );
+    return defaultModel;
+  }
+  // resolved === brainModel: no mapping found and no fallback triggered.
+  // This shouldn't happen with current resolveModelId (always falls back),
+  // but handle it defensively.
+  return brainModel;
+}
+
 // ---------------------------------------------------------------------------
 // WorkerPhase class
 // ---------------------------------------------------------------------------
@@ -62,10 +111,23 @@ export class WorkerPhase {
     private readonly config: Config,
     private readonly taskStore: TaskStore,
     private readonly costTracker: CostTracker,
-    private readonly worker: WorkerAdapter,
+    private readonly worker: WorkerRuntime,
     private readonly personaLoader: PersonaLoader,
     private readonly hardVerify: HardVerifyFn,
   ) {}
+
+  /**
+   * Narrow worker to WorkerAdapter for legacy code paths.
+   * Phase 3 will remove this once all call sites use RuntimeAdapter.run().
+   */
+  private get legacyWorker(): WorkerAdapter {
+    if (isRuntimeAdapter(this.worker)) {
+      throw new Error(
+        "WorkerPhase: legacy code path called with RuntimeAdapter — migrate to RuntimeAdapter.run()",
+      );
+    }
+    return this.worker;
+  }
 
   // --- Worker execution ---
 
@@ -79,8 +141,21 @@ export class WorkerPhase {
       workInstructions?: WorkInstructions;
       approvedPlan?: string;
       resumeSessionId?: string;
+      // Brain-driven mode (B-1)
+      directive?: string;
+      resourceRequest?: {
+        budget_usd: number;
+        timeout_s: number;
+        model?: string;
+      };
+      isBrainDriven?: boolean;
     },
   ): Promise<WorkerResult> {
+    // Brain-driven: directive passthrough with minimal wrapping
+    if (opts?.isBrainDriven && opts.directive) {
+      return this.workerExecuteBrainDriven(task, opts);
+    }
+
     const description = opts?.subtaskDescription ?? task.task_description;
     const { prompt: basePrompt, systemPrompt } =
       await this.personaLoader.buildWorkerPrompt({
@@ -108,11 +183,14 @@ export class WorkerPhase {
         | undefined);
     const cConfig = COMPLEXITY_CONFIG[complexity ?? "M"];
 
-    const model = cConfig.model
-      ? resolveModelId(cConfig.model)
-      : resolveModelId(this.config.values.claude.model);
+    const model =
+      this.legacyWorker.name === "claude"
+        ? cConfig.model
+          ? resolveModelId(cConfig.model)
+          : resolveModelId(this.config.values.claude.model)
+        : this.config.values.codex.model;
 
-    return this.worker.execute(prompt, {
+    return this.legacyWorker.execute(prompt, {
       cwd: this.config.projectPath,
       maxTurns: cConfig.maxTurns,
       maxBudget: Math.min(
@@ -127,6 +205,114 @@ export class WorkerPhase {
     });
   }
 
+  /**
+   * Brain-driven execution: directive goes through with only
+   * GLOBAL_WORKER_RULES appended (no PersonaLoader restructuring).
+   */
+  private async workerExecuteBrainDriven(
+    task: Task,
+    opts: {
+      directive?: string;
+      resourceRequest?: {
+        budget_usd: number;
+        timeout_s: number;
+        model?: string;
+      };
+      approvedPlan?: string;
+      resumeSessionId?: string;
+      complexity?: string;
+    },
+  ): Promise<WorkerResult> {
+    const { GLOBAL_WORKER_RULES } = await import("../PersonaLoader.js");
+
+    // directive is the primary prompt; worker rules are supplementary
+    let prompt = `${opts.directive}\n\nRead CLAUDE.md for project context and environment rules.\n\n${GLOBAL_WORKER_RULES}`;
+
+    if (opts.approvedPlan) {
+      prompt += `\n\n## Approved Implementation Plan\n${opts.approvedPlan}`;
+    }
+
+    // Resource request -> actual limits (brain request capped by config)
+    const rr = opts.resourceRequest;
+    const maxBudget = rr
+      ? Math.min(rr.budget_usd, this.config.values.budget.maxPerTask)
+      : this.config.values.claude.maxTaskBudget;
+    const timeout = rr
+      ? Math.min(rr.timeout_s * 1000, 3_600_000) // hard cap 1h
+      : COMPLEXITY_CONFIG[opts.complexity ?? "M"].timeout;
+
+    // Model: resolve brain's model request, then validate worker compatibility.
+    // defaultModel must match the current worker's model space, otherwise
+    // validateModelForWorker's fallback would land on an incompatible model.
+    const complexity = opts.complexity ?? "M";
+    const cConfig = COMPLEXITY_CONFIG[complexity] ?? COMPLEXITY_CONFIG.M;
+    const isClaudeWorker = this.legacyWorker.name === "claude";
+    const defaultModel = isClaudeWorker
+      ? cConfig.model
+        ? resolveModelId(cConfig.model)
+        : resolveModelId(this.config.values.claude.model)
+      : this.config.values.codex.model;
+    const resolvedModel = rr?.model
+      ? resolveModelForBrain(rr.model, defaultModel)
+      : defaultModel;
+
+    // Compatibility check: resolved model must match the current worker
+    const model = this.validateModelForWorker(
+      resolvedModel,
+      defaultModel,
+      rr?.model,
+    );
+
+    const resumePrompt = opts.resumeSessionId
+      ? `Continue working on this task.\n\n${opts.approvedPlan ? `## Approved Plan\n${opts.approvedPlan}\n\n` : ""}Proceed.`
+      : undefined;
+
+    // NOTE: opts.model is resolved and validated above, but CodexWorkerAdapter
+    // currently ignores it (codex model comes from ~/.codex/config.toml).
+    // Model override for codex will take effect in Phase A-2 (CodexSdkRuntime).
+    return this.legacyWorker.execute(prompt, {
+      cwd: this.config.projectPath,
+      maxTurns: cConfig.maxTurns,
+      maxBudget,
+      timeout,
+      model,
+      resumeSessionId: opts.resumeSessionId,
+      resumePrompt,
+    });
+  }
+
+  /**
+   * Validate that a resolved model is compatible with the current worker.
+   * Claude worker only accepts claude-* models; Codex only non-claude models.
+   * Incompatible → falls back to defaultModel (or throws if strictModelRouting).
+   */
+  private validateModelForWorker(
+    resolvedModel: string,
+    defaultModel: string,
+    originalRequest?: string,
+  ): string {
+    const workerName = this.legacyWorker.name;
+    const isClaudeModel = resolvedModel.startsWith("claude-");
+    const isClaudeWorker = workerName === "claude";
+    const isCompatible =
+      (isClaudeWorker && isClaudeModel) || (!isClaudeWorker && !isClaudeModel);
+
+    if (isCompatible) return resolvedModel;
+
+    // Incompatible: check strictModelRouting
+    const strict = this.config.values.experimental?.strictModelRouting === true;
+    if (strict) {
+      throw new Error(
+        `strictModelRouting: model "${resolvedModel}" (requested: "${originalRequest}") is incompatible with worker "${workerName}"`,
+      );
+    }
+
+    log.warn(
+      `resource_request.model "${originalRequest}" resolved to "${resolvedModel}" which is incompatible with worker "${workerName}", falling back to "${defaultModel}"`,
+    );
+    return defaultModel;
+  }
+
   // --- Worker fix (resume session to fix verification errors) ---
 
   async workerFix(
@@ -134,7 +320,7 @@ export class WorkerPhase {
     errors: string,
     task: Task,
   ): Promise<WorkerResult> {
-    return this.worker.fix(
+    return this.legacyWorker.fix(
       `The previous changes failed verification:\n${errors}\n\nFix these issues. The original task was: ${task.task_description}\n\nUse superpowers:systematic-debugging to investigate the root cause.\nFollow all 4 phases: investigate → analyze → hypothesize → implement.\nDo NOT guess or "try changing X". Find the actual root cause first.`,
       {
         cwd: this.config.projectPath,
@@ -164,7 +350,7 @@ ${fixInstructions}
 
 Fix these issues. Do not make unrelated changes.`;
 
-    const result = await this.worker.fix(prompt, {
+    const result = await this.legacyWorker.fix(prompt, {
       cwd: this.config.projectPath,
       maxTurns: 100,
       maxBudget: this.config.values.claude.maxTaskBudget,
@@ -180,7 +366,7 @@ Fix these issues. Do not make unrelated changes.`;
     await this.taskStore.addLog({
       task_id: task.id,
       phase: "executing",
-      agent: `${this.worker.name}-review-fix`,
+      agent: `${this.legacyWorker.name}-review-fix`,
       input_summary: "Review fix",
       output_summary: result.text,
       cost_usd: result.costUsd,
@@ -249,7 +435,7 @@ Be specific: include function signatures, type definitions, and concrete code sn
     const complexity = brainOpts?.complexity ?? "M";
     const cConfig = COMPLEXITY_CONFIG[complexity];
 
-    const result = await this.worker.analyze(analyzePrompt, {
+    const result = await this.legacyWorker.analyze(analyzePrompt, {
       cwd: this.config.projectPath,
       maxTurns: Math.min(cConfig.maxTurns, 100),
       maxBudget: Math.min(cConfig.maxBudget, 5.0),
@@ -266,7 +452,7 @@ Be specific: include function signatures, type definitions, and concrete code sn
     await this.taskStore.addLog({
       task_id: task.id,
       phase,
-      agent: this.worker.name,
+      agent: this.legacyWorker.name,
       input_summary: task.task_description,
       output_summary: result.text,
       cost_usd: result.costUsd,
@@ -409,7 +595,7 @@ Be specific: include function signatures, type definitions, and concrete code sn
       await this.taskStore.addLog({
         task_id: task.id,
         phase: "execute",
-        agent: this.worker.name,
+        agent: this.legacyWorker.name,
         input_summary: `subtask ${i + 1}/${sorted.length}: ${truncate(st.description, 80)}`,
         output_summary: result.text,
         cost_usd: result.costUsd,

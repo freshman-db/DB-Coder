@@ -1,9 +1,9 @@
-import type { TaskStore } from '../memory/TaskStore.js';
-import type { Task } from '../memory/types.js';
-import type { TaskPlan, PlanTask } from './types.js';
-import { TASK_DESC_MAX_LENGTH } from '../types/constants.js';
-import { truncate } from '../utils/parse.js';
-import { log } from '../utils/logger.js';
+import type { TaskStore } from "../memory/TaskStore.js";
+import type { Task } from "../memory/types.js";
+import type { TaskPlan, PlanTask } from "./types.js";
+import { TASK_DESC_MAX_LENGTH } from "../types/constants.js";
+import { truncate } from "../utils/parse.js";
+import { log } from "../utils/logger.js";
 
 export class TaskQueue {
   constructor(private store: TaskStore) {}
@@ -19,21 +19,34 @@ export class TaskQueue {
 
     for (const planTask of sorted) {
       // Cooldown: skip if a similar task recently failed/blocked
-      const recentlyFailed = await this.store.hasRecentlyFailedSimilar(projectPath, planTask.description);
+      const recentlyFailed = await this.store.hasRecentlyFailedSimilar(
+        projectPath,
+        planTask.description,
+      );
       if (recentlyFailed) {
-        log.info(`Skipping task (cooldown): "${truncate(planTask.description, TASK_DESC_MAX_LENGTH)}" — similar task recently failed`);
+        log.info(
+          `Skipping task (cooldown): "${truncate(planTask.description, TASK_DESC_MAX_LENGTH)}" — similar task recently failed`,
+        );
         continue;
       }
 
       // Dedup: skip if a similar task already exists
-      const similar = await this.store.findSimilarTask(projectPath, planTask.description);
+      const similar = await this.store.findSimilarTask(
+        projectPath,
+        planTask.description,
+      );
       if (similar) {
-        log.info(`Skipping duplicate task: "${truncate(planTask.description, TASK_DESC_MAX_LENGTH)}" (similar to "${similar.task_description.slice(0, 40)}" [${similar.status}])`);
+        log.info(
+          `Skipping duplicate task: "${truncate(planTask.description, TASK_DESC_MAX_LENGTH)}" (similar to "${similar.task_description.slice(0, 40)}" [${similar.status}])`,
+        );
         planIdToDbId.set(planTask.id, similar.id);
         continue;
       }
 
-      const completedSimilar = await this.store.findSimilarCompletedTask(projectPath, planTask.description);
+      const completedSimilar = await this.store.findSimilarCompletedTask(
+        projectPath,
+        planTask.description,
+      );
       const recurrence = completedSimilar
         ? {
             previousTaskId: completedSimilar.id,
@@ -41,12 +54,14 @@ export class TaskQueue {
           }
         : undefined;
       if (completedSimilar) {
-        log.warn(`Recurring issue detected: "${truncate(planTask.description, TASK_DESC_MAX_LENGTH)}" — similar to completed task ${completedSimilar.id}`);
+        log.warn(
+          `Recurring issue detected: "${truncate(planTask.description, TASK_DESC_MAX_LENGTH)}" — similar to completed task ${completedSimilar.id}`,
+        );
       }
 
       // Resolve dependency plan IDs to database UUIDs
       const dependsOn = planTask.dependsOn
-        .map(depId => planIdToDbId.get(depId))
+        .map((depId) => planIdToDbId.get(depId))
         .filter((id): id is string => id !== undefined);
 
       const task = await this.store.createTask(
@@ -58,18 +73,30 @@ export class TaskQueue {
       planIdToDbId.set(planTask.id, task.id);
       taskIds.push(task.id);
 
-      // Store subtasks in the task record
-      await this.store.updateTask(task.id, {
+      // Store subtasks + plan in the task record
+      const updates: Record<string, unknown> = {
         plan: { ...planTask, recurrence },
-        subtasks: planTask.subtasks.map(st => ({
+        subtasks: planTask.subtasks.map((st) => ({
           id: st.id,
           description: st.description,
           executor: st.executor,
-          status: 'pending' as const,
+          status: "pending" as const,
         })),
-      });
+      };
 
-      log.info(`Queued task [P${planTask.priority}]: ${truncate(planTask.description, TASK_DESC_MAX_LENGTH)}`);
+      // Persist brain-driven fields to dedicated columns (B-1)
+      if (planTask.isBrainDriven && planTask.directive) {
+        updates.directive = planTask.directive;
+        if (planTask.resourceRequest) {
+          updates.resource_request = planTask.resourceRequest;
+        }
+      }
+
+      await this.store.updateTask(task.id, updates);
+
+      log.info(
+        `Queued task [P${planTask.priority}]: ${truncate(planTask.description, TASK_DESC_MAX_LENGTH)}`,
+      );
     }
 
     return taskIds;
@@ -84,16 +111,16 @@ export class TaskQueue {
   }
 
   async getQueued(projectPath: string): Promise<Task[]> {
-    return this.store.listTasks(projectPath, 'queued');
+    return this.store.listTasks(projectPath, "queued");
   }
 
   async getBlocked(projectPath: string): Promise<Task[]> {
-    return this.store.listTasks(projectPath, 'blocked');
+    return this.store.listTasks(projectPath, "blocked");
   }
 }
 
 function topologicalSort(tasks: PlanTask[]): PlanTask[] {
-  const taskMap = new Map(tasks.map(t => [t.id, t]));
+  const taskMap = new Map(tasks.map((t) => [t.id, t]));
   const visited = new Set<string>();
   const sorted: PlanTask[] = [];
 

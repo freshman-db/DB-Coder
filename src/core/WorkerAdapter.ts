@@ -138,6 +138,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
   constructor(private codex: CodexBridge) {}
 
+  // TODO(A-2): pass opts.model to codex once CodexSdkRuntime replaces this adapter.
+  // Currently codex model is configured globally in ~/.codex/config.toml.
   async execute(prompt: string, opts: WorkerExecOpts): Promise<WorkerResult> {
     const result = await this.codex.execute(prompt, opts.cwd, {
       systemPrompt: opts.appendSystemPrompt,
@@ -263,25 +265,25 @@ function parseClaudeReviewOutput(text: string): Omit<ReviewResult, "cost_usd"> {
       if (typeof parsed.passed === "boolean") {
         const issues = Array.isArray(parsed.issues)
           ? parsed.issues
-            .filter(
-              (i: unknown): i is Record<string, unknown> =>
-                i !== null && typeof i === "object" && !Array.isArray(i),
-            )
-            .map((i: Record<string, unknown>) => ({
-              severity:
-                typeof i.severity === "string" &&
-                VALID_SEVERITIES.has(i.severity as ValidSeverity)
-                  ? (i.severity as ValidSeverity)
-                  : ("medium" as const),
-              description: String(i.description ?? ""),
-              file: typeof i.file === "string" ? i.file : undefined,
-              line: typeof i.line === "number" ? i.line : undefined,
-              suggestion:
-                typeof i.suggestion === "string" ? i.suggestion : undefined,
-              source: "claude" as const,
-              confidence:
-                typeof i.confidence === "number" ? i.confidence : undefined,
-            }))
+              .filter(
+                (i: unknown): i is Record<string, unknown> =>
+                  i !== null && typeof i === "object" && !Array.isArray(i),
+              )
+              .map((i: Record<string, unknown>) => ({
+                severity:
+                  typeof i.severity === "string" &&
+                  VALID_SEVERITIES.has(i.severity as ValidSeverity)
+                    ? (i.severity as ValidSeverity)
+                    : ("medium" as const),
+                description: String(i.description ?? ""),
+                file: typeof i.file === "string" ? i.file : undefined,
+                line: typeof i.line === "number" ? i.line : undefined,
+                suggestion:
+                  typeof i.suggestion === "string" ? i.suggestion : undefined,
+                source: "claude" as const,
+                confidence:
+                  typeof i.confidence === "number" ? i.confidence : undefined,
+              }))
           : [];
         return {
           passed: parsed.passed,
