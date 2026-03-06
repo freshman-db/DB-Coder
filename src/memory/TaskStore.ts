@@ -111,6 +111,15 @@ CREATE INDEX IF NOT EXISTS idx_plan_chat_messages_first_user_msg
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS evaluation_score JSONB;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS evaluation_reasoning TEXT DEFAULT '';
 
+-- Brain-driven mode (B-1): directive passthrough + resource request
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS directive TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS strategy_note TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS verification_plan TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS resource_request JSONB;
+
+-- Extended reflection details in task_logs
+ALTER TABLE task_logs ADD COLUMN IF NOT EXISTS details JSONB;
+
 
 CREATE TABLE IF NOT EXISTS service_state (
   project_path TEXT NOT NULL,
@@ -158,6 +167,10 @@ type TaskUpdateInput = Partial<
     | "total_cost_usd"
     | "git_branch"
     | "start_commit"
+    | "directive"
+    | "strategy_note"
+    | "verification_plan"
+    | "resource_request"
   >
 > & { evaluation_score?: EvaluationScore; evaluation_reasoning?: string };
 const TASK_UPDATE_FIELDS: Array<keyof TaskUpdateInput> = [
@@ -172,12 +185,17 @@ const TASK_UPDATE_FIELDS: Array<keyof TaskUpdateInput> = [
   "start_commit",
   "evaluation_score",
   "evaluation_reasoning",
+  "directive",
+  "strategy_note",
+  "verification_plan",
+  "resource_request",
 ];
 const TASK_JSONB_FIELDS = new Set<keyof TaskUpdateInput>([
   "plan",
   "subtasks",
   "review_results",
   "evaluation_score",
+  "resource_request",
 ]);
 
 export class TaskStore {
@@ -446,11 +464,15 @@ export class TaskStore {
 
   async addLog(entry: Omit<TaskLog, "id" | "created_at">): Promise<void> {
     const sql = this.getSql();
+    const details =
+      entry.details != null
+        ? sql.json(entry.details as unknown as postgres.JSONValue)
+        : null;
     await sql`
-      INSERT INTO task_logs (task_id, phase, agent, input_summary, output_summary, cost_usd, duration_ms)
+      INSERT INTO task_logs (task_id, phase, agent, input_summary, output_summary, cost_usd, duration_ms, details)
       VALUES (${entry.task_id}, ${entry.phase}, ${entry.agent},
               ${entry.input_summary}, ${entry.output_summary},
-              ${entry.cost_usd}, ${entry.duration_ms})
+              ${entry.cost_usd}, ${entry.duration_ms}, ${details})
     `;
   }
 

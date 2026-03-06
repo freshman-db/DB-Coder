@@ -52,6 +52,17 @@ export interface Task {
   status: TaskStatus;
   created_at: Date;
   updated_at: Date;
+  // Brain-driven mode (B-1) fields — nullable for backward compat
+  directive?: string | null;
+  strategy_note?: string | null;
+  verification_plan?: string | null;
+  resource_request?: ResourceRequest | null;
+}
+
+export interface ResourceRequest {
+  budget_usd: number;
+  timeout_s: number;
+  model?: string;
 }
 
 export interface SubTaskRecord {
@@ -86,6 +97,8 @@ export interface TaskLog {
   output_summary: string | null;
   cost_usd: number | null;
   duration_ms: number | null;
+  /** Extended reflection details (B-1). Null for legacy logs. */
+  details?: Record<string, unknown> | null;
   created_at: Date;
 }
 

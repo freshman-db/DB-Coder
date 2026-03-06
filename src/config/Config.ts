@@ -94,6 +94,10 @@ const DEFAULTS: DbCoderConfig = {
       },
     ],
   },
+  experimental: {
+    brainDriven: false,
+    strictModelRouting: false,
+  },
 };
 
 function deepMerge(

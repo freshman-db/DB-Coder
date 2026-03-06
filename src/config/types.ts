@@ -117,6 +117,13 @@ export interface PluginConfig {
   relevanceOverrides?: Record<string, PluginRelevance>; // manual plugin relevance
 }
 
+export interface ExperimentalConfig {
+  /** Enable brain-driven mode (B-1): directive passthrough, expanded reflection */
+  brainDriven: boolean;
+  /** Strict model routing: model/runtime incompatibility throws instead of warn */
+  strictModelRouting: boolean;
+}
+
 export interface DbCoderConfig {
   apiToken: string;
   brain: BrainConfig;
@@ -131,6 +138,7 @@ export interface DbCoderConfig {
   mcp: McpConfig;
   plugins: PluginConfig;
   evolution: EvolutionConfig;
+  experimental: ExperimentalConfig;
 }
 
 export type DeepPartial<T> = {
