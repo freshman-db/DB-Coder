@@ -120,6 +120,7 @@ export class CodexSdkRuntime implements RuntimeAdapter {
       let totalCachedInputTokens = 0;
       let totalOutputTokens = 0;
       let textParts: string[] = [];
+      let turnCount = 0;
       let hasError = false;
       const errors: string[] = [];
 
@@ -129,6 +130,7 @@ export class CodexSdkRuntime implements RuntimeAdapter {
             threadId = event.thread_id;
             break;
           case "turn.completed":
+            turnCount++;
             if (event.usage) {
               totalInputTokens += event.usage.input_tokens;
               totalCachedInputTokens += event.usage.cached_input_tokens;
@@ -194,6 +196,7 @@ export class CodexSdkRuntime implements RuntimeAdapter {
         costUsd,
         durationMs,
         sessionId: threadId,
+        numTurns: turnCount || undefined,
         isError: timedOut || hasError,
         errors: timedOut ? [...errors, "timeout"] : errors,
       };

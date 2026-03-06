@@ -618,6 +618,75 @@ test("execute resume passes --model flag when model is specified", async () => {
   );
 });
 
+// ─── onText streaming callback tests ────────────────────────────────
+
+test("execute calls onText for message events with content", async () => {
+  await withMockedSpawn(
+    (call) => {
+      const child = new FakeChildProcess();
+      const outFile = getOutputFilePath(call.args);
+
+      setImmediate(() => {
+        writeFileSync(outFile, JSON.stringify({ output: "done" }));
+        child.stdout.write(
+          `${JSON.stringify({ type: "message", content: "Hello world" })}\n`,
+        );
+        child.stdout.write(
+          `${JSON.stringify({ type: "function_call", name: "grep" })}\n`,
+        );
+        child.stdout.write(
+          `${JSON.stringify({ type: "message", content: "Done!" })}\n`,
+        );
+        child.stdout.end();
+        child.emit("close", 0);
+      });
+
+      return child as unknown as ChildProcess;
+    },
+    async () => {
+      const textChunks: string[] = [];
+      const bridge = new CodexBridge(createCodexConfig());
+      await bridge.execute("Do work", process.cwd(), {
+        onText: (text) => textChunks.push(text),
+      });
+
+      assert.deepEqual(textChunks, ["Hello world", "Done!"]);
+    },
+  );
+});
+
+test("execute does not call onText for non-message events", async () => {
+  await withMockedSpawn(
+    (call) => {
+      const child = new FakeChildProcess();
+      const outFile = getOutputFilePath(call.args);
+
+      setImmediate(() => {
+        writeFileSync(outFile, JSON.stringify({ output: "done" }));
+        child.stdout.write(
+          `${JSON.stringify({ type: "function_call", name: "read" })}\n`,
+        );
+        child.stdout.write(
+          `${JSON.stringify({ type: "turn.completed", total_cost_usd: 0.01 })}\n`,
+        );
+        child.stdout.end();
+        child.emit("close", 0);
+      });
+
+      return child as unknown as ChildProcess;
+    },
+    async () => {
+      const textChunks: string[] = [];
+      const bridge = new CodexBridge(createCodexConfig());
+      await bridge.execute("Do work", process.cwd(), {
+        onText: (text) => textChunks.push(text),
+      });
+
+      assert.deepEqual(textChunks, []);
+    },
+  );
+});
+
 // ─── resume tests ───────────────────────────────────────────────────
 
 test("execute with resumeSessionId builds correct codex exec resume args", async () => {

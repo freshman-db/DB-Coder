@@ -136,6 +136,8 @@ export class CodexBridge implements CodingAgent {
       resumeSessionId?: string;
       /** Short prompt for resumed sessions; used only when resume is possible. */
       resumePrompt?: string;
+      /** Callback for streaming text events (agent messages). */
+      onText?: (text: string) => void;
     },
   ): Promise<AgentResult> {
     const start = Date.now();
@@ -182,6 +184,13 @@ export class CodexBridge implements CodingAgent {
           onEvent: (event) => {
             if (event.type === "message" || event.type === "function_call") {
               log.debug(`Codex: ${event.type}`, event);
+            }
+            if (
+              options?.onText &&
+              event.type === "message" &&
+              typeof event.content === "string"
+            ) {
+              options.onText(event.content);
             }
           },
         },

@@ -52,6 +52,7 @@ export class CodexCliRuntime implements RuntimeAdapter {
       sandboxOverride,
       resumeSessionId: opts.resumeSessionId,
       resumePrompt: opts.resumePrompt,
+      onText: opts.onText,
     });
 
     return {
