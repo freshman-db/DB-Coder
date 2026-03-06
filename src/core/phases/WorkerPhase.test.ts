@@ -1,39 +1,51 @@
 /**
- * WorkerPhase.workerExecute — prompt construction and resumePrompt chain tests.
+ * WorkerPhase.workerExecute — prompt construction and RunOptions chain tests.
  *
  * Verifies that WorkerPhase correctly constructs both the full prompt and
- * resumePrompt, and passes them through to the WorkerAdapter.
+ * resumePrompt, and passes them through to the RuntimeAdapter.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { WorkerPhase } from "./WorkerPhase.js";
-import type { WorkerAdapter, WorkerExecOpts, WorkerResult } from "../WorkerAdapter.js";
+import type {
+  RuntimeAdapter,
+  RunOptions,
+  RunResult,
+} from "../../runtime/RuntimeAdapter.js";
 import type { Task } from "../../memory/types.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Capture the args passed to worker.execute() */
+/** Capture the args passed to runtime.run() */
 interface CapturedCall {
   prompt: string;
-  opts: WorkerExecOpts;
+  opts: RunOptions;
 }
 
-function createMockWorker(calls: CapturedCall[]): WorkerAdapter {
+function createMockRuntime(calls: CapturedCall[]): RuntimeAdapter {
   return {
-    name: "claude",
-    execute: async (prompt, opts) => {
+    name: "claude-sdk",
+    capabilities: {
+      nativeOutputSchema: true,
+      eventStreaming: true,
+      sessionPersistence: true,
+      sandboxControl: true,
+      toolSurface: true,
+      extendedThinking: true,
+    },
+    run: async (prompt, opts) => {
       calls.push({ prompt, opts });
       return makeResult();
     },
-    fix: async () => makeResult(),
-    analyze: async () => makeResult(),
+    isAvailable: async () => true,
+    supportsModel: (id) => id.startsWith("claude-"),
   };
 }
 
-function makeResult(): WorkerResult {
+function makeResult(): RunResult {
   return {
     text: "done",
     costUsd: 0,
@@ -68,8 +80,10 @@ function makeTask(desc = "Fix the bug"): Task {
 /**
  * Build a WorkerPhase with mocked deps, keeping real workerExecute logic.
  */
-function buildPhase(worker: WorkerAdapter): WorkerPhase {
-  const wp = Object.create(WorkerPhase.prototype) as InstanceType<typeof WorkerPhase>;
+function buildPhase(worker: RuntimeAdapter): WorkerPhase {
+  const wp = Object.create(WorkerPhase.prototype) as InstanceType<
+    typeof WorkerPhase
+  >;
   const any = wp as unknown as Record<string, unknown>;
 
   any.worker = worker;
@@ -77,7 +91,11 @@ function buildPhase(worker: WorkerAdapter): WorkerPhase {
     projectPath: "/tmp/test",
     values: {
       claude: { model: "sonnet", maxTaskBudget: 20.0 },
+      codex: { model: "gpt-5.3-codex" },
       autonomy: { maxRetries: 0 },
+      routing: {
+        execute: { runtime: "claude-sdk", model: "opus" },
+      },
     },
   };
   any.personaLoader = {
@@ -99,7 +117,7 @@ function buildPhase(worker: WorkerAdapter): WorkerPhase {
 describe("WorkerPhase.workerExecute prompt chain", () => {
   it("without resumeSessionId: passes full prompt, no resumePrompt", async () => {
     const calls: CapturedCall[] = [];
-    const phase = buildPhase(createMockWorker(calls));
+    const phase = buildPhase(createMockRuntime(calls));
 
     await phase.workerExecute(makeTask("Implement feature X"));
 
@@ -110,13 +128,17 @@ describe("WorkerPhase.workerExecute prompt chain", () => {
       "must pass full prompt from personaLoader",
     );
     assert.equal(opts.resumeSessionId, undefined);
-    assert.equal(opts.resumePrompt, undefined, "no resumePrompt without resumeSessionId");
-    assert.equal(opts.appendSystemPrompt, "system-instructions");
+    assert.equal(
+      opts.resumePrompt,
+      undefined,
+      "no resumePrompt without resumeSessionId",
+    );
+    assert.equal(opts.systemPrompt, "system-instructions");
   });
 
   it("with resumeSessionId: passes full prompt AND resumePrompt", async () => {
     const calls: CapturedCall[] = [];
-    const phase = buildPhase(createMockWorker(calls));
+    const phase = buildPhase(createMockRuntime(calls));
 
     await phase.workerExecute(makeTask("Fix the bug"), {
       resumeSessionId: "prev-sess",
@@ -146,13 +168,13 @@ describe("WorkerPhase.workerExecute prompt chain", () => {
       "resumePrompt must NOT include the full persona-enriched prompt",
     );
 
-    // systemPrompt is still passed — adapter decides whether to use it
-    assert.equal(opts.appendSystemPrompt, "system-instructions");
+    // systemPrompt is still passed — runtime decides whether to use it
+    assert.equal(opts.systemPrompt, "system-instructions");
   });
 
   it("with resumeSessionId + approvedPlan: both prompts include the plan", async () => {
     const calls: CapturedCall[] = [];
-    const phase = buildPhase(createMockWorker(calls));
+    const phase = buildPhase(createMockRuntime(calls));
 
     await phase.workerExecute(makeTask("Refactor module"), {
       resumeSessionId: "sess-2",
@@ -178,7 +200,7 @@ describe("WorkerPhase.workerExecute prompt chain", () => {
 
   it("subtaskDescription overrides task_description in both prompts", async () => {
     const calls: CapturedCall[] = [];
-    const phase = buildPhase(createMockWorker(calls));
+    const phase = buildPhase(createMockRuntime(calls));
 
     await phase.workerExecute(makeTask("Parent task"), {
       resumeSessionId: "sess-3",

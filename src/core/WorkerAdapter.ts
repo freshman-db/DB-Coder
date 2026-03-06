@@ -7,6 +7,7 @@ import type { ThinkingConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { CodexBridge } from "../bridges/CodexBridge.js";
 import type { ReviewResult } from "../bridges/CodingAgent.js";
 import type { CodexConfig } from "../config/types.js";
+import type { RuntimeAdapter } from "../runtime/RuntimeAdapter.js";
 import { log } from "../utils/logger.js";
 import {
   parsePreExistingIssues,
@@ -72,9 +73,15 @@ export interface WorkerAdapter {
 
 export interface ReviewAdapter {
   readonly name: "claude" | "codex";
+  /** Precise runtime name for logging (e.g. "claude-sdk", "codex-cli"). */
+  readonly runtimeName?: string;
 
   /** Review code changes and return structured result */
-  review(prompt: string, cwd: string): Promise<ReviewResult>;
+  review(
+    prompt: string,
+    cwd: string,
+    opts?: { model?: string },
+  ): Promise<ReviewResult>;
 }
 
 // --- Claude Code Worker ---
@@ -189,7 +196,11 @@ export class ClaudeReviewAdapter implements ReviewAdapter {
 
   constructor(private session: ClaudeCodeSession) {}
 
-  async review(prompt: string, cwd: string): Promise<ReviewResult> {
+  async review(
+    prompt: string,
+    cwd: string,
+    opts?: { model?: string },
+  ): Promise<ReviewResult> {
     const start = Date.now();
     try {
       const result = await this.session.run(prompt, {
@@ -197,6 +208,7 @@ export class ClaudeReviewAdapter implements ReviewAdapter {
         maxTurns: 200,
         cwd,
         timeout: 600_000,
+        model: opts?.model,
         disallowedTools: ["Edit", "Write", "NotebookEdit"],
         appendSystemPrompt:
           "You are an adversarial code reviewer. Do NOT modify files — only read and analyze.",
@@ -234,8 +246,76 @@ export class CodexReviewAdapter implements ReviewAdapter {
 
   constructor(private codex: CodexBridge) {}
 
-  async review(prompt: string, cwd: string): Promise<ReviewResult> {
-    return this.codex.review(prompt, cwd);
+  async review(
+    prompt: string,
+    cwd: string,
+    opts?: { model?: string },
+  ): Promise<ReviewResult> {
+    return this.codex.review(prompt, cwd, { model: opts?.model });
+  }
+}
+
+// --- Unified Runtime Review Adapter (Phase 3) ---
+
+/**
+ * ReviewAdapter backed by a RuntimeAdapter.
+ * Replaces both ClaudeReviewAdapter and CodexReviewAdapter by routing
+ * review calls through the unified RuntimeAdapter.run() interface.
+ */
+export class RuntimeReviewAdapter implements ReviewAdapter {
+  readonly name: "claude" | "codex";
+  /** The underlying runtime's name, for precise logging. */
+  readonly runtimeName: string;
+
+  constructor(
+    private readonly runtime: RuntimeAdapter,
+    name?: "claude" | "codex",
+  ) {
+    this.name = name ?? (runtime.name.includes("codex") ? "codex" : "claude");
+    this.runtimeName = runtime.name;
+  }
+
+  async review(
+    prompt: string,
+    cwd: string,
+    opts?: { model?: string },
+  ): Promise<ReviewResult> {
+    try {
+      const result = await this.runtime.run(prompt, {
+        cwd,
+        maxTurns: 200,
+        timeout: 600_000,
+        model: opts?.model,
+        readOnly: true,
+        disallowedTools: ["Edit", "Write", "NotebookEdit"],
+        systemPrompt:
+          "You are an adversarial code reviewer. Do NOT modify files — only read and analyze.",
+      });
+
+      const parsed = parseClaudeReviewOutput(result.text);
+      return {
+        ...parsed,
+        cost_usd: result.costUsd,
+        issues: parsed.issues.map((i) => ({
+          ...i,
+          source: this.name as "claude" | "codex",
+        })),
+      };
+    } catch (err) {
+      log.error(`RuntimeReviewAdapter(${this.name}) review failed`, err);
+      return {
+        passed: false,
+        issues: [
+          {
+            severity: "critical",
+            description: `Review failed: ${err}`,
+            source: this.name,
+          },
+        ],
+        summary: `Review error: ${err}`,
+        cost_usd: 0,
+      };
+    }
   }
 }
 

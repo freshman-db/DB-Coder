@@ -11,17 +11,12 @@ import type { Config } from "../../config/Config.js";
 import { resolveModelId } from "../../config/Config.js";
 import type { TaskStore } from "../../memory/TaskStore.js";
 import type { CostTracker } from "../../utils/cost.js";
-import type { WorkerAdapter, WorkerResult } from "../WorkerAdapter.js";
-import type { RuntimeAdapter } from "../../runtime/RuntimeAdapter.js";
-
-// Thin seam: WorkerPhase accepts either the legacy WorkerAdapter or
-// the new RuntimeAdapter. Phase 3 will remove WorkerAdapter from this union.
-export type WorkerRuntime = WorkerAdapter | RuntimeAdapter;
-
-/** Type guard: distinguish RuntimeAdapter from WorkerAdapter */
-function isRuntimeAdapter(rt: WorkerRuntime): rt is RuntimeAdapter {
-  return "capabilities" in rt;
-}
+import type { WorkerResult } from "../WorkerAdapter.js";
+import type {
+  RuntimeAdapter,
+  RunResult,
+} from "../../runtime/RuntimeAdapter.js";
+import { findRuntimeForModel } from "../../runtime/runtimeFactory.js";
 import type { Task, SubTaskRecord } from "../../memory/types.js";
 import type { VerifyBaseline } from "../ProjectVerifier.js";
 import type { PersonaLoader, WorkInstructions } from "../PersonaLoader.js";
@@ -73,61 +68,70 @@ export const COMPLEXITY_CONFIG: Record<string, ComplexityConfig> = {
  * 2. Known aliases ("opus", "sonnet") resolve via MODEL_MAP
  * 3. Unknown short names fall back to defaultModel with warning
  */
+/**
+ * Resolve a model ID from brain's resource_request.
+ * - Known aliases ("opus", "sonnet") → canonical ID via resolveModelId()
+ * - Full model IDs (e.g. "claude-opus-4-6", "gpt-5.3-codex") → pass through
+ * - Unknown short names → fall back to defaultModel with warning
+ */
 export function resolveModelForBrain(
   brainModel: string,
   defaultModel: string,
 ): string {
-  // Full model IDs (contain "-") pass through — could be Claude, Codex, or any provider
+  // Full model IDs (contain "-") pass through
   if (brainModel.includes("-")) {
     return brainModel;
   }
-  // Short name: try alias resolution
+  // Short name: try alias resolution (resolveModelId returns input unchanged if no alias)
   const resolved = resolveModelId(brainModel);
   if (resolved !== brainModel) {
-    // resolveModelId mapped it (or fell back to sonnet for unknown).
-    // Check if it's a known alias vs unknown fallback.
-    if (brainModel === "opus" || brainModel === "sonnet") {
-      return resolved; // known alias
-    }
-    // Unknown alias — resolveModelId silently fell back to sonnet.
-    // Use defaultModel instead to avoid silent downgrade.
-    log.warn(
-      `resource_request.model "${brainModel}" is not a recognized alias, using default "${defaultModel}"`,
-    );
-    return defaultModel;
+    return resolved; // known alias was mapped
   }
-  // resolved === brainModel: no mapping found and no fallback triggered.
-  // This shouldn't happen with current resolveModelId (always falls back),
-  // but handle it defensively.
-  return brainModel;
+  // Unknown short name — no alias found, fall back to default
+  log.warn(
+    `resource_request.model "${brainModel}" is not a recognized alias, using default "${defaultModel}"`,
+  );
+  return defaultModel;
 }
 
 // ---------------------------------------------------------------------------
 // WorkerPhase class
 // ---------------------------------------------------------------------------
 
+/** Convert RuntimeAdapter RunResult to WorkerResult (consumed by MainLoop). */
+function toWorkerResult(r: RunResult): WorkerResult {
+  return {
+    text: r.text,
+    costUsd: r.costUsd,
+    durationMs: r.durationMs,
+    sessionId: r.sessionId,
+    isError: r.isError,
+    errors: r.errors,
+  };
+}
+
 export class WorkerPhase {
+  /**
+   * Tracks the runtime actually used during the last execute call.
+   * When cross-runtime model switching kicks in, this differs from this.worker.
+   * workerFix/workerReviewFix use this to stay on the same runtime as execute,
+   * preventing sessionId mismatches across providers.
+   */
+  private lastEffectiveRuntime: RuntimeAdapter | undefined;
+
+  /** The runtime name that should appear in logs/task_logs for the current task. */
+  get effectiveRuntimeName(): string {
+    return (this.lastEffectiveRuntime ?? this.worker).name;
+  }
+
   constructor(
     private readonly config: Config,
     private readonly taskStore: TaskStore,
     private readonly costTracker: CostTracker,
-    private readonly worker: WorkerRuntime,
+    private readonly worker: RuntimeAdapter,
     private readonly personaLoader: PersonaLoader,
     private readonly hardVerify: HardVerifyFn,
   ) {}
-
-  /**
-   * Narrow worker to WorkerAdapter for legacy code paths.
-   * Phase 3 will remove this once all call sites use RuntimeAdapter.run().
-   */
-  private get legacyWorker(): WorkerAdapter {
-    if (isRuntimeAdapter(this.worker)) {
-      throw new Error(
-        "WorkerPhase: legacy code path called with RuntimeAdapter — migrate to RuntimeAdapter.run()",
-      );
-    }
-    return this.worker;
-  }
 
   // --- Worker execution ---
 
@@ -151,6 +155,9 @@ export class WorkerPhase {
       isBrainDriven?: boolean;
     },
   ): Promise<WorkerResult> {
+    // Reset per-task runtime tracking (set again by execute paths below)
+    this.lastEffectiveRuntime = undefined;
+
     // Brain-driven: directive passthrough with minimal wrapping
     if (opts?.isBrainDriven && opts.directive) {
       return this.workerExecuteBrainDriven(task, opts);
@@ -183,14 +190,9 @@ export class WorkerPhase {
         | undefined);
     const cConfig = COMPLEXITY_CONFIG[complexity ?? "M"];
 
-    const model =
-      this.legacyWorker.name === "claude"
-        ? cConfig.model
-          ? resolveModelId(cConfig.model)
-          : resolveModelId(this.config.values.claude.model)
-        : this.config.values.codex.model;
+    const model = this.resolveWorkerModel(cConfig);
 
-    return this.legacyWorker.execute(prompt, {
+    const result = await this.worker.run(prompt, {
       cwd: this.config.projectPath,
       maxTurns: cConfig.maxTurns,
       maxBudget: Math.min(
@@ -199,10 +201,11 @@ export class WorkerPhase {
       ),
       timeout: cConfig.timeout,
       model,
-      appendSystemPrompt: systemPrompt,
+      systemPrompt,
       resumeSessionId: opts?.resumeSessionId,
       resumePrompt,
     });
+    return toWorkerResult(result);
   }
 
   /**
@@ -242,35 +245,28 @@ export class WorkerPhase {
       : COMPLEXITY_CONFIG[opts.complexity ?? "M"].timeout;
 
     // Model: resolve brain's model request, then validate worker compatibility.
-    // defaultModel must match the current worker's model space, otherwise
-    // validateModelForWorker's fallback would land on an incompatible model.
     const complexity = opts.complexity ?? "M";
     const cConfig = COMPLEXITY_CONFIG[complexity] ?? COMPLEXITY_CONFIG.M;
-    const isClaudeWorker = this.legacyWorker.name === "claude";
-    const defaultModel = isClaudeWorker
-      ? cConfig.model
-        ? resolveModelId(cConfig.model)
-        : resolveModelId(this.config.values.claude.model)
-      : this.config.values.codex.model;
+    const defaultModel = this.resolveWorkerModel(cConfig);
     const resolvedModel = rr?.model
       ? resolveModelForBrain(rr.model, defaultModel)
       : defaultModel;
 
-    // Compatibility check: resolved model must match the current worker
-    const model = this.validateModelForWorker(
+    // Compatibility check: resolved model must be supported by worker runtime.
+    // If not, validateModelForWorker may return an alternative runtime.
+    const { model, runtime: effectiveRuntime } = this.validateModelForWorker(
       resolvedModel,
       defaultModel,
       rr?.model,
     );
+    // Track for subsequent fix/review-fix calls within the same task
+    this.lastEffectiveRuntime = effectiveRuntime;
 
     const resumePrompt = opts.resumeSessionId
       ? `Continue working on this task.\n\n${opts.approvedPlan ? `## Approved Plan\n${opts.approvedPlan}\n\n` : ""}Proceed.`
       : undefined;
 
-    // NOTE: opts.model is resolved and validated above, but CodexWorkerAdapter
-    // currently ignores it (codex model comes from ~/.codex/config.toml).
-    // Model override for codex will take effect in Phase A-2 (CodexSdkRuntime).
-    return this.legacyWorker.execute(prompt, {
+    const result = await effectiveRuntime.run(prompt, {
       cwd: this.config.projectPath,
       maxTurns: cConfig.maxTurns,
       maxBudget,
@@ -279,38 +275,78 @@ export class WorkerPhase {
       resumeSessionId: opts.resumeSessionId,
       resumePrompt,
     });
+    return toWorkerResult(result);
   }
 
   /**
-   * Validate that a resolved model is compatible with the current worker.
-   * Claude worker only accepts claude-* models; Codex only non-claude models.
-   * Incompatible → falls back to defaultModel (or throws if strictModelRouting).
+   * Resolve the default model for a given runtime.
+   * Priority: routing.execute.model > complexity config alias > legacy fallbacks.
+   *
+   * @param cConfig - complexity config for model alias lookup
+   * @param runtime - the runtime to check compatibility against (defaults to this.worker)
+   */
+  private resolveWorkerModel(
+    cConfig: ComplexityConfig,
+    runtime?: RuntimeAdapter,
+  ): string {
+    const rt = runtime ?? this.worker;
+
+    // 1. Use routing.execute.model as the canonical source
+    const routingModel = resolveModelId(
+      this.config.values.routing.execute.model,
+    );
+    if (rt.supportsModel(routingModel)) return routingModel;
+
+    // 2. Try complexity config alias (e.g. "opus" for L/XL tasks)
+    if (cConfig.model) {
+      const resolved = resolveModelId(cConfig.model);
+      if (rt.supportsModel(resolved)) return resolved;
+    }
+    // 3. Legacy fallbacks
+    const configModel = resolveModelId(this.config.values.claude.model);
+    if (rt.supportsModel(configModel)) return configModel;
+    return this.config.values.codex.model;
+  }
+
+  /**
+   * Validate that a resolved model is compatible with the current worker runtime.
+   * Uses runtime.supportsModel() instead of name-based checks.
+   *
+   * Returns { model, runtime } — runtime may differ from this.worker if
+   * cross-runtime routing kicks in.
    */
   private validateModelForWorker(
     resolvedModel: string,
     defaultModel: string,
     originalRequest?: string,
-  ): string {
-    const workerName = this.legacyWorker.name;
-    const isClaudeModel = resolvedModel.startsWith("claude-");
-    const isClaudeWorker = workerName === "claude";
-    const isCompatible =
-      (isClaudeWorker && isClaudeModel) || (!isClaudeWorker && !isClaudeModel);
-
-    if (isCompatible) return resolvedModel;
+  ): { model: string; runtime: RuntimeAdapter } {
+    if (this.worker.supportsModel(resolvedModel)) {
+      return { model: resolvedModel, runtime: this.worker };
+    }
 
     // Incompatible: check strictModelRouting
     const strict = this.config.values.experimental?.strictModelRouting === true;
     if (strict) {
       throw new Error(
-        `strictModelRouting: model "${resolvedModel}" (requested: "${originalRequest}") is incompatible with worker "${workerName}"`,
+        `strictModelRouting: model "${resolvedModel}" (requested: "${originalRequest}") is incompatible with worker "${this.worker.name}"`,
       );
     }
 
+    // Try cross-runtime routing: find another registered runtime that supports this model
+    const altRuntime = findRuntimeForModel(resolvedModel);
+    if (altRuntime) {
+      log.warn(
+        `resource_request.model "${originalRequest}" resolved to "${resolvedModel}" incompatible with "${this.worker.name}", ` +
+          `temporarily switching to "${altRuntime.name}" for this task`,
+      );
+      return { model: resolvedModel, runtime: altRuntime };
+    }
+
     log.warn(
-      `resource_request.model "${originalRequest}" resolved to "${resolvedModel}" which is incompatible with worker "${workerName}", falling back to "${defaultModel}"`,
+      `resource_request.model "${originalRequest}" resolved to "${resolvedModel}" incompatible with "${this.worker.name}", ` +
+        `no compatible runtime available, falling back to "${defaultModel}"`,
     );
-    return defaultModel;
+    return { model: defaultModel, runtime: this.worker };
   }
 
   // --- Worker fix (resume session to fix verification errors) ---
@@ -320,17 +356,21 @@ export class WorkerPhase {
     errors: string,
     task: Task,
   ): Promise<WorkerResult> {
-    return this.legacyWorker.fix(
-      `The previous changes failed verification:\n${errors}\n\nFix these issues. The original task was: ${task.task_description}\n\nUse superpowers:systematic-debugging to investigate the root cause.\nFollow all 4 phases: investigate → analyze → hypothesize → implement.\nDo NOT guess or "try changing X". Find the actual root cause first.`,
-      {
-        cwd: this.config.projectPath,
-        maxTurns: 100,
-        maxBudget: this.config.values.claude.maxTaskBudget,
-        timeout: 600_000,
-        model: resolveModelId(this.config.values.claude.model),
-        resumeSessionId: sessionId,
-      },
-    );
+    const prompt = `The previous changes failed verification:\n${errors}\n\nFix these issues. The original task was: ${task.task_description}\n\nUse superpowers:systematic-debugging to investigate the root cause.\nFollow all 4 phases: investigate → analyze → hypothesize → implement.\nDo NOT guess or "try changing X". Find the actual root cause first.`;
+
+    // Use the same runtime that executed the task — prevents sessionId from
+    // landing on the wrong provider after cross-runtime switching.
+    const runtime = this.lastEffectiveRuntime ?? this.worker;
+
+    const result = await runtime.run(prompt, {
+      cwd: this.config.projectPath,
+      maxTurns: 100,
+      maxBudget: this.config.values.claude.maxTaskBudget,
+      timeout: 600_000,
+      model: this.resolveWorkerModel(COMPLEXITY_CONFIG.M, runtime),
+      resumeSessionId: sessionId,
+    });
+    return toWorkerResult(result);
   }
 
   // --- Worker review fix ---
@@ -350,14 +390,18 @@ ${fixInstructions}
 
 Fix these issues. Do not make unrelated changes.`;
 
-    const result = await this.legacyWorker.fix(prompt, {
+    // Use the same runtime that executed the task (see workerFix comment)
+    const runtime = this.lastEffectiveRuntime ?? this.worker;
+
+    const runResult = await runtime.run(prompt, {
       cwd: this.config.projectPath,
       maxTurns: 100,
       maxBudget: this.config.values.claude.maxTaskBudget,
       timeout: 600_000,
-      model: resolveModelId(this.config.values.claude.model),
+      model: this.resolveWorkerModel(COMPLEXITY_CONFIG.M, runtime),
       resumeSessionId: sessionId,
     });
+    const result = toWorkerResult(runResult);
 
     if (result.costUsd > 0) {
       await this.costTracker.addCost(task.id, result.costUsd);
@@ -366,7 +410,7 @@ Fix these issues. Do not make unrelated changes.`;
     await this.taskStore.addLog({
       task_id: task.id,
       phase: "executing",
-      agent: `${this.legacyWorker.name}-review-fix`,
+      agent: `${this.effectiveRuntimeName}-review-fix`,
       input_summary: "Review fix",
       output_summary: result.text,
       cost_usd: result.costUsd,
@@ -435,14 +479,19 @@ Be specific: include function signatures, type definitions, and concrete code sn
     const complexity = brainOpts?.complexity ?? "M";
     const cConfig = COMPLEXITY_CONFIG[complexity];
 
-    const result = await this.legacyWorker.analyze(analyzePrompt, {
+    const runResult = await this.worker.run(analyzePrompt, {
       cwd: this.config.projectPath,
       maxTurns: Math.min(cConfig.maxTurns, 100),
       maxBudget: Math.min(cConfig.maxBudget, 5.0),
       timeout: Math.min(cConfig.timeout, 600_000),
-      model: resolveModelId(this.config.values.claude.model),
+      model: this.resolveWorkerModel(cConfig),
+      readOnly: true,
+      disallowedTools: ["Edit", "Write", "NotebookEdit"],
+      systemPrompt:
+        "You are analyzing code for planning purposes. Do NOT modify any files — only read and analyze.",
       resumeSessionId: revision?.resumeSessionId,
     });
+    const result = toWorkerResult(runResult);
 
     if (result.costUsd > 0) {
       await this.costTracker.addCost(task.id, result.costUsd);
@@ -452,7 +501,7 @@ Be specific: include function signatures, type definitions, and concrete code sn
     await this.taskStore.addLog({
       task_id: task.id,
       phase,
-      agent: this.legacyWorker.name,
+      agent: this.effectiveRuntimeName,
       input_summary: task.task_description,
       output_summary: result.text,
       cost_usd: result.costUsd,
@@ -595,7 +644,7 @@ Be specific: include function signatures, type definitions, and concrete code sn
       await this.taskStore.addLog({
         task_id: task.id,
         phase: "execute",
-        agent: this.legacyWorker.name,
+        agent: this.effectiveRuntimeName,
         input_summary: `subtask ${i + 1}/${sorted.length}: ${truncate(st.description, 80)}`,
         output_summary: result.text,
         cost_usd: result.costUsd,
