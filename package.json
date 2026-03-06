@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.69",
+    "@openai/codex-sdk": "^0.111.0",
     "commander": "^13.1.0",
     "postgres": "^3.4.5"
   },
