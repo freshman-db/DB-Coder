@@ -19,8 +19,18 @@ import type {
   ClaudeCodeSession,
   SessionResult,
 } from "../../bridges/ClaudeCodeSession.js";
+import type { RuntimeAdapter } from "../../runtime/RuntimeAdapter.js";
 import type { ReviewResult } from "../../bridges/CodingAgent.js";
-import type { Task } from "../../memory/types.js";
+
+// Thin seam: BrainPhase accepts either the legacy ClaudeCodeSession or
+// the new RuntimeAdapter. Phase 3 will remove ClaudeCodeSession from this union.
+export type BrainRuntime = ClaudeCodeSession | RuntimeAdapter;
+
+/** Type guard: distinguish RuntimeAdapter from ClaudeCodeSession */
+export function isRuntimeAdapter(rt: BrainRuntime): rt is RuntimeAdapter {
+  return "capabilities" in rt;
+}
+import type { Task, ResourceRequest } from "../../memory/types.js";
 import type { TaskQueue } from "../TaskQueue.js";
 import type { RegisteredStrategies } from "../strategies/index.js";
 import type { ProjectMemory } from "../../memory/ProjectMemory.js";
@@ -39,10 +49,37 @@ import { log } from "../../utils/logger.js";
 import { basename } from "node:path";
 
 // ---------------------------------------------------------------------------
+// Brain-driven types (B-1)
+// ---------------------------------------------------------------------------
+
+/** brainDecide output when brainDriven=true */
+export interface BrainDecision {
+  directive: string;
+  summary: string;
+  strategy_note: string;
+  resource_request: ResourceRequest;
+  verification_plan: string;
+  extra_tasks?: Array<{
+    directive: string;
+    resource_request: ResourceRequest;
+  }>;
+}
+
+/** brainReflect output when brainDriven=true */
+export interface BrainReflection {
+  reflection: string;
+  strategy_update: string;
+  retrieval_lesson: string;
+  orchestrator_feedback?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const CLAUDE_MEM_CONTEXT_MAX_CHARS = 3500;
+const DIRECTIVE_MAX_CHARS = 50_000;
+const SUMMARY_MAX_CHARS = 120;
 
 // ---------------------------------------------------------------------------
 // Standalone helper functions (exported for MainLoop runCycle)
@@ -121,12 +158,25 @@ export class BrainPhase {
     private readonly config: Config,
     private readonly taskStore: TaskStore,
     private readonly costTracker: CostTracker,
-    private readonly brainSession: ClaudeCodeSession,
+    private readonly brainSession: BrainRuntime,
     private readonly taskQueue: TaskQueue,
     private readonly strategies: RegisteredStrategies | undefined,
     private readonly projectMemory: ProjectMemory | null,
     private readonly memoryProject: string,
   ) {}
+
+  /**
+   * Narrow brainSession to ClaudeCodeSession for legacy code paths.
+   * Phase 3 will remove this once all call sites use RuntimeAdapter.run().
+   */
+  private get legacySession(): ClaudeCodeSession {
+    if (isRuntimeAdapter(this.brainSession)) {
+      throw new Error(
+        "BrainPhase: legacy code path called with RuntimeAdapter — migrate to RuntimeAdapter.run()",
+      );
+    }
+    return this.brainSession;
+  }
 
   // --- Convenience wrapper ---
 
@@ -134,7 +184,7 @@ export class BrainPhase {
     prompt: string,
     opts?: { jsonSchema?: object; resumeSessionId?: string },
   ): Promise<SessionResult> {
-    return runBrainThink(this.brainSession, this.config, prompt, opts);
+    return runBrainThink(this.legacySession, this.config, prompt, opts);
   }
 
   // --- Brain decide (two-phase: explore + structured) ---
@@ -157,6 +207,16 @@ export class BrainPhase {
       workInstructions?: WorkInstructions;
     }>;
     costUsd: number;
+    // Brain-driven mode (B-1) extra fields
+    directive?: string;
+    strategyNote?: string;
+    verificationPlan?: string;
+    resourceRequest?: ResourceRequest;
+    extraDirectiveTasks?: Array<{
+      directive: string;
+      resourceRequest: ResourceRequest;
+    }>;
+    isBrainDriven?: boolean;
   }> {
     // Budget gate: if daily budget exhausted, don't spend on brain call
     const dailyCost = await this.taskStore.getDailyCost();
@@ -166,6 +226,12 @@ export class BrainPhase {
         `Daily budget exhausted ($${dailyCost.total_cost_usd.toFixed(2)}/$${maxPerDay}). Skipping brain call.`,
       );
       return { taskDescription: null, costUsd: 0 };
+    }
+
+    const isBrainDriven = this.config.values.experimental?.brainDriven === true;
+
+    if (isBrainDriven) {
+      return this.brainDecideDriven(projectPath);
     }
 
     const context = await this.gatherBrainContext(projectPath);
@@ -456,6 +522,194 @@ ${analysisReport}
       };
     }
     return { taskDescription: null, costUsd: totalCost };
+  }
+
+  // --- Brain-driven decision (B-1 new path) ---
+
+  private async brainDecideDriven(
+    projectPath: string,
+  ): ReturnType<BrainPhase["brainDecide"]> {
+    const context = await this.gatherBrainContext(projectPath);
+    let totalCost = 0;
+
+    // Single-phase: exploration + structured output in one call
+    const prompt = `你是这个项目的技术负责人。
+
+## 项目状态
+${context}
+
+## 你的职责
+- 决定下一步做什么（可以是一个任务或多个）
+- 为工人写完整的执行指令（directive）
+- 申请合理的资源（预算、超时）
+- 说明怎么验证任务做对了
+
+自由探索代码库，用你自己的判断力。不要自我设限。`;
+
+    const brainDecisionSchema = {
+      type: "object",
+      properties: {
+        tasks: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              directive: {
+                type: "string",
+                description:
+                  "Complete instructions for the worker (free-form, any length)",
+              },
+              summary: {
+                type: "string",
+                description: "One-line summary, max 120 chars",
+                maxLength: 120,
+              },
+              strategy_note: {
+                type: "string",
+                description: "Why this task matters (for future self)",
+              },
+              resource_request: {
+                type: "object",
+                properties: {
+                  budget_usd: { type: "number" },
+                  timeout_s: { type: "number" },
+                  model: { type: "string" },
+                },
+                required: ["budget_usd", "timeout_s"],
+              },
+              verification_plan: {
+                type: "string",
+                description: "How to verify the task was done correctly",
+              },
+              // Deprecated fields (kept for transition period)
+              priority: { type: "number" },
+              persona: { type: "string" },
+              taskType: { type: "string" },
+              complexity: { type: "string" },
+            },
+            required: ["directive", "summary", "resource_request"],
+          },
+        },
+        reasoning: { type: "string" },
+      },
+      required: ["tasks"],
+    };
+
+    const result = await this.brainThink(prompt, {
+      jsonSchema: brainDecisionSchema,
+    });
+    totalCost += result.costUsd;
+    log.info(
+      `Brain (brain-driven): cost=$${result.costUsd.toFixed(4)}, exit=${result.exitCode}, json=${result.json ? "yes" : "no"}`,
+    );
+    if (result.isError || result.exitCode !== 0) {
+      log.warn(`Brain (brain-driven) errors: ${result.errors.join("; ")}`);
+    }
+
+    // Parse the brain-driven output
+    const parsed = isRecord(result.json) ? result.json : null;
+    if (parsed && Array.isArray(parsed.tasks) && parsed.tasks.length > 0) {
+      const parsedResult = this.parseBrainDrivenTasks(
+        parsed.tasks as Record<string, unknown>[],
+        totalCost,
+      );
+      if (parsedResult) return parsedResult;
+    }
+
+    // Fallback: try extracting JSON from text
+    const textParsed = extractJsonFromText(result.text, (v) => {
+      if (!isRecord(v)) return false;
+      const rec = v as Record<string, unknown>;
+      return (
+        Array.isArray(rec.tasks) &&
+        rec.tasks.length > 0 &&
+        isRecord(rec.tasks[0]) &&
+        typeof (rec.tasks[0] as Record<string, unknown>).directive === "string"
+      );
+    });
+    if (isRecord(textParsed) && Array.isArray(textParsed.tasks)) {
+      log.warn("brainDecideDriven: fell back to text extraction");
+      const parsedResult = this.parseBrainDrivenTasks(
+        textParsed.tasks as Record<string, unknown>[],
+        totalCost,
+      );
+      if (parsedResult) return parsedResult;
+    }
+
+    // Last resort: no valid output
+    log.warn("brainDecideDriven: no valid output, returning null");
+    return { taskDescription: null, costUsd: totalCost };
+  }
+
+  private parseBrainDrivenTasks(
+    tasks: Record<string, unknown>[],
+    totalCost: number,
+  ): Awaited<ReturnType<BrainPhase["brainDecide"]>> | null {
+    const first = tasks[0];
+    if (!first || typeof first.directive !== "string") return null;
+
+    const directive = first.directive.slice(0, DIRECTIVE_MAX_CHARS);
+
+    // summary -> task_description (canonical persisted form)
+    let summary: string;
+    if (typeof first.summary === "string" && first.summary.trim().length > 0) {
+      summary = first.summary.slice(0, SUMMARY_MAX_CHARS);
+    } else {
+      log.warn("brainDecideDriven: summary missing, truncating from directive");
+      summary = directive.slice(0, SUMMARY_MAX_CHARS);
+    }
+
+    const parseResourceRequest = (v: unknown): ResourceRequest => {
+      if (isRecord(v)) {
+        const r = v as Record<string, unknown>;
+        return {
+          budget_usd: typeof r.budget_usd === "number" ? r.budget_usd : 10,
+          timeout_s: typeof r.timeout_s === "number" ? r.timeout_s : 1200,
+          model: typeof r.model === "string" ? r.model : undefined,
+        };
+      }
+      return { budget_usd: 10, timeout_s: 1200 };
+    };
+
+    const resourceRequest = parseResourceRequest(first.resource_request);
+
+    const extraDirectiveTasks = tasks
+      .slice(1)
+      .filter(
+        (t): t is Record<string, unknown> =>
+          isRecord(t) && typeof t.directive === "string",
+      )
+      .map((t) => ({
+        directive: String(t.directive).slice(0, DIRECTIVE_MAX_CHARS),
+        resourceRequest: parseResourceRequest(t.resource_request),
+      }));
+
+    return {
+      taskDescription: summary,
+      priority: typeof first.priority === "number" ? first.priority : 2,
+      persona: typeof first.persona === "string" ? first.persona : undefined,
+      taskType: typeof first.taskType === "string" ? first.taskType : undefined,
+      complexity:
+        typeof first.complexity === "string" &&
+        first.complexity in COMPLEXITY_CONFIG
+          ? first.complexity
+          : undefined,
+      costUsd: totalCost,
+      // Brain-driven specific
+      isBrainDriven: true,
+      directive,
+      strategyNote:
+        typeof first.strategy_note === "string"
+          ? first.strategy_note
+          : undefined,
+      verificationPlan:
+        typeof first.verification_plan === "string"
+          ? first.verification_plan
+          : undefined,
+      resourceRequest,
+      extraDirectiveTasks:
+        extraDirectiveTasks.length > 0 ? extraDirectiveTasks : undefined,
+    };
   }
 
   // --- Brain context gathering ---
@@ -899,6 +1153,12 @@ For SPLIT, the NEW_TASKS: delimiter and task list are REQUIRED.`;
     verification: { passed: boolean; reason?: string },
     projectPath: string,
   ): Promise<void> {
+    const isBrainDriven = this.config.values.experimental?.brainDriven === true;
+
+    if (isBrainDriven) {
+      return this.brainReflectDriven(task, outcome, verification, projectPath);
+    }
+
     const prompt = `Reflect on this completed task:
 
 Task: ${task.task_description}
@@ -911,7 +1171,7 @@ Verification: ${verification.passed ? "PASSED" : `FAILED — ${verification.reas
 After your reflection, output a single-line actionable lesson:
 LESSON: <one sentence the brain should remember for next task selection>`;
 
-    const result = await this.brainSession.run(prompt, {
+    const result = await this.legacySession.run(prompt, {
       permissionMode: "bypassPermissions",
       maxTurns: 50,
       cwd: projectPath,
@@ -958,6 +1218,121 @@ LESSON: <one sentence the brain should remember for next task selection>`;
           if (!saved) {
             log.warn(`claude-mem save returned false (task ${task.id})`);
           }
+        })
+        .catch((err: unknown) => {
+          log.warn(`claude-mem save threw (task ${task.id})`, err);
+        });
+    }
+  }
+
+  // --- Brain-driven reflection (B-1 new path) ---
+
+  private async brainReflectDriven(
+    task: Task,
+    outcome: string,
+    verification: { passed: boolean; reason?: string },
+    projectPath: string,
+  ): Promise<void> {
+    const reflectionSchema = {
+      type: "object",
+      properties: {
+        reflection: {
+          type: "string",
+          description: "Multi-paragraph deep analysis",
+        },
+        strategy_update: {
+          type: "string",
+          description: "Strategy-level insight for future decisions",
+        },
+        retrieval_lesson: {
+          type: "string",
+          description: "Short text for search/dedup (like the old LESSON)",
+        },
+        orchestrator_feedback: {
+          type: "string",
+          description:
+            "Optional suggestions for how the orchestrator could work better",
+        },
+      },
+      required: ["reflection", "strategy_update", "retrieval_lesson"],
+    };
+
+    const prompt = `反思这个已完成的任务。
+
+任务: ${task.task_description}${task.directive ? `\n指令: ${truncate(task.directive, 2000)}` : ""}
+结果: ${outcome}
+验证: ${verification.passed ? "通过" : `失败 — ${verification.reason}`}
+
+深入分析：
+- 什么做得好？什么可以改进？
+- 这次经验对未来的决策有什么启示？
+- 编排器的行为有什么可以优化的？
+
+不要编辑 CLAUDE.md。`;
+
+    const result = await this.brainThink(prompt, {
+      jsonSchema: reflectionSchema,
+    });
+
+    if (result.costUsd > 0)
+      await this.costTracker.addCost(task.id, result.costUsd);
+
+    // Parse structured reflection
+    let outputSummary: string;
+    let details: Record<string, unknown> | null = null;
+
+    const parsed = isRecord(result.json) ? result.json : null;
+    if (parsed && typeof parsed.retrieval_lesson === "string") {
+      outputSummary = `LESSON: ${parsed.retrieval_lesson}`;
+      details = {
+        reflection:
+          typeof parsed.reflection === "string" ? parsed.reflection : "",
+        strategy_update:
+          typeof parsed.strategy_update === "string"
+            ? parsed.strategy_update
+            : "",
+        orchestrator_feedback:
+          typeof parsed.orchestrator_feedback === "string"
+            ? parsed.orchestrator_feedback
+            : undefined,
+      };
+    } else {
+      // Fallback: extract LESSON from text
+      const lessonMatch = result.text.match(/^LESSON:\s*(.+)$/m);
+      outputSummary = lessonMatch
+        ? `LESSON: ${lessonMatch[1]}`
+        : result.text.slice(0, SUMMARY_PREVIEW_LEN);
+    }
+
+    await this.taskStore.addLog({
+      task_id: task.id,
+      phase: "reflect",
+      agent: "brain",
+      input_summary: `Reflect on ${outcome} (brain-driven)`,
+      output_summary: outputSummary,
+      cost_usd: result.costUsd,
+      duration_ms: result.durationMs,
+      details,
+    });
+
+    // Save lesson to claude-mem
+    const lessonText = outputSummary.startsWith("LESSON:")
+      ? outputSummary
+      : null;
+    if (this.projectMemory && lessonText) {
+      const title = `Task ${task.status}: ${truncate(task.task_description, 80)}`;
+      const memText = `${lessonText}\nTask: ${task.task_description}\nOutcome: ${outcome}\nVerification: ${verification.passed ? "PASSED" : "FAILED"}`;
+      this.projectMemory
+        .save(
+          memText,
+          title,
+          this.memoryProject,
+          this.config.projectPath,
+          `db-coder-${task.id}`,
+        )
+        .then((saved) => {
+          if (!saved)
+            log.warn(`claude-mem save returned false (task ${task.id})`);
         })
         .catch((err: unknown) => {
           log.warn(`claude-mem save threw (task ${task.id})`, err);

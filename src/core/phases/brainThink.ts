@@ -11,14 +11,31 @@ import type {
   ClaudeCodeSession,
   SessionResult,
 } from "../../bridges/ClaudeCodeSession.js";
+import type { RuntimeAdapter } from "../../runtime/RuntimeAdapter.js";
 import { log } from "../../utils/logger.js";
 
+// Thin seam: Phase 3 will change parameter type to RuntimeAdapter.
+// Currently kept as union; call sites pass ClaudeCodeSession for now.
+export type BrainThinkSession = ClaudeCodeSession | RuntimeAdapter;
+
+/** Type guard: distinguish RuntimeAdapter from ClaudeCodeSession */
+function isRuntimeAdapter(rt: BrainThinkSession): rt is RuntimeAdapter {
+  return "capabilities" in rt;
+}
+
 export async function runBrainThink(
-  brainSession: ClaudeCodeSession,
+  brainSession: BrainThinkSession,
   config: Config,
   prompt: string,
   opts?: { jsonSchema?: object; resumeSessionId?: string },
 ): Promise<SessionResult> {
+  // Phase 3: dispatch to RuntimeAdapter.run() when brainSession is a RuntimeAdapter
+  if (isRuntimeAdapter(brainSession)) {
+    throw new Error(
+      "runBrainThink: RuntimeAdapter dispatch not yet implemented — Phase 3",
+    );
+  }
+
   const isResume = !!opts?.resumeSessionId;
   const result = await brainSession.run(prompt, {
     permissionMode: "bypassPermissions",
