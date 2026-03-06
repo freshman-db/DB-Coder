@@ -8,27 +8,37 @@
 import type { Config } from "../../config/Config.js";
 import type { TaskStore } from "../../memory/TaskStore.js";
 import type { CostTracker } from "../../utils/cost.js";
-import type { ClaudeCodeSession } from "../../bridges/ClaudeCodeSession.js";
+import type { RuntimeAdapter } from "../../runtime/RuntimeAdapter.js";
 import type { ReviewAdapter } from "../WorkerAdapter.js";
 import type { ReviewResult } from "../../bridges/CodingAgent.js";
 import type { Task } from "../../memory/types.js";
 import type { WorkInstructions } from "../PersonaLoader.js";
-import {
-  getChangedFilesSince,
-  getDiffSince,
-} from "../../utils/git.js";
+import { getChangedFilesSince, getDiffSince } from "../../utils/git.js";
 import { extractJsonFromText, isRecord } from "../../utils/parse.js";
 import { log } from "../../utils/logger.js";
 import { runBrainThink } from "./brainThink.js";
+import { resolveModelId } from "../../config/Config.js";
 
 export class ReviewPhase {
+  /** Runtime for spec review (brain-style read-only analysis). */
+  private readonly specReviewRuntime: RuntimeAdapter;
+
   constructor(
     private readonly config: Config,
     private readonly taskStore: TaskStore,
     private readonly costTracker: CostTracker,
-    private readonly brainSession: ClaudeCodeSession,
+    private readonly brainSession: RuntimeAdapter,
     private readonly reviewer: ReviewAdapter,
-  ) {}
+    reviewRuntime?: RuntimeAdapter,
+  ) {
+    // specReview uses a dedicated review runtime if provided; falls back to brainSession
+    this.specReviewRuntime = reviewRuntime ?? brainSession;
+  }
+
+  /** Resolved review model from routing config. */
+  private get reviewModel(): string {
+    return resolveModelId(this.config.values.routing.review.model);
+  }
 
   // --- Unified code review ---
 
@@ -107,7 +117,9 @@ ${reviewDiff}
 {"passed": true/false, "issues": [...], "preExistingIssues": [{"description": "...", "file": "...", "severity": "high|medium|low"}], "summary": "..."}`;
 
     const reviewer = reviewerOverride ?? this.reviewer;
-    const result = await reviewer.review(prompt, projectPath);
+    const result = await reviewer.review(prompt, projectPath, {
+      model: this.reviewModel,
+    });
 
     if (result.cost_usd > 0) {
       await this.costTracker.addCost(task.id, result.cost_usd);
@@ -124,7 +136,7 @@ ${reviewDiff}
     await this.taskStore.addLog({
       task_id: task.id,
       phase: "review",
-      agent: reviewer.name,
+      agent: reviewer.runtimeName ?? reviewer.name,
       input_summary: `files: ${changedFiles.join(", ")}`,
       output_summary: `${result.passed ? "PASS" : "FAIL"}: ${result.summary ?? ""}`,
       cost_usd: result.cost_usd,
@@ -179,7 +191,9 @@ ${proposal}
 {"passed": true/false, "issues": [{"severity": "critical|high|medium|low", "description": "..."}], "summary": "..."}`;
 
     const reviewer = reviewerOverride ?? this.reviewer;
-    const result = await reviewer.review(prompt, this.config.projectPath);
+    const result = await reviewer.review(prompt, this.config.projectPath, {
+      model: this.reviewModel,
+    });
 
     if (result.cost_usd > 0) {
       await this.costTracker.addCost(task.id, result.cost_usd);
@@ -188,7 +202,7 @@ ${proposal}
     await this.taskStore.addLog({
       task_id: task.id,
       phase: "plan-review",
-      agent: reviewer.name,
+      agent: reviewer.runtimeName ?? reviewer.name,
       input_summary: "Plan review",
       output_summary: `${result.passed ? "PASS" : "FAIL"}: ${result.summary ?? ""}`,
       cost_usd: result.cost_usd,
@@ -270,7 +284,12 @@ ${diff}
 Respond with EXACTLY this JSON (no markdown, no extra text):
 {"passed": true/false, "missing": ["..."], "extra": ["..."], "concerns": ["..."]}`;
 
-    const result = await runBrainThink(this.brainSession, this.config, prompt);
+    const result = await runBrainThink(
+      this.specReviewRuntime,
+      this.config,
+      prompt,
+      { model: this.config.values.routing.review.model },
+    );
     if (result.costUsd > 0 && task.id) {
       await this.costTracker.addCost(task.id, result.costUsd);
     }
@@ -278,7 +297,7 @@ Respond with EXACTLY this JSON (no markdown, no extra text):
     await this.taskStore.addLog({
       task_id: task.id,
       phase: "review",
-      agent: "brain-spec",
+      agent: `${this.specReviewRuntime.name}-spec`,
       input_summary: "Spec compliance review",
       output_summary: result.text,
       cost_usd: result.costUsd,
@@ -316,7 +335,12 @@ Respond with EXACTLY this JSON (no markdown, no extra text):
 
     // extractJsonFromText couldn't find valid JSON — retry once then FAIL
     log.warn("Spec review returned unparseable JSON, retrying once");
-    const retry = await runBrainThink(this.brainSession, this.config, prompt);
+    const retry = await runBrainThink(
+      this.specReviewRuntime,
+      this.config,
+      prompt,
+      { model: this.config.values.routing.review.model },
+    );
     if (retry.costUsd > 0 && task.id) {
       await this.costTracker.addCost(task.id, retry.costUsd);
     }

@@ -14,7 +14,7 @@ import type { Config } from "../../config/Config.js";
 import { resolveModelId } from "../../config/Config.js";
 import type { TaskStore } from "../../memory/TaskStore.js";
 import type { CostTracker } from "../../utils/cost.js";
-import type { ClaudeCodeSession } from "../../bridges/ClaudeCodeSession.js";
+import type { RuntimeAdapter } from "../../runtime/RuntimeAdapter.js";
 import type { ProjectVerifier, VerifyBaseline } from "../ProjectVerifier.js";
 import {
   getDiffStats,
@@ -124,7 +124,7 @@ export class MaintenancePhase {
     private readonly config: Config,
     private readonly taskStore: TaskStore,
     private readonly costTracker: CostTracker,
-    private readonly brainSession: ClaudeCodeSession,
+    private readonly brainSession: RuntimeAdapter,
     private readonly projectVerifier: ProjectVerifier,
     private readonly lockFile: string,
   ) {}
@@ -279,11 +279,13 @@ Multiple tasks have been rejected consecutively, suggesting a systemic pipeline 
 6. Use \`requeue_blocked_tasks\` if blocked tasks should be retried after the fix
 7. If failures are legitimate (bad task quality, not a bug), do nothing`,
       {
-        permissionMode: "bypassPermissions",
-        maxTurns: 30,
         cwd: projectPath,
+        maxTurns: 30,
         timeout: 600_000,
-        model: resolveModelId(this.config.values.brain.model),
+        model: resolveModelId(
+          this.config.values.routing.brain.model ||
+            this.config.values.brain.model,
+        ),
         allowedTools: [
           "Read",
           "Glob",
@@ -297,7 +299,7 @@ Multiple tasks have been rejected consecutively, suggesting a systemic pipeline 
           "mcp__db-coder-system-data__create_task",
           "mcp__db-coder-system-data__requeue_blocked_tasks",
         ],
-        appendSystemPrompt:
+        systemPrompt:
           "You are diagnosing pipeline failures. Investigate thoroughly before taking action. Do not modify source files.",
       },
     );
@@ -331,13 +333,15 @@ Rules:
 - Only state what you verify in the code.
 - Use claude-mem to note what you changed and why.`,
       {
-        permissionMode: "bypassPermissions",
-        maxTurns: 50,
         cwd: projectPath,
+        maxTurns: 50,
         timeout: 3_600_000,
-        model: resolveModelId(this.config.values.brain.model),
+        model: resolveModelId(
+          this.config.values.routing.brain.model ||
+            this.config.values.brain.model,
+        ),
         allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
-        appendSystemPrompt:
+        systemPrompt:
           "You are maintaining CLAUDE.md. You CAN edit CLAUDE.md. Do not modify source code.",
       },
     );

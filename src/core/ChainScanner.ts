@@ -3,10 +3,7 @@ import { readFileSync, existsSync, readdirSync, type Dirent } from "node:fs";
 import { join, relative } from "node:path";
 import type { Config } from "../config/Config.js";
 import { resolveModelId } from "../config/Config.js";
-import type {
-  ClaudeCodeSession,
-  SessionResult,
-} from "../bridges/ClaudeCodeSession.js";
+import type { RuntimeAdapter, RunResult } from "../runtime/RuntimeAdapter.js";
 import type { TaskStore } from "../memory/TaskStore.js";
 import { extractJsonFromText } from "../utils/parse.js";
 import { log } from "../utils/logger.js";
@@ -307,11 +304,17 @@ const MAX_FINGERPRINTS = 200;
 // ---------------------------------------------------------------------------
 
 export class ChainScanner {
+  private readonly brainSession: RuntimeAdapter;
+
   constructor(
-    private brainSession: ClaudeCodeSession,
+    brainSession: RuntimeAdapter,
     private taskStore: TaskStore,
     private config: Config,
-  ) {}
+    scanRuntime?: RuntimeAdapter,
+  ) {
+    // Use dedicated scan runtime if provided; falls back to brain session
+    this.brainSession = scanRuntime ?? brainSession;
+  }
 
   // ---- Public API ----
 
@@ -378,10 +381,11 @@ export class ChainScanner {
       }
 
       try {
-        const { chain, cost: traceCost, sessionId } = await this.traceChain(
-          entry,
-          projectPath,
-        );
+        const {
+          chain,
+          cost: traceCost,
+          sessionId,
+        } = await this.traceChain(entry, projectPath);
         totalCost += traceCost;
 
         if (chain.boundaries.length > 0 && totalCost < cfg.maxBudget) {
@@ -597,13 +601,15 @@ Output ONLY a JSON object with this structure:
 }`;
 
     const result = await this.brainSession.run(prompt, {
-      permissionMode: "bypassPermissions",
-      maxTurns: 25,
       cwd: projectPath,
+      maxTurns: 25,
       timeout: 300_000,
-      model: resolveModelId(this.config.values.brain.model),
+      model: resolveModelId(
+        this.config.values.routing.scan.model || this.config.values.brain.model,
+      ),
+      readOnly: true,
       disallowedTools: ["Edit", "Write", "NotebookEdit"],
-      appendSystemPrompt:
+      systemPrompt:
         "You are tracing an execution chain. Read code files to follow the call graph. Output ONLY valid JSON.",
     });
 
@@ -630,10 +636,7 @@ Output ONLY a JSON object with this structure:
         boundaries: parsed.boundaries,
       },
       cost: result.costUsd,
-      sessionId:
-        !result.isError && result.exitCode === 0
-          ? result.sessionId
-          : undefined,
+      sessionId: !result.isError ? result.sessionId : undefined,
     };
   }
 
@@ -646,7 +649,14 @@ Output ONLY a JSON object with this structure:
   ): Promise<{ findings: BoundaryFinding[]; cost: number }> {
     const boundariesJson = JSON.stringify(chain.boundaries, null, 2);
 
-    const prompt = resumeSessionId
+    // Only use resume if the runtime unconditionally supports it;
+    // otherwise the abbreviated prompt would lose the chain context.
+    const canResume =
+      this.brainSession.capabilities.sessionPersistence === true;
+    const effectiveResumeId =
+      canResume && resumeSessionId ? resumeSessionId : undefined;
+
+    const prompt = effectiveResumeId
       ? `--- BOUNDARY VERIFICATION ---
 Now verify the boundaries you found in the chain above.
 
@@ -709,16 +719,18 @@ Output ONLY a JSON object:
 If all boundaries are clean, return: { "findings": [] }`;
 
     const result = await this.brainSession.run(prompt, {
-      permissionMode: "bypassPermissions",
-      maxTurns: 35,
       cwd: projectPath,
+      maxTurns: 35,
       timeout: 600_000,
-      model: resolveModelId(this.config.values.brain.model),
+      model: resolveModelId(
+        this.config.values.routing.scan.model || this.config.values.brain.model,
+      ),
+      readOnly: true,
       disallowedTools: ["Edit", "Write", "NotebookEdit"],
-      appendSystemPrompt: resumeSessionId
+      systemPrompt: effectiveResumeId
         ? undefined
         : "You are auditing boundary contracts. Read both producer and consumer code. Only report verified mismatches. Output ONLY valid JSON.",
-      resumeSessionId,
+      resumeSessionId: effectiveResumeId,
     });
 
     const parsed = extractJsonFromText(result.text, (v) => {
@@ -767,13 +779,15 @@ Output ONLY a JSON array of EntryPoint objects:
 [{ "name": "...", "file": "...", "line": <number>, "kind": "http|cli|event|timer|export|other" }]`;
 
     const result = await this.brainSession.run(prompt, {
-      permissionMode: "bypassPermissions",
-      maxTurns: 5,
       cwd: projectPath,
+      maxTurns: 5,
       timeout: 120_000,
-      model: resolveModelId(this.config.values.brain.model),
+      model: resolveModelId(
+        this.config.values.routing.scan.model || this.config.values.brain.model,
+      ),
+      readOnly: true,
       disallowedTools: ["Edit", "Write", "NotebookEdit"],
-      appendSystemPrompt:
+      systemPrompt:
         "You are filtering and sorting entry points. Output ONLY a JSON array.",
     });
 

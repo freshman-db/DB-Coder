@@ -59,11 +59,21 @@ function makeResult(text: string, costUsd = 0.01): MockSessionResult {
 
 function createMockBrain(handler?: (prompt: string) => MockSessionResult) {
   return {
+    name: "claude-sdk",
+    capabilities: {
+      nativeOutputSchema: true,
+      eventStreaming: true,
+      sessionPersistence: true,
+      sandboxControl: true,
+      toolSurface: true,
+      extendedThinking: true,
+    },
     run: async (prompt: string, _opts: unknown) => {
       if (handler) return handler(prompt);
       return makeResult("{}");
     },
-    kill: () => {},
+    isAvailable: async () => true,
+    supportsModel: () => true,
   };
 }
 
@@ -85,11 +95,7 @@ function createMockTaskStore() {
     upsertChainScanState: async (s: ChainScanState) => {
       scanState = s;
     },
-    createTask: async (
-      projectPath: string,
-      desc: string,
-      priority: number,
-    ) => {
+    createTask: async (projectPath: string, desc: string, priority: number) => {
       tasks.push({ desc, priority, projectPath });
       return {
         id: `task-${tasks.length}`,
@@ -126,6 +132,9 @@ function createMockConfig(overrides?: Record<string, unknown>) {
           ...overrides,
         },
       },
+      routing: {
+        scan: { runtime: "claude-sdk", model: "sonnet" },
+      },
     },
   };
 }
@@ -150,8 +159,7 @@ route("GET", "/api/status", getStatus);
 
       setChainScannerDepsForTests({
         existsSync: (p: string) =>
-          p.endsWith("tsconfig.json") ||
-          p.endsWith("package.json"),
+          p.endsWith("tsconfig.json") || p.endsWith("package.json"),
         readFileSync: (p: string) => fileContents[p] ?? "",
         readdirSync: (p: string, _opts: unknown) => {
           if (p === "/test-project") {
@@ -175,12 +183,19 @@ route("GET", "/api/status", getStatus);
 
       const entries = scanner.deterministicScan("/test-project");
       const httpEntries = entries.filter((e) => e.kind === "http");
-      assert.ok(httpEntries.length >= 2, `Expected >= 2 HTTP entries, got ${httpEntries.length}`);
       assert.ok(
-        httpEntries.some((e) => e.name.includes("POST") && e.name.includes("/api/tasks")),
+        httpEntries.length >= 2,
+        `Expected >= 2 HTTP entries, got ${httpEntries.length}`,
       );
       assert.ok(
-        httpEntries.some((e) => e.name.includes("GET") && e.name.includes("/api/status")),
+        httpEntries.some(
+          (e) => e.name.includes("POST") && e.name.includes("/api/tasks"),
+        ),
+      );
+      assert.ok(
+        httpEntries.some(
+          (e) => e.name.includes("GET") && e.name.includes("/api/status"),
+        ),
       );
     });
 
@@ -214,7 +229,10 @@ program.command("scan").description("Run scan");
 
       const entries = scanner.deterministicScan("/test-project");
       const cliEntries = entries.filter((e) => e.kind === "cli");
-      assert.ok(cliEntries.length >= 2, `Expected >= 2 CLI entries, got ${cliEntries.length}`);
+      assert.ok(
+        cliEntries.length >= 2,
+        `Expected >= 2 CLI entries, got ${cliEntries.length}`,
+      );
       assert.ok(cliEntries.some((e) => e.name.includes("serve")));
       assert.ok(cliEntries.some((e) => e.name.includes("scan")));
     });
@@ -362,7 +380,10 @@ def create_user():
 
       const entries = scanner.deterministicScan("/test-project");
       const httpEntries = entries.filter((e) => e.kind === "http");
-      assert.ok(httpEntries.length >= 2, `Expected >= 2 HTTP entries, got ${httpEntries.length}`);
+      assert.ok(
+        httpEntries.length >= 2,
+        `Expected >= 2 HTTP entries, got ${httpEntries.length}`,
+      );
     });
 
     it("should detect click CLI entries", () => {
@@ -393,7 +414,10 @@ def main():
 
       const entries = scanner.deterministicScan("/test-project");
       const cliEntries = entries.filter((e) => e.kind === "cli");
-      assert.ok(cliEntries.length >= 1, `Expected >= 1 CLI entry, got ${cliEntries.length}`);
+      assert.ok(
+        cliEntries.length >= 1,
+        `Expected >= 1 CLI entry, got ${cliEntries.length}`,
+      );
     });
 
     it("should detect Celery task entries", () => {
@@ -424,7 +448,10 @@ def process_order(order_id):
 
       const entries = scanner.deterministicScan("/test-project");
       const eventEntries = entries.filter((e) => e.kind === "event");
-      assert.ok(eventEntries.length >= 1, `Expected >= 1 event entry, got ${eventEntries.length}`);
+      assert.ok(
+        eventEntries.length >= 1,
+        `Expected >= 1 event entry, got ${eventEntries.length}`,
+      );
     });
   });
 
@@ -515,7 +542,10 @@ def process_order(order_id):
             }),
           );
         }
-        if (prompt.includes("boundary contract auditor") || prompt.includes("BOUNDARY VERIFICATION")) {
+        if (
+          prompt.includes("boundary contract auditor") ||
+          prompt.includes("BOUNDARY VERIFICATION")
+        ) {
           return makeResult(JSON.stringify({ findings: [finding] }));
         }
         return makeResult("[]"); // AI refinement
@@ -571,10 +601,12 @@ def process_order(order_id):
             }),
           );
         }
-        if (prompt.includes("boundary contract auditor") || prompt.includes("BOUNDARY VERIFICATION")) {
+        if (
+          prompt.includes("boundary contract auditor") ||
+          prompt.includes("BOUNDARY VERIFICATION")
+        ) {
           callCount++;
-          const mismatch =
-            callCount === 1 ? "mismatch-alpha" : "mismatch-beta";
+          const mismatch = callCount === 1 ? "mismatch-alpha" : "mismatch-beta";
           return makeResult(
             JSON.stringify({
               findings: [
@@ -619,7 +651,11 @@ def process_order(order_id):
       assert.equal(store.tasks.length, 1);
 
       await scanner.scanNext("/test-project");
-      assert.equal(store.tasks.length, 2, "Different mismatch should create new task");
+      assert.equal(
+        store.tasks.length,
+        2,
+        "Different mismatch should create new task",
+      );
     });
   });
 
@@ -670,7 +706,11 @@ def process_order(order_id):
       // making total $4.0; but actually budget check is at the start of loop)
       // Actually: after first chain, totalCost=2.0, which < 3.0, so second chain starts.
       // After second trace, totalCost=4.0. But the check is at the top of the loop.
-      assert.equal(traceCallCount, 2, "Both traces should run (budget check is before loop iteration)");
+      assert.equal(
+        traceCallCount,
+        2,
+        "Both traces should run (budget check is before loop iteration)",
+      );
     });
 
     it("should skip chain when budget already exceeded", async () => {
@@ -736,9 +776,7 @@ def process_order(order_id):
           if (prompt.includes("Trace the execution chain")) {
             callCount++;
             if (callCount === 1) throw new Error("Session timeout");
-            return makeResult(
-              JSON.stringify({ callPath: [], boundaries: [] }),
-            );
+            return makeResult(JSON.stringify({ callPath: [], boundaries: [] }));
           }
           return makeResult("[]");
         },
@@ -829,9 +867,7 @@ def process_order(order_id):
 
       const brain = createMockBrain((prompt: string) => {
         if (prompt.includes("Trace the execution chain")) {
-          return makeResult(
-            JSON.stringify({ callPath: [], boundaries: [] }),
-          );
+          return makeResult(JSON.stringify({ callPath: [], boundaries: [] }));
         }
         // AI refinement: return the raw entries as-is
         if (prompt.includes("entry points discovered")) {
@@ -854,7 +890,10 @@ def process_order(order_id):
       const scanner = new ChainScanner(
         brain as never,
         store as never,
-        createMockConfig({ chainsPerTrigger: 1, rediscoveryInterval: 10 }) as never,
+        createMockConfig({
+          chainsPerTrigger: 1,
+          rediscoveryInterval: 10,
+        }) as never,
       );
 
       await scanner.scanNext("/test-project");

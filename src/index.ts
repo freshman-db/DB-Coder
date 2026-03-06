@@ -20,7 +20,10 @@ import { PatrolManager } from "./core/ModeManager.js";
 import { PlanChatManager } from "./core/PlanChatManager.js";
 import { log, type LogEntry } from "./utils/logger.js";
 import { truncate } from "./utils/parse.js";
-import { validateConfigForStartup } from "./startup/configValidation.js";
+import {
+  validateConfigForStartup,
+  validateRuntimeAvailability,
+} from "./startup/configValidation.js";
 import { wireGracefulShutdown } from "./startup/gracefulShutdown.js";
 import { checkAndRecoverErrors } from "./startup/errorRecovery.js";
 import { TASK_DESC_MAX_LENGTH } from "./types/constants.js";
@@ -45,6 +48,16 @@ program
 
     const config = new Config(projectPath);
     if (!validateConfigForStartup(config.values, config.projectPath)) {
+      process.exitCode = 1;
+      return;
+    }
+
+    // Verify configured runtimes are actually installed/reachable
+    const runtimeIssues = await validateRuntimeAvailability(
+      config.values.routing,
+    );
+    if (runtimeIssues.length > 0) {
+      for (const issue of runtimeIssues) log.error(`Runtime check: ${issue}`);
       process.exitCode = 1;
       return;
     }

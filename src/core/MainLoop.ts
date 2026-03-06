@@ -5,14 +5,15 @@ import type { TaskStore } from "../memory/TaskStore.js";
 import type { CostTracker } from "../utils/cost.js";
 import { ClaudeCodeSession } from "../bridges/ClaudeCodeSession.js";
 import type { SdkExtras } from "../bridges/buildSdkOptions.js";
+import { RuntimeReviewAdapter, type ReviewAdapter } from "./WorkerAdapter.js";
+import type { RuntimeAdapter } from "../runtime/RuntimeAdapter.js";
+import { ClaudeSdkRuntime } from "../runtime/ClaudeSdkRuntime.js";
+import { CodexCliRuntime } from "../runtime/CodexCliRuntime.js";
 import {
-  ClaudeWorkerAdapter,
-  CodexWorkerAdapter,
-  ClaudeReviewAdapter,
-  CodexReviewAdapter,
-  type WorkerAdapter,
-  type ReviewAdapter,
-} from "./WorkerAdapter.js";
+  registerRuntime,
+  getRuntimeSync,
+  normalizeRuntimeName,
+} from "../runtime/runtimeFactory.js";
 import type { Task } from "../memory/types.js";
 import type {
   LoopState,
@@ -123,15 +124,14 @@ export class MainLoop {
   private stoppedResolve: (() => void) | null = null;
   private tasksCompleted = 0;
   private consecutiveRejections = 0;
-  private brainSession!: ClaudeCodeSession;
-  private workerSession!: ClaudeCodeSession;
+  private brainRuntime!: RuntimeAdapter;
+  private workerRuntime!: RuntimeAdapter;
+  /** Underlying sessions for lifecycle management (kill on stop). */
+  private sessions: ClaudeCodeSession[] = [];
   private chainScanner: ChainScanner;
   private personaLoader: PersonaLoader;
   private projectVerifier: ProjectVerifier;
-  private worker: WorkerAdapter;
   private reviewer: ReviewAdapter;
-  private claudeReviewer: ClaudeReviewAdapter;
-  private codexReviewer: CodexReviewAdapter;
   private strategies?: RegisteredStrategies;
   private projectMemory: ProjectMemory | null = null;
   private memoryProject = "default-project";
@@ -148,7 +148,7 @@ export class MainLoop {
     private costTracker: CostTracker,
     private eventBus: CycleEventBus = CycleEventBus.noop(),
     private sdkExtras?: SdkExtras,
-    workerAdapter?: WorkerAdapter,
+    workerRuntimeOverride?: RuntimeAdapter,
     reviewAdapter?: ReviewAdapter,
     strategies?: RegisteredStrategies,
   ) {
@@ -162,27 +162,116 @@ export class MainLoop {
       taskStore,
       join(config.projectPath, "personas"),
     );
-    this.brainSession = new ClaudeCodeSession(sdkExtras);
-    this.workerSession = new ClaudeCodeSession(sdkExtras);
-    this.chainScanner = new ChainScanner(this.brainSession, taskStore, config);
+
+    // Create all available runtimes and register in factory.
+    // Each ClaudeCodeSession gets its own SDK process.
+    const brainSession = new ClaudeCodeSession(sdkExtras);
+    const workerSession = new ClaudeCodeSession(sdkExtras);
+    this.sessions = [brainSession, workerSession];
+
+    const claudeSdkBrain = new ClaudeSdkRuntime(brainSession);
+    const claudeSdkWorker = new ClaudeSdkRuntime(workerSession);
+    const codexCliRuntime = new CodexCliRuntime(config.values.codex);
+
+    // Register under canonical names — runtimeFactory handles alias→canonical.
+    // "claude-sdk" is the brain (read-only) session; "claude-sdk-worker" is the
+    // worker session.  findRuntimeForModel checks worker first so cross-runtime
+    // fallback won't accidentally land on the brain session.
+    registerRuntime("claude-sdk", claudeSdkBrain);
+    registerRuntime("claude-sdk-worker", claudeSdkWorker);
+    registerRuntime("codex-cli", codexCliRuntime);
+
+    // Build a local runtime map for routing lookups. Two "claude-sdk" entries
+    // exist (brain vs worker) because they wrap separate sessions; the factory
+    // only holds one, but we resolve locally first.
+    const routing = config.values.routing;
+    const localRuntimes: Record<string, RuntimeAdapter> = {
+      "claude-sdk-brain": claudeSdkBrain,
+      "claude-sdk-worker": claudeSdkWorker,
+      "codex-cli": codexCliRuntime,
+    };
+
+    /** Pick the correct RuntimeAdapter for a given phase routing entry. */
+    const resolvePhaseRuntime = (
+      phaseName: string,
+      runtimeName: string,
+      preferWorkerSession: boolean,
+    ): RuntimeAdapter => {
+      const canonical = normalizeRuntimeName(runtimeName);
+      if (canonical === "claude-sdk") {
+        return preferWorkerSession
+          ? localRuntimes["claude-sdk-worker"]
+          : localRuntimes["claude-sdk-brain"];
+      }
+      // Try local, then factory
+      if (localRuntimes[canonical]) return localRuntimes[canonical];
+      try {
+        return getRuntimeSync(canonical);
+      } catch {
+        log.warn(
+          `routing.${phaseName}.runtime="${runtimeName}" not available, falling back to claude-sdk`,
+        );
+        return preferWorkerSession
+          ? localRuntimes["claude-sdk-worker"]
+          : localRuntimes["claude-sdk-brain"];
+      }
+    };
+
+    // Runtime availability is validated at startup (validateRuntimeAvailability)
+    // before MainLoop is constructed — no need for a redundant check here.
+
+    // --- Resolve phase runtimes from routing config ---
+    this.brainRuntime = resolvePhaseRuntime(
+      "brain",
+      routing.brain.runtime,
+      false,
+    );
+    const executeRuntime = resolvePhaseRuntime(
+      "execute",
+      routing.execute.runtime,
+      true,
+    );
+    // Resolve review runtime and wrap in RuntimeReviewAdapter (unified Phase 3).
+    const reviewRuntime = resolvePhaseRuntime(
+      "review",
+      routing.review.runtime,
+      false,
+    );
+
+    // Resolve phase-specific runtimes for thinking phases.
+    // These all default to brain session but can be independently configured.
+    const planRuntime = resolvePhaseRuntime(
+      "plan",
+      routing.plan.runtime,
+      false,
+    );
+    const reflectRuntime = resolvePhaseRuntime(
+      "reflect",
+      routing.reflect.runtime,
+      false,
+    );
+    const scanRuntime = resolvePhaseRuntime(
+      "scan",
+      routing.scan.runtime,
+      false,
+    );
+
+    this.chainScanner = new ChainScanner(
+      this.brainRuntime,
+      taskStore,
+      config,
+      scanRuntime,
+    );
     this.projectVerifier = new ProjectVerifier();
-    this.claudeReviewer = new ClaudeReviewAdapter(this.brainSession);
-    this.codexReviewer = new CodexReviewAdapter(codex);
     this.strategies = strategies;
 
-    // Wire up WorkerAdapter + ReviewAdapter (defaults from config if not injected)
-    if (workerAdapter && reviewAdapter) {
-      this.worker = workerAdapter;
+    // Wire up worker RuntimeAdapter + ReviewAdapter
+    if (workerRuntimeOverride && reviewAdapter) {
+      this.workerRuntime = workerRuntimeOverride;
       this.reviewer = reviewAdapter;
     } else {
-      const workerType = config.values.autonomy.worker;
-      if (workerType === "codex") {
-        this.worker = new CodexWorkerAdapter(codex);
-        this.reviewer = this.claudeReviewer;
-      } else {
-        this.worker = new ClaudeWorkerAdapter(this.workerSession);
-        this.reviewer = this.codexReviewer;
-      }
+      this.workerRuntime = executeRuntime;
+      this.reviewer = new RuntimeReviewAdapter(reviewRuntime);
     }
 
     this.memoryProject = this.deriveMemoryProject(config.projectPath);
@@ -192,7 +281,7 @@ export class MainLoop {
       config,
       taskStore,
       costTracker,
-      this.brainSession,
+      this.brainRuntime,
       this.projectVerifier,
       this.lockFile,
     );
@@ -200,14 +289,15 @@ export class MainLoop {
       config,
       taskStore,
       costTracker,
-      this.brainSession,
+      this.brainRuntime,
       this.reviewer,
+      reviewRuntime,
     );
     this.workerPhase = new WorkerPhase(
       config,
       taskStore,
       costTracker,
-      this.worker,
+      this.workerRuntime,
       this.personaLoader,
       (baseline, startCommit, projectPath) =>
         this.maintenance.hardVerify(baseline, startCommit, projectPath),
@@ -221,11 +311,12 @@ export class MainLoop {
       config,
       taskStore,
       costTracker,
-      this.brainSession,
+      this.brainRuntime,
       this.taskQueue,
       this.strategies,
       this.projectMemory,
       this.memoryProject,
+      { plan: planRuntime, reflect: reflectRuntime },
     );
   }
 
@@ -423,8 +514,9 @@ export class MainLoop {
 
   async stop(): Promise<void> {
     this.setRunning(false);
-    this.brainSession.kill();
-    this.workerSession.kill();
+    for (const session of this.sessions) {
+      session.kill();
+    }
   }
 
   async waitForStopped(timeoutMs = 120_000): Promise<void> {
@@ -1105,7 +1197,7 @@ Revise the previous proposal to address ALL issues above. Produce a complete upd
       await this.taskStore.addLog({
         task_id: task.id,
         phase: "execute",
-        agent: this.worker.name,
+        agent: this.workerPhase.effectiveRuntimeName,
         input_summary: task.task_description,
         output_summary: workerResult.text,
         cost_usd: workerResult.costUsd,
