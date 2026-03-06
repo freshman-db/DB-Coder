@@ -1,8 +1,8 @@
 /**
- * runtimeFactory — Create RuntimeAdapter instances from configuration.
+ * runtimeFactory — Runtime registry and alias normalization.
  *
- * Handles alias normalization ("codex" -> "codex-sdk", "claude" -> "claude-sdk")
- * and runtime registration for future extensibility.
+ * Canonical runtimes: "claude-sdk", "codex-cli".
+ * Aliases: "claude" -> "claude-sdk", "codex" -> "codex-cli".
  */
 
 import type { RuntimeAdapter } from "./RuntimeAdapter.js";
@@ -12,7 +12,7 @@ import { log } from "../utils/logger.js";
 
 const RUNTIME_ALIASES: Record<string, string> = {
   claude: "claude-sdk",
-  codex: "codex-sdk",
+  codex: "codex-cli",
 };
 
 /**
@@ -41,7 +41,6 @@ export function registerRuntime(name: string, runtime: RuntimeAdapter): void {
 
 /**
  * Get a registered runtime by canonical name.
- * If the runtime is "codex-sdk" and not available, falls back to "codex-cli".
  * Throws if no matching runtime is found.
  */
 export async function getRuntime(name: string): Promise<RuntimeAdapter> {
@@ -52,19 +51,6 @@ export async function getRuntime(name: string): Promise<RuntimeAdapter> {
       `Runtime "${canonical}" not registered. Available: ${[...registry.keys()].join(", ")}`,
     );
   }
-
-  // Codex SDK → CLI fallback
-  if (canonical === "codex-sdk" && !(await runtime.isAvailable())) {
-    const cliFallback = registry.get("codex-cli");
-    if (cliFallback && (await cliFallback.isAvailable())) {
-      log.warn("codex-sdk unavailable, falling back to codex-cli");
-      return cliFallback;
-    }
-    throw new Error(
-      "codex-sdk not available and codex-cli fallback not registered or not available",
-    );
-  }
-
   return runtime;
 }
 
@@ -95,15 +81,19 @@ export function clearRuntimes(): void {
 
 /**
  * Find a runtime that supports the given model.
+ * Prefers worker-designated runtimes (names ending in "-worker") over
+ * brain/read-only sessions to avoid cross-runtime fallback landing on brain.
  * Returns undefined if no registered runtime supports it.
  */
 export function findRuntimeForModel(
   modelId: string,
 ): RuntimeAdapter | undefined {
-  for (const runtime of registry.values()) {
+  let fallback: RuntimeAdapter | undefined;
+  for (const [name, runtime] of registry.entries()) {
     if (runtime.supportsModel(modelId)) {
-      return runtime;
+      if (name.endsWith("-worker")) return runtime;
+      fallback ??= runtime;
     }
   }
-  return undefined;
+  return fallback;
 }

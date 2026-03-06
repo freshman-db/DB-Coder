@@ -211,7 +211,7 @@ test("ClaudeSdkRuntime: supportsModel recognizes Claude models", () => {
 
 test("normalizeRuntimeName resolves aliases", () => {
   assert.equal(normalizeRuntimeName("claude"), "claude-sdk");
-  assert.equal(normalizeRuntimeName("codex"), "codex-sdk");
+  assert.equal(normalizeRuntimeName("codex"), "codex-cli");
   assert.equal(normalizeRuntimeName("claude-sdk"), "claude-sdk");
   assert.equal(normalizeRuntimeName("codex-cli"), "codex-cli");
 });
@@ -325,52 +325,13 @@ test("CodexCliRuntime: supportsModel for codex models", () => {
   assert.equal(runtime.supportsModel("claude-sonnet-4-6"), false);
 });
 
-// --- runtimeFactory codex fallback ---
+// --- runtimeFactory codex-sdk not registered ---
 
-test("getRuntime: codex-sdk falls back to codex-cli when sdk unavailable", async () => {
+test("getRuntime: codex-sdk throws when not registered", async () => {
   clearRuntimes();
 
-  const unavailableSdk: RuntimeAdapter = {
-    name: "codex-sdk",
-    capabilities: new CodexSdkRuntime().capabilities,
-    run: async () => ({
-      text: "",
-      costUsd: 0,
-      durationMs: 0,
-      isError: true,
-      errors: ["unavailable"],
-    }),
-    isAvailable: async () => false,
-    supportsModel: (id) => id.startsWith("gpt-"),
-  };
-
-  const availableCli: RuntimeAdapter = {
-    name: "codex-cli",
-    capabilities: {
-      nativeOutputSchema: false,
-      eventStreaming: true,
-      sessionPersistence: { conditional: "sandbox=full-auto" },
-      sandboxControl: true,
-      toolSurface: false,
-      extendedThinking: false,
-    },
-    run: async () => ({
-      text: "cli result",
-      costUsd: 0,
-      durationMs: 0,
-      isError: false,
-      errors: [],
-    }),
-    isAvailable: async () => true,
-    supportsModel: (id) => id.startsWith("gpt-"),
-  };
-
-  registerRuntime("codex-sdk", unavailableSdk);
-  registerRuntime("codex-cli", availableCli);
-
   const { getRuntime } = await import("./runtimeFactory.js");
-  const result = await getRuntime("codex-sdk");
-  assert.equal(result.name, "codex-cli");
+  await assert.rejects(() => getRuntime("codex-sdk"), /not registered/);
 
   clearRuntimes();
 });
@@ -402,26 +363,12 @@ test("CodexSdkRuntime: accepts custom TokenPricing", () => {
   // Runtime should construct without error — pricing is used internally in run()
 });
 
-// --- runtimeFactory codex fallback ---
+// --- runtimeFactory codex alias ---
 
-test("getRuntime via alias: 'codex' resolves and falls back correctly", async () => {
+test("getRuntime via alias: 'codex' resolves directly to codex-cli", async () => {
   clearRuntimes();
 
-  const unavailableSdk: RuntimeAdapter = {
-    name: "codex-sdk",
-    capabilities: new CodexSdkRuntime().capabilities,
-    run: async () => ({
-      text: "",
-      costUsd: 0,
-      durationMs: 0,
-      isError: true,
-      errors: [],
-    }),
-    isAvailable: async () => false,
-    supportsModel: () => true,
-  };
-
-  const availableCli: RuntimeAdapter = {
+  const cli: RuntimeAdapter = {
     name: "codex-cli",
     capabilities: {
       nativeOutputSchema: false,
@@ -442,8 +389,7 @@ test("getRuntime via alias: 'codex' resolves and falls back correctly", async ()
     supportsModel: () => true,
   };
 
-  registerRuntime("codex-sdk", unavailableSdk);
-  registerRuntime("codex-cli", availableCli);
+  registerRuntime("codex-cli", cli);
 
   const { getRuntime } = await import("./runtimeFactory.js");
   const result = await getRuntime("codex");

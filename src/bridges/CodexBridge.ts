@@ -270,17 +270,20 @@ export class CodexBridge implements CodingAgent {
     });
   }
 
-  async review(prompt: string, cwd: string): Promise<ReviewResult> {
+  async review(
+    prompt: string,
+    cwd: string,
+    opts?: { model?: string },
+  ): Promise<ReviewResult> {
     const start = Date.now();
 
     try {
       // Reviews are read-only — enforce workspace-read regardless of config
-      const args = [
-        "exec",
-        ...this.sandboxArgs("workspace-read"),
-        "--json",
-        prompt,
-      ];
+      const args = ["exec", ...this.sandboxArgs("workspace-read"), "--json"];
+      if (opts?.model) {
+        args.push("--model", opts.model);
+      }
+      args.push(prompt);
       const { output, exitCode, events, stderr } = await this.invokeCodex(
         args,
         cwd,
