@@ -546,8 +546,7 @@ ${context}
 - 说明怎么验证任务做对了
 
 自由探索代码库，用你自己的判断力。不要自我设限。
-你拥有 Read、Glob、Grep、Bash 等工具权限，以及 MCP 工具（claude-mem 搜索经验、system-data 查看任务/指标）。
-你不能修改文件（Edit/Write/NotebookEdit 被禁用），也不能创建任务或重排队列。`;
+你可以使用所有已安装的工具和插件，但以下操作被禁用：修改文件（Edit/Write/NotebookEdit）、创建任务、重排队列。`;
 
     const brainDecisionSchema = {
       type: "object",
