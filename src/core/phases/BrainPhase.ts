@@ -529,7 +529,8 @@ ${analysisReport}
   private async brainDecideDriven(
     projectPath: string,
   ): ReturnType<BrainPhase["brainDecide"]> {
-    const context = await this.gatherBrainContext(projectPath);
+    // B-2: Minimal context — brain self-serves via tools (Read/Glob/Grep/Bash)
+    const context = await this.gatherBrainContextMinimal(projectPath);
     let totalCost = 0;
 
     // Single-phase: exploration + structured output in one call
@@ -544,7 +545,8 @@ ${context}
 - 申请合理的资源（预算、超时）
 - 说明怎么验证任务做对了
 
-自由探索代码库，用你自己的判断力。不要自我设限。`;
+自由探索代码库，用你自己的判断力。不要自我设限。
+你拥有 Read、Glob、Grep、Bash 工具权限，可以自行检索代码和上下文。`;
 
     const brainDecisionSchema = {
       type: "object",
@@ -870,6 +872,61 @@ ${context}
       }
     } catch (e) {
       log.debug("gatherBrainContext: hot files failed:", e);
+    }
+
+    return parts.join("\n\n");
+  }
+
+  /**
+   * B-2: Minimal context for brain-driven mode.
+   * Only provides task list, budget, and health metrics.
+   * Brain can self-serve additional context via its tool permissions
+   * (Read/Glob/Grep/Bash).
+   */
+  async gatherBrainContextMinimal(projectPath: string): Promise<string> {
+    const parts: string[] = [];
+
+    // Queued tasks
+    const queuedTasks = await this.taskQueue.getQueued(projectPath);
+    if (queuedTasks.length > 0) {
+      parts.push(
+        `Queued tasks (${queuedTasks.length}):\n${queuedTasks
+          .slice(0, 5)
+          .map((t) => `- [P${t.priority}] ${t.task_description}`)
+          .join("\n")}`,
+      );
+    }
+
+    // Recent tasks (dedup signal)
+    const recentResult = await this.taskStore.listTasksPaged(
+      projectPath,
+      1,
+      15,
+    );
+    const recentTasks = recentResult.tasks ?? [];
+    if (recentTasks.length > 0) {
+      const lines = recentTasks.map(
+        (t: Task) => `- [${t.status}] ${t.task_description}`,
+      );
+      parts.push(`Recent tasks (DO NOT duplicate these):\n${lines.join("\n")}`);
+    }
+
+    // Budget remaining
+    const dailyCost = await this.taskStore.getDailyCost();
+    const remaining =
+      this.config.values.budget.maxPerDay - dailyCost.total_cost_usd;
+    parts.push(
+      `Budget: $${remaining.toFixed(2)} remaining today (${dailyCost.task_count} tasks completed). ${remaining < 30 ? "LOW BUDGET — pick small tasks." : ""}`,
+    );
+
+    // Health metrics
+    try {
+      const metrics = await this.taskStore.getOperationalMetrics(projectPath);
+      parts.push(
+        `Health: passRate=${metrics.taskPassRate}%, dailyCost=$${metrics.dailyCostUsd.toFixed(2)}, queue=${metrics.queueDepth}`,
+      );
+    } catch (e) {
+      log.debug("gatherBrainContextMinimal: metrics failed:", e);
     }
 
     return parts.join("\n\n");
