@@ -55,7 +55,11 @@ export interface RunOptions {
 }
 
 export interface RunResult {
+  /** Full text output (all agent messages concatenated). For structured
+   *  responses, use the `structured` field which extracts the final response. */
   text: string;
+  /** Parsed structured output from the final agent message (when outputSchema
+   *  was requested and the last message is valid JSON). */
   structured?: unknown;
   costUsd: number;
   durationMs: number;

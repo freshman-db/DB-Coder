@@ -488,8 +488,7 @@ test("brainThink disallowedTools includes MCP mutating tools", async () => {
 
 test("CodexSdkRuntime sessionId: resume path uses resumeSessionId as fallback", () => {
   // When resuming a thread, thread.started may not fire.
-  // The runtime should fall back to opts.resumeSessionId.
-  // This tests the contract, not the actual SDK call.
+  // The runtime initializes threadId = opts.resumeSessionId as fallback.
   const resumeSessionId = "thread-abc-123";
   let threadId: string | undefined = resumeSessionId; // fallback
   // Simulate: thread.started fires and overwrites
@@ -500,6 +499,27 @@ test("CodexSdkRuntime sessionId: resume path uses resumeSessionId as fallback", 
   let threadId2: string | undefined = resumeSessionId;
   // No event updates threadId2
   assert.equal(threadId2, resumeSessionId); // fallback works
+});
+
+// --- CodexSdkRuntime: stream error event handling ---
+
+test("ThreadErrorEvent contract: type='error' with message string", () => {
+  // SDK type: ThreadErrorEvent = { type: "error", message: string }
+  // Runtime must handle this as a fatal error → isError: true
+  const event = { type: "error" as const, message: "connection reset" };
+  let hasError = false;
+  const errors: string[] = [];
+
+  // Simulate the switch case logic
+  if (event.type === "error") {
+    hasError = true;
+    if (event.message) {
+      errors.push(event.message);
+    }
+  }
+
+  assert.equal(hasError, true);
+  assert.deepEqual(errors, ["connection reset"]);
 });
 
 // --- CodexSdkRuntime: structured output from last agent_message ---

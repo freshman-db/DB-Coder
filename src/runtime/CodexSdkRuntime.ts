@@ -141,6 +141,13 @@ export class CodexSdkRuntime implements RuntimeAdapter {
               errors.push(event.error.message);
             }
             break;
+          case "error":
+            // Fatal stream error (ThreadErrorEvent)
+            hasError = true;
+            if (event.message) {
+              errors.push(event.message);
+            }
+            break;
           case "item.completed":
             if (event.item.type === "agent_message") {
               textParts.push(event.item.text);
