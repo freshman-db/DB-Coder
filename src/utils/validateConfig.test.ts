@@ -44,11 +44,12 @@ function createValidConfig(): DbCoderConfig {
       maxReviewFixes: 1,
     },
     routing: {
-      scan: "brain",
-      plan: "brain",
-      execute_frontend: "claude",
-      execute_backend: "codex",
-      reflect: "brain",
+      brain: { runtime: "claude-sdk", model: "opus" },
+      plan: { runtime: "claude-sdk", model: "opus" },
+      execute: { runtime: "claude-sdk", model: "opus" },
+      review: { runtime: "codex-cli", model: "gpt-5.3-codex" },
+      reflect: { runtime: "claude-sdk", model: "opus" },
+      scan: { runtime: "claude-sdk", model: "opus" },
     },
     budget: { maxPerTask: 5.0, maxPerDay: 200.0, warningThreshold: 0.8 },
     memory: {
@@ -289,6 +290,66 @@ test("ConfigValidationError exposes the provided issues array", () => {
 
   assert.equal(error.name, "ConfigValidationError");
   assert.deepEqual(error.issues, issues);
+});
+
+test("validateConfig rejects incompatible model-runtime combinations in routing", () => {
+  withTempProject((projectPath) => {
+    const config = createValidConfig();
+    // GPT model on claude-sdk runtime
+    config.routing.review = { runtime: "claude-sdk", model: "gpt-5.3-codex" };
+
+    assertValidationIssue(
+      () => validateConfig(config, projectPath),
+      /routing\.review: model "gpt-5\.3-codex" is incompatible with runtime "claude-sdk"/,
+    );
+  });
+});
+
+test("validateConfig rejects Claude model on codex-cli runtime", () => {
+  withTempProject((projectPath) => {
+    const config = createValidConfig();
+    config.routing.execute = { runtime: "codex-cli", model: "claude-opus-4-6" };
+
+    assertValidationIssue(
+      () => validateConfig(config, projectPath),
+      /routing\.execute: model "claude-opus-4-6" is incompatible with runtime "codex-cli"/,
+    );
+  });
+});
+
+test("validateConfig accepts compatible model-runtime combinations", () => {
+  withTempProject((projectPath) => {
+    const config = createValidConfig();
+    config.routing.brain = { runtime: "claude-sdk", model: "claude-opus-4-6" };
+    config.routing.review = { runtime: "codex-cli", model: "gpt-5.3-codex" };
+
+    assert.doesNotThrow(() => validateConfig(config, projectPath));
+  });
+});
+
+test("validateConfig accepts runtime aliases with compatible models", () => {
+  withTempProject((projectPath) => {
+    const config = createValidConfig();
+    // "claude" alias should be treated as claude-sdk
+    config.routing.brain = { runtime: "claude", model: "claude-sonnet-4-6" };
+    // "codex" alias should be treated as codex-cli
+    config.routing.review = { runtime: "codex", model: "gpt-5.3-codex" };
+
+    assert.doesNotThrow(() => validateConfig(config, projectPath));
+  });
+});
+
+test("validateConfig rejects alias with incompatible model", () => {
+  withTempProject((projectPath) => {
+    const config = createValidConfig();
+    // "claude" alias with GPT model
+    config.routing.plan = { runtime: "claude", model: "gpt-5.3-codex" };
+
+    assertValidationIssue(
+      () => validateConfig(config, projectPath),
+      /routing\.plan: model "gpt-5\.3-codex" is incompatible with runtime "claude"/,
+    );
+  });
 });
 
 test("validateConfig does not mutate config when trimming string values", () => {

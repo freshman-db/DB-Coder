@@ -2,7 +2,32 @@ import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { DbCoderConfig } from "../config/types.js";
+import { resolveModelId } from "../config/Config.js";
 import { isRecord } from "./parse.js";
+import { log } from "./logger.js";
+
+/**
+ * Static model compatibility check — mirrors runtime supportsModel() logic
+ * without needing runtime instances. Uses the same prefix rules.
+ */
+function isModelCompatibleWithRuntime(model: string, runtime: string): boolean {
+  const resolved = resolveModelId(model);
+  // Normalize runtime alias for comparison
+  const rt =
+    runtime === "claude"
+      ? "claude-sdk"
+      : runtime === "codex"
+        ? "codex-cli"
+        : runtime;
+  if (rt === "claude-sdk") {
+    return resolved.startsWith("claude-");
+  }
+  if (rt === "codex-cli") {
+    return ["gpt-", "o1-", "o3-", "o4-"].some((p) => resolved.startsWith(p));
+  }
+  // Unknown runtime — can't validate statically
+  return true;
+}
 
 type ConfigRecord = Record<string, unknown>;
 
@@ -12,6 +37,21 @@ const SANDBOX_VALUES = new Set([
   "full-auto",
 ]);
 const AUTONOMY_LEVELS = new Set(["full", "supervised"]);
+const KNOWN_RUNTIMES = new Set([
+  "claude-sdk",
+  "codex-cli",
+  // Aliases (normalized at config load, but accepted in validation)
+  "claude",
+  "codex",
+]);
+const ROUTING_PHASES = [
+  "brain",
+  "plan",
+  "execute",
+  "review",
+  "reflect",
+  "scan",
+] as const;
 const MCP_PHASES = new Set(["scan", "plan", "execute", "review"]);
 const PLUGIN_RELEVANCE_VALUES = new Set([
   "essential",
@@ -126,21 +166,44 @@ export function validateConfig(
 
   const routing = requireRecord(config.routing, "routing", issues);
   if (routing) {
-    validateExactValue(routing.scan, "routing.scan", "brain", issues);
-    validateExactValue(routing.plan, "routing.plan", "brain", issues);
-    validateExactValue(
-      routing.execute_frontend,
-      "routing.execute_frontend",
-      "claude",
-      issues,
-    );
-    validateExactValue(
-      routing.execute_backend,
-      "routing.execute_backend",
-      "codex",
-      issues,
-    );
-    validateExactValue(routing.reflect, "routing.reflect", "brain", issues);
+    for (const phase of ROUTING_PHASES) {
+      const pr = requireRecord(routing[phase], `routing.${phase}`, issues);
+      if (pr) {
+        const rt = validateNonEmptyString(
+          pr.runtime,
+          `routing.${phase}.runtime`,
+          issues,
+        );
+        if (rt && !KNOWN_RUNTIMES.has(rt)) {
+          issues.push(
+            `routing.${phase}.runtime: unknown runtime "${rt}" (expected one of: ${[...KNOWN_RUNTIMES].join(", ")})`,
+          );
+        }
+        const model = validateNonEmptyString(
+          pr.model,
+          `routing.${phase}.model`,
+          issues,
+        );
+        // Static compatibility check: catch obvious mismatches at startup
+        if (rt && model && !isModelCompatibleWithRuntime(model, rt)) {
+          issues.push(
+            `routing.${phase}: model "${model}" is incompatible with runtime "${rt}"`,
+          );
+        }
+      }
+    }
+    // Warn if execute and review use the same runtime+model (self-verification bias)
+    // This is advisory only — single-provider setups are valid.
+    if (
+      isRecord(routing.execute) &&
+      isRecord(routing.review) &&
+      routing.execute.runtime === routing.review.runtime &&
+      routing.execute.model === routing.review.model
+    ) {
+      log.warn(
+        "routing: execute and review share the same runtime+model — consider using different providers to avoid self-verification bias",
+      );
+    }
   }
 
   const budget = requireRecord(config.budget, "budget", issues);

@@ -6,7 +6,10 @@ import test from "node:test";
 
 import type { DbCoderConfig } from "../config/types.js";
 import { log } from "../utils/logger.js";
-import { validateConfigForStartup } from "./configValidation.js";
+import {
+  validateConfigForStartup,
+  validateRuntimeAvailability,
+} from "./configValidation.js";
 
 function createValidConfig(): DbCoderConfig {
   return {
@@ -45,11 +48,12 @@ function createValidConfig(): DbCoderConfig {
       maxReviewFixes: 1,
     },
     routing: {
-      scan: "brain",
-      plan: "brain",
-      execute_frontend: "claude",
-      execute_backend: "codex",
-      reflect: "brain",
+      brain: { runtime: "claude-sdk", model: "opus" },
+      plan: { runtime: "claude-sdk", model: "opus" },
+      execute: { runtime: "claude-sdk", model: "opus" },
+      review: { runtime: "codex-cli", model: "gpt-5.3-codex" },
+      reflect: { runtime: "claude-sdk", model: "opus" },
+      scan: { runtime: "claude-sdk", model: "opus" },
     },
     budget: { maxPerTask: 5.0, maxPerDay: 200.0, warningThreshold: 0.8 },
     memory: {
@@ -136,4 +140,35 @@ test("validateConfigForStartup returns false and logs validation details", () =>
       );
     });
   });
+});
+
+test("validateRuntimeAvailability returns no issues when no codex phases configured", async () => {
+  const routing = createValidConfig().routing;
+  // Override review to claude-sdk so no codex phases exist
+  routing.review = { runtime: "claude-sdk", model: "claude-opus-4-6" };
+
+  const issues = await validateRuntimeAvailability(routing);
+  assert.equal(issues.length, 0);
+});
+
+test("validateRuntimeAvailability detects codex-cli alias in routing", async () => {
+  const routing = createValidConfig().routing;
+  // All phases claude except review uses "codex" alias
+  routing.brain = { runtime: "claude-sdk", model: "claude-opus-4-6" };
+  routing.plan = { runtime: "claude-sdk", model: "claude-opus-4-6" };
+  routing.execute = { runtime: "claude-sdk", model: "claude-opus-4-6" };
+  routing.reflect = { runtime: "claude-sdk", model: "claude-opus-4-6" };
+  routing.scan = { runtime: "claude-sdk", model: "claude-opus-4-6" };
+  routing.review = { runtime: "codex", model: "gpt-5.3-codex" };
+
+  // This test verifies the function runs without error and checks codex availability.
+  // On machines with codex installed it returns [], on machines without it returns an issue.
+  const issues = await validateRuntimeAvailability(routing);
+  // Result depends on environment — just verify it returns an array
+  assert.ok(Array.isArray(issues));
+  // If codex is not available, it should mention the phase
+  if (issues.length > 0) {
+    assert.match(issues[0], /codex-cli is not available/);
+    assert.match(issues[0], /review/);
+  }
 });

@@ -46,11 +46,12 @@ const DEFAULTS: DbCoderConfig = {
     maxReviewFixes: 1,
   },
   routing: {
-    scan: "brain",
-    plan: "brain",
-    execute_frontend: "claude",
-    execute_backend: "codex",
-    reflect: "brain",
+    brain: { runtime: "claude-sdk", model: "opus" },
+    plan: { runtime: "claude-sdk", model: "opus" },
+    execute: { runtime: "claude-sdk", model: "opus" },
+    review: { runtime: "codex-cli", model: "gpt-5.3-codex" },
+    reflect: { runtime: "claude-sdk", model: "opus" },
+    scan: { runtime: "claude-sdk", model: "opus" },
   },
   budget: { maxPerTask: 20.0, maxPerDay: 300.0, warningThreshold: 0.8 },
   memory: {
@@ -192,8 +193,13 @@ const MODEL_MAP: Record<string, string> = {
   sonnet: "claude-sonnet-4-6",
 };
 
-export function resolveModelId(shortName: string): string {
-  return MODEL_MAP[shortName] ?? MODEL_MAP.sonnet;
+/**
+ * Resolve a model alias to its canonical ID.
+ * Known aliases ("opus", "sonnet") are mapped; everything else passes through unchanged.
+ * This means full model IDs like "claude-opus-4-6" or "gpt-5.3-codex" are never mangled.
+ */
+export function resolveModelId(alias: string): string {
+  return MODEL_MAP[alias] ?? alias;
 }
 
 export class Config {

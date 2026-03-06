@@ -32,8 +32,12 @@ export interface CodexConfig {
   model: string;
   sandbox: "workspace-write" | "workspace-read" | "full-auto";
   tokenPricing?: TokenPricing;
-  reviewTimeout?: number; // seconds, default 1800 (30min)
-  planTimeout?: number; // seconds, default 900 (15min)
+  /** Timeout for CodexBridge.review() in seconds. Default 1800 (30min).
+   *  Note: main orchestration uses RuntimeReviewAdapter with its own timeout. */
+  reviewTimeout?: number;
+  /** Timeout for CodexBridge.plan() in seconds. Default 900 (15min).
+   *  Note: main orchestration uses runBrainThink with its own timeout. */
+  planTimeout?: number;
 }
 
 export interface AutonomyConfig {
@@ -45,12 +49,22 @@ export interface AutonomyConfig {
   maxReviewFixes: number; // max rounds of fix-after-review (default 1)
 }
 
+export interface PhaseRouting {
+  /** Canonical runtime name: "claude-sdk" | "codex-cli".
+   *  Aliases "claude" and "codex" are normalized at config load time. */
+  runtime: string;
+  /** Full model ID, e.g. "claude-opus-4-6", "gpt-5.3-codex".
+   *  Short aliases ("opus", "sonnet") are resolved via resolveModelId(). */
+  model: string;
+}
+
 export interface RoutingConfig {
-  scan: "brain";
-  plan: "brain";
-  execute_frontend: "claude";
-  execute_backend: "codex";
-  reflect: "brain";
+  brain: PhaseRouting;
+  plan: PhaseRouting;
+  execute: PhaseRouting;
+  review: PhaseRouting;
+  reflect: PhaseRouting;
+  scan: PhaseRouting;
 }
 
 export interface BudgetConfig {
