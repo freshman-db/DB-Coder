@@ -73,6 +73,10 @@ function createValidConfig(): DbCoderConfig {
         },
       ],
     },
+    experimental: {
+      brainDriven: false,
+      strictModelRouting: false,
+    },
   };
 }
 

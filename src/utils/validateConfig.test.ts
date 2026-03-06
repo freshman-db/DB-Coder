@@ -72,6 +72,10 @@ function createValidConfig(): DbCoderConfig {
         },
       ],
     },
+    experimental: {
+      brainDriven: false,
+      strictModelRouting: false,
+    },
   };
 }
 
@@ -226,6 +230,43 @@ test("validateConfig rejects evolution goals with invalid completedAt values", (
       () => validateConfig(config, projectPath),
       /evolution\.goals\[0\]\.completedAt must be an ISO date string/,
     );
+  });
+});
+
+test("validateConfig rejects non-boolean experimental.brainDriven", () => {
+  withTempProject((projectPath) => {
+    const config = createValidConfig();
+    (config as unknown as Record<string, unknown>).experimental = {
+      brainDriven: "yes",
+      strictModelRouting: false,
+    };
+
+    const error = getValidationError(() => validateConfig(config, projectPath));
+    assert.ok(error.issues.some((i) => i.includes("experimental.brainDriven")));
+  });
+});
+
+test("validateConfig rejects non-boolean experimental.strictModelRouting", () => {
+  withTempProject((projectPath) => {
+    const config = createValidConfig();
+    (config as unknown as Record<string, unknown>).experimental = {
+      brainDriven: false,
+      strictModelRouting: 1,
+    };
+
+    const error = getValidationError(() => validateConfig(config, projectPath));
+    assert.ok(
+      error.issues.some((i) => i.includes("experimental.strictModelRouting")),
+    );
+  });
+});
+
+test("validateConfig accepts valid experimental config", () => {
+  withTempProject((projectPath) => {
+    const config = createValidConfig();
+    config.experimental = { brainDriven: true, strictModelRouting: true };
+
+    assert.doesNotThrow(() => validateConfig(config, projectPath));
   });
 });
 
