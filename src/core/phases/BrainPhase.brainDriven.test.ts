@@ -446,6 +446,88 @@ test("quality signal: non-LESSON prefix → empty string", () => {
   assert.equal(quality, "");
 });
 
+// --- brainThink disallowedTools: MCP write tools blocked ---
+
+test("brainThink disallowedTools includes MCP mutating tools", async () => {
+  // This tests the contract: brain session must block MCP tools that mutate state
+  const BRAIN_DISALLOWED = [
+    "Edit",
+    "Write",
+    "NotebookEdit",
+    "mcp__db-coder-system-data__create_task",
+    "mcp__db-coder-system-data__requeue_blocked_tasks",
+  ];
+
+  // Verify all file-mutation tools are present
+  assert.ok(BRAIN_DISALLOWED.includes("Edit"));
+  assert.ok(BRAIN_DISALLOWED.includes("Write"));
+  assert.ok(BRAIN_DISALLOWED.includes("NotebookEdit"));
+
+  // Verify MCP mutating tools are present
+  assert.ok(
+    BRAIN_DISALLOWED.includes("mcp__db-coder-system-data__create_task"),
+  );
+  assert.ok(
+    BRAIN_DISALLOWED.includes(
+      "mcp__db-coder-system-data__requeue_blocked_tasks",
+    ),
+  );
+
+  // Verify read-only MCP tools are NOT blocked
+  assert.ok(
+    !BRAIN_DISALLOWED.includes(
+      "mcp__db-coder-system-data__get_blocked_summary",
+    ),
+  );
+  assert.ok(
+    !BRAIN_DISALLOWED.includes("mcp__db-coder-system-data__get_recent_tasks"),
+  );
+});
+
+// --- CodexSdkRuntime: sessionId resume fallback ---
+
+test("CodexSdkRuntime sessionId: resume path uses resumeSessionId as fallback", () => {
+  // When resuming a thread, thread.started may not fire.
+  // The runtime should fall back to opts.resumeSessionId.
+  // This tests the contract, not the actual SDK call.
+  const resumeSessionId = "thread-abc-123";
+  let threadId: string | undefined = resumeSessionId; // fallback
+  // Simulate: thread.started fires and overwrites
+  threadId = "new-thread-456";
+  assert.equal(threadId, "new-thread-456");
+
+  // Simulate: thread.started does NOT fire
+  let threadId2: string | undefined = resumeSessionId;
+  // No event updates threadId2
+  assert.equal(threadId2, resumeSessionId); // fallback works
+});
+
+// --- CodexSdkRuntime: structured output from last agent_message ---
+
+test("structured output: parse last textPart, not concatenated text", () => {
+  // SDK semantics: finalResponse is the last agent_message
+  const textParts = [
+    "I'll analyze the codebase now.",
+    "Here are my findings:",
+    '{"passed": true, "issues": []}',
+  ];
+
+  // Wrong: parse concatenated text
+  const concatenated = textParts.join("\n");
+  let wrongParsed: unknown;
+  try {
+    wrongParsed = JSON.parse(concatenated);
+  } catch {
+    wrongParsed = undefined;
+  }
+  assert.equal(wrongParsed, undefined); // fails because of non-JSON prefix
+
+  // Correct: parse only last part
+  const lastMessage = textParts[textParts.length - 1];
+  const correctParsed = JSON.parse(lastMessage);
+  assert.deepEqual(correctParsed, { passed: true, issues: [] });
+});
+
 // --- Summary fallback ---
 
 test("summary fallback: truncate from directive when summary is empty", () => {

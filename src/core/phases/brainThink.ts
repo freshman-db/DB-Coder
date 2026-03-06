@@ -43,7 +43,14 @@ export async function runBrainThink(
     cwd: config.projectPath,
     timeout: 900_000,
     model: resolveModelId(config.values.brain.model),
-    disallowedTools: ["Edit", "Write", "NotebookEdit"],
+    disallowedTools: [
+      "Edit",
+      "Write",
+      "NotebookEdit",
+      // Block MCP tools that mutate state — brain session must be read-only
+      "mcp__db-coder-system-data__create_task",
+      "mcp__db-coder-system-data__requeue_blocked_tasks",
+    ],
     appendSystemPrompt: isResume
       ? undefined
       : "You are the brain of an autonomous coding agent. Read CLAUDE.md for context. Do not modify files — only analyze and decide.",

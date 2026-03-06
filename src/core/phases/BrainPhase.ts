@@ -950,6 +950,20 @@ ${context}
       log.debug("gatherBrainContextMinimal: metrics failed:", e);
     }
 
+    // Strategy context (quality alerts + priority suggestions)
+    // Brain cannot self-retrieve these — they are in-memory state, not file-based
+    if (this.strategies) {
+      const qualityCtx = this.strategies.qualityEvaluator.getContextForBrain();
+      if (qualityCtx) parts.push(qualityCtx);
+      try {
+        const priorityCtx =
+          await this.strategies.dynamicPriority.getContextForBrain();
+        if (priorityCtx) parts.push(priorityCtx);
+      } catch (e) {
+        log.debug("gatherBrainContextMinimal: priority suggestions failed:", e);
+      }
+    }
+
     // Recent reflection lessons (learning loop)
     try {
       const reflections = recentReflections.slice(0, 5);

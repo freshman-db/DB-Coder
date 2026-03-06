@@ -114,7 +114,8 @@ export class CodexSdkRuntime implements RuntimeAdapter {
       const streamed = await thread.runStreamed(effectivePrompt, turnOpts);
 
       // Collect events for cost extraction and thread ID
-      let threadId: string | undefined;
+      // For resume: thread.started may not fire, so use opts.resumeSessionId as fallback
+      let threadId: string | undefined = opts.resumeSessionId;
       let totalInputTokens = 0;
       let totalCachedInputTokens = 0;
       let totalOutputTokens = 0;
@@ -169,10 +170,12 @@ export class CodexSdkRuntime implements RuntimeAdapter {
         totalOutputTokens * (this.pricing.outputPerMillion / 1_000_000);
 
       // Attempt structured output extraction from last agent_message
+      // SDK semantics: finalResponse is the last agent_message, not all concatenated
       let structured: unknown;
-      if (opts.outputSchema && text) {
+      if (opts.outputSchema && textParts.length > 0) {
+        const lastMessage = textParts[textParts.length - 1];
         try {
-          structured = JSON.parse(text);
+          structured = JSON.parse(lastMessage);
         } catch {
           // Not valid JSON — leave structured undefined
         }
