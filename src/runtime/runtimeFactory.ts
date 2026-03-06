@@ -39,8 +39,40 @@ export function registerRuntime(name: string, runtime: RuntimeAdapter): void {
   registry.set(name, runtime);
 }
 
-/** Get a registered runtime by canonical name. Throws if not found. */
-export function getRuntime(name: string): RuntimeAdapter {
+/**
+ * Get a registered runtime by canonical name.
+ * If the runtime is "codex-sdk" and not available, falls back to "codex-cli".
+ * Throws if no matching runtime is found.
+ */
+export async function getRuntime(name: string): Promise<RuntimeAdapter> {
+  const canonical = normalizeRuntimeName(name);
+  const runtime = registry.get(canonical);
+  if (!runtime) {
+    throw new Error(
+      `Runtime "${canonical}" not registered. Available: ${[...registry.keys()].join(", ")}`,
+    );
+  }
+
+  // Codex SDK → CLI fallback
+  if (canonical === "codex-sdk" && !(await runtime.isAvailable())) {
+    const cliFallback = registry.get("codex-cli");
+    if (cliFallback && (await cliFallback.isAvailable())) {
+      log.warn("codex-sdk unavailable, falling back to codex-cli");
+      return cliFallback;
+    }
+    throw new Error(
+      "codex-sdk not available and codex-cli fallback not registered or not available",
+    );
+  }
+
+  return runtime;
+}
+
+/**
+ * Get a registered runtime synchronously. No availability check or fallback.
+ * Use when async is not possible or runtime is known to be available.
+ */
+export function getRuntimeSync(name: string): RuntimeAdapter {
   const canonical = normalizeRuntimeName(name);
   const runtime = registry.get(canonical);
   if (!runtime) {

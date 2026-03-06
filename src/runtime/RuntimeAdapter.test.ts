@@ -9,7 +9,7 @@ import { ClaudeSdkRuntime } from "./ClaudeSdkRuntime.js";
 import {
   normalizeRuntimeName,
   registerRuntime,
-  getRuntime,
+  getRuntimeSync,
   clearRuntimes,
   findRuntimeForModel,
 } from "./runtimeFactory.js";
@@ -222,11 +222,11 @@ test("registerRuntime + getRuntime round-trip", () => {
   const runtime = new ClaudeSdkRuntime(session);
 
   registerRuntime("claude-sdk", runtime);
-  const retrieved = getRuntime("claude-sdk");
+  const retrieved = getRuntimeSync("claude-sdk");
   assert.equal(retrieved, runtime);
 
   // Test alias resolution
-  const viaAlias = getRuntime("claude");
+  const viaAlias = getRuntimeSync("claude");
   assert.equal(viaAlias, runtime);
 
   clearRuntimes();
@@ -234,10 +234,7 @@ test("registerRuntime + getRuntime round-trip", () => {
 
 test("getRuntime throws for unregistered runtime", () => {
   clearRuntimes();
-  assert.throws(
-    () => getRuntime("nonexistent"),
-    /not registered/,
-  );
+  assert.throws(() => getRuntimeSync("nonexistent"), /not registered/);
   clearRuntimes();
 });
 
@@ -253,6 +250,175 @@ test("findRuntimeForModel finds matching runtime", () => {
 
   const notFound = findRuntimeForModel("gpt-5.3-codex");
   assert.equal(notFound, undefined);
+
+  clearRuntimes();
+});
+
+// --- CodexSdkRuntime tests ---
+
+import { CodexSdkRuntime } from "./CodexSdkRuntime.js";
+import { CodexCliRuntime } from "./CodexCliRuntime.js";
+import type { RuntimeAdapter } from "./RuntimeAdapter.js";
+
+test("CodexSdkRuntime: capabilities match spec", () => {
+  const runtime = new CodexSdkRuntime();
+  const caps = runtime.capabilities;
+
+  assert.equal(caps.nativeOutputSchema, true);
+  assert.equal(caps.eventStreaming, true);
+  assert.equal(caps.sessionPersistence, true);
+  assert.equal(caps.sandboxControl, false);
+  assert.equal(caps.toolSurface, false);
+  assert.equal(caps.extendedThinking, false);
+});
+
+test("CodexSdkRuntime: name is codex-sdk", () => {
+  const runtime = new CodexSdkRuntime();
+  assert.equal(runtime.name, "codex-sdk");
+});
+
+test("CodexSdkRuntime: supportsModel for codex models", () => {
+  const runtime = new CodexSdkRuntime();
+  assert.equal(runtime.supportsModel("gpt-5.3-codex"), true);
+  assert.equal(runtime.supportsModel("o4-mini"), true);
+  assert.equal(runtime.supportsModel("claude-opus-4-6"), false);
+  assert.equal(runtime.supportsModel("gemini-pro"), false);
+});
+
+// --- CodexCliRuntime tests ---
+
+test("CodexCliRuntime: capabilities match spec", () => {
+  const codexConfig = {
+    model: "gpt-5.3-codex",
+    sandbox: "full-auto" as const,
+  };
+  const runtime = new CodexCliRuntime(codexConfig);
+  const caps = runtime.capabilities;
+
+  assert.equal(caps.nativeOutputSchema, false);
+  assert.equal(caps.eventStreaming, true);
+  assert.equal(caps.sandboxControl, true);
+  assert.equal(caps.toolSurface, false);
+  assert.equal(caps.extendedThinking, false);
+  assert.deepEqual(caps.sessionPersistence, {
+    conditional: "sandbox=full-auto",
+  });
+});
+
+test("CodexCliRuntime: name is codex-cli", () => {
+  const codexConfig = {
+    model: "gpt-5.3-codex",
+    sandbox: "workspace-write" as const,
+  };
+  const runtime = new CodexCliRuntime(codexConfig);
+  assert.equal(runtime.name, "codex-cli");
+});
+
+test("CodexCliRuntime: supportsModel for codex models", () => {
+  const codexConfig = {
+    model: "gpt-5.3-codex",
+    sandbox: "full-auto" as const,
+  };
+  const runtime = new CodexCliRuntime(codexConfig);
+  assert.equal(runtime.supportsModel("gpt-5.3-codex"), true);
+  assert.equal(runtime.supportsModel("o3-mini"), true);
+  assert.equal(runtime.supportsModel("claude-sonnet-4-6"), false);
+});
+
+// --- runtimeFactory codex fallback ---
+
+test("getRuntime: codex-sdk falls back to codex-cli when sdk unavailable", async () => {
+  clearRuntimes();
+
+  const unavailableSdk: RuntimeAdapter = {
+    name: "codex-sdk",
+    capabilities: new CodexSdkRuntime().capabilities,
+    run: async () => ({
+      text: "",
+      costUsd: 0,
+      durationMs: 0,
+      isError: true,
+      errors: ["unavailable"],
+    }),
+    isAvailable: async () => false,
+    supportsModel: (id) => id.startsWith("gpt-"),
+  };
+
+  const availableCli: RuntimeAdapter = {
+    name: "codex-cli",
+    capabilities: {
+      nativeOutputSchema: false,
+      eventStreaming: true,
+      sessionPersistence: { conditional: "sandbox=full-auto" },
+      sandboxControl: true,
+      toolSurface: false,
+      extendedThinking: false,
+    },
+    run: async () => ({
+      text: "cli result",
+      costUsd: 0,
+      durationMs: 0,
+      isError: false,
+      errors: [],
+    }),
+    isAvailable: async () => true,
+    supportsModel: (id) => id.startsWith("gpt-"),
+  };
+
+  registerRuntime("codex-sdk", unavailableSdk);
+  registerRuntime("codex-cli", availableCli);
+
+  const { getRuntime } = await import("./runtimeFactory.js");
+  const result = await getRuntime("codex-sdk");
+  assert.equal(result.name, "codex-cli");
+
+  clearRuntimes();
+});
+
+test("getRuntime via alias: 'codex' resolves and falls back correctly", async () => {
+  clearRuntimes();
+
+  const unavailableSdk: RuntimeAdapter = {
+    name: "codex-sdk",
+    capabilities: new CodexSdkRuntime().capabilities,
+    run: async () => ({
+      text: "",
+      costUsd: 0,
+      durationMs: 0,
+      isError: true,
+      errors: [],
+    }),
+    isAvailable: async () => false,
+    supportsModel: () => true,
+  };
+
+  const availableCli: RuntimeAdapter = {
+    name: "codex-cli",
+    capabilities: {
+      nativeOutputSchema: false,
+      eventStreaming: true,
+      sessionPersistence: { conditional: "sandbox=full-auto" },
+      sandboxControl: true,
+      toolSurface: false,
+      extendedThinking: false,
+    },
+    run: async () => ({
+      text: "",
+      costUsd: 0,
+      durationMs: 0,
+      isError: false,
+      errors: [],
+    }),
+    isAvailable: async () => true,
+    supportsModel: () => true,
+  };
+
+  registerRuntime("codex-sdk", unavailableSdk);
+  registerRuntime("codex-cli", availableCli);
+
+  const { getRuntime } = await import("./runtimeFactory.js");
+  const result = await getRuntime("codex");
+  assert.equal(result.name, "codex-cli");
 
   clearRuntimes();
 });
