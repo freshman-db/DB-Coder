@@ -870,15 +870,26 @@ async function renderTaskDetail(id) {
       </div>
     </div>
 
-    <h3 class="section-title">任务描述</h3>
+    <h3 class="section-title">${task.directive ? "执行指令 (directive)" : "任务描述"}</h3>
     <div class="card" style="margin-bottom:20px;">
-      <div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:var(--text-secondary);">${escapeHtml(body || fullDesc || "无描述")}</div>
+      <div style="font-size:13px;line-height:1.7;color:var(--text-secondary);">${task.directive ? renderMarkdown(task.directive) : `<div style="white-space:pre-wrap;">${escapeHtml(body || fullDesc || "无描述")}</div>`}</div>
     </div>
+    ${task.directive ? `<div class="card" style="margin-bottom:20px;"><div style="font-size:12px;color:var(--text-muted);">摘要: ${escapeHtml(fullDesc || "无描述")}</div></div>` : ""}
+    ${renderStrategyNote(task)}
 
     ${renderEvaluationInfo(task)}
     ${renderSubtasks(task.subtasks)}
     ${renderTaskLogs(task.logs)}
   `;
+}
+
+function renderStrategyNote(task) {
+  if (!task.strategy_note) return "";
+  return `
+    <details class="card" style="margin-bottom:20px;">
+      <summary style="cursor:pointer;font-size:13px;font-weight:600;color:var(--text-muted);">策略笔记 (strategy_note)</summary>
+      <div style="margin-top:8px;font-size:13px;line-height:1.7;color:var(--text-secondary);">${renderMarkdown(task.strategy_note)}</div>
+    </details>`;
 }
 
 function renderEvaluationInfo(task) {
@@ -943,6 +954,28 @@ function renderSubtasks(subtasks) {
   `;
 }
 
+function renderLogDetails(details, logId) {
+  if (!details || typeof details !== "object") return "";
+  const entries = Object.entries(details).filter(
+    ([, v]) => v != null && v !== "",
+  );
+  if (entries.length === 0) return "";
+  const detailId = `log-details-${logId}`;
+  const rows = entries
+    .map(([k, v]) => {
+      const val =
+        typeof v === "object" ? JSON.stringify(v, null, 2) : String(v);
+      return `<div style="margin-bottom:6px;"><strong style="color:var(--text-muted);">${escapeHtml(k)}:</strong> <span style="white-space:pre-wrap;">${renderMarkdown(val)}</span></div>`;
+    })
+    .join("");
+  return `<div style="width:100%;padding:4px 0 0 8px;border-top:1px solid var(--border);">
+    <details id="${detailId}">
+      <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--text-muted);">Details (${entries.length})</summary>
+      <div style="margin-top:6px;font-size:12px;color:var(--text-secondary);line-height:1.6;">${rows}</div>
+    </details>
+  </div>`;
+}
+
 function renderTaskLogs(logs) {
   if (!logs || !Array.isArray(logs) || logs.length === 0) return "";
   return `
@@ -984,6 +1017,7 @@ function renderTaskLogs(logs) {
                   })()
                 : ""
             }
+            ${l.details ? renderLogDetails(l.details, l.id) : ""}
           </div>`;
         })
         .join("")}
