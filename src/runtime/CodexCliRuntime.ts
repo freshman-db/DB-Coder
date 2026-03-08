@@ -57,6 +57,7 @@ export class CodexCliRuntime implements RuntimeAdapter {
 
     return {
       text: result.output,
+      structured: result.structured,
       costUsd: result.cost_usd,
       durationMs: result.duration_ms,
       sessionId: result.sessionId,

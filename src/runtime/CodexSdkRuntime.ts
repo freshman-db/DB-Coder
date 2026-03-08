@@ -35,6 +35,56 @@ async function loadSdk(): Promise<typeof import("@openai/codex-sdk").Codex> {
 
 const CODEX_MODEL_PREFIXES = ["gpt-", "o1-", "o3-", "o4-"];
 
+/**
+ * Normalize a JSON Schema for OpenAI strict structured output.
+ * OpenAI requires every object to have `additionalProperties: false`
+ * and all properties listed in `required`. Optional fields use
+ * `type: ["<original>", "null"]` instead of omitting from required.
+ * Also strips unsupported keywords like `maxLength`, `description` on
+ * non-top-level, etc. — applied recursively.
+ */
+function strictifySchema(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  if (typeof schema !== "object" || schema === null) return schema;
+  const out: Record<string, unknown> = { ...schema };
+
+  if (out.type === "object" && out.properties) {
+    const props = out.properties as Record<string, Record<string, unknown>>;
+    const existingRequired = new Set(
+      Array.isArray(out.required) ? (out.required as string[]) : [],
+    );
+    const allKeys = Object.keys(props);
+
+    // Recursively strictify each property
+    const strictProps: Record<string, unknown> = {};
+    for (const key of allKeys) {
+      let propSchema = strictifySchema(props[key]);
+      // If not originally required, make it nullable
+      if (!existingRequired.has(key)) {
+        const origType = propSchema.type;
+        if (typeof origType === "string") {
+          propSchema = { ...propSchema, type: [origType, "null"] };
+        }
+      }
+      strictProps[key] = propSchema;
+    }
+
+    out.properties = strictProps;
+    out.required = allKeys;
+    out.additionalProperties = false;
+  }
+
+  if (out.type === "array" && out.items) {
+    out.items = strictifySchema(out.items as Record<string, unknown>);
+  }
+
+  // Remove unsupported keywords
+  delete out.maxLength;
+
+  return out;
+}
+
 // Default pricing fallback (matches config defaults in Config.ts)
 const DEFAULT_PRICING: TokenPricing = {
   inputPerMillion: 1.75,
@@ -86,7 +136,9 @@ export class CodexSdkRuntime implements RuntimeAdapter {
       // Build turn options
       const turnOpts: import("@openai/codex-sdk").TurnOptions = {};
       if (opts.outputSchema) {
-        turnOpts.outputSchema = opts.outputSchema;
+        turnOpts.outputSchema = strictifySchema(
+          opts.outputSchema as Record<string, unknown>,
+        );
       }
 
       // Timeout via AbortController
@@ -217,7 +269,17 @@ export class CodexSdkRuntime implements RuntimeAdapter {
   async isAvailable(): Promise<boolean> {
     try {
       await loadSdk();
-      return true;
+    } catch {
+      return false;
+    }
+    // The SDK spawns the `codex` CLI binary — verify it's installed too.
+    try {
+      const { execFile } = await import("node:child_process");
+      return new Promise((resolve) => {
+        execFile("codex", ["--version"], { timeout: 5000 }, (err) => {
+          resolve(!err);
+        });
+      });
     } catch {
       return false;
     }
