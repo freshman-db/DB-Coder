@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { readFileSync, existsSync, readdirSync, type Dirent } from "node:fs";
 import { join, relative } from "node:path";
 import type { Config } from "../config/Config.js";
-import { resolveModelId } from "../config/Config.js";
 import type { RuntimeAdapter, RunResult } from "../runtime/RuntimeAdapter.js";
 import type { TaskStore } from "../memory/TaskStore.js";
 import { extractJsonFromText } from "../utils/parse.js";
@@ -604,9 +603,8 @@ Output ONLY a JSON object with this structure:
       cwd: projectPath,
       maxTurns: 25,
       timeout: 300_000,
-      model: resolveModelId(
+      model:
         this.config.values.routing.scan.model || this.config.values.brain.model,
-      ),
       readOnly: true,
       disallowedTools: ["Edit", "Write", "NotebookEdit"],
       systemPrompt:
@@ -722,9 +720,8 @@ If all boundaries are clean, return: { "findings": [] }`;
       cwd: projectPath,
       maxTurns: 35,
       timeout: 600_000,
-      model: resolveModelId(
+      model:
         this.config.values.routing.scan.model || this.config.values.brain.model,
-      ),
       readOnly: true,
       disallowedTools: ["Edit", "Write", "NotebookEdit"],
       systemPrompt: effectiveResumeId
@@ -782,9 +779,8 @@ Output ONLY a JSON array of EntryPoint objects:
       cwd: projectPath,
       maxTurns: 5,
       timeout: 120_000,
-      model: resolveModelId(
+      model:
         this.config.values.routing.scan.model || this.config.values.brain.model,
-      ),
       readOnly: true,
       disallowedTools: ["Edit", "Write", "NotebookEdit"],
       systemPrompt:
