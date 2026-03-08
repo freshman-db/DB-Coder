@@ -11,7 +11,6 @@
  */
 
 import type { Config } from "../../config/Config.js";
-import { resolveModelId } from "../../config/Config.js";
 import type { TaskStore } from "../../memory/TaskStore.js";
 import type { CostTracker } from "../../utils/cost.js";
 import type { RuntimeAdapter } from "../../runtime/RuntimeAdapter.js";
@@ -282,10 +281,9 @@ Multiple tasks have been rejected consecutively, suggesting a systemic pipeline 
         cwd: projectPath,
         maxTurns: 30,
         timeout: 600_000,
-        model: resolveModelId(
+        model:
           this.config.values.routing.brain.model ||
-            this.config.values.brain.model,
-        ),
+          this.config.values.brain.model,
         allowedTools: [
           "Read",
           "Glob",
@@ -336,10 +334,9 @@ Rules:
         cwd: projectPath,
         maxTurns: 50,
         timeout: 3_600_000,
-        model: resolveModelId(
+        model:
           this.config.values.routing.brain.model ||
-            this.config.values.brain.model,
-        ),
+          this.config.values.brain.model,
         allowedTools: ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
         systemPrompt:
           "You are maintaining CLAUDE.md. You CAN edit CLAUDE.md. Do not modify source code.",

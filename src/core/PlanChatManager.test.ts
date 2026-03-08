@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { PlanChatManager, validatePlanOutput } from "./PlanChatManager.js";
 import type { TaskStore } from "../memory/TaskStore.js";
 import type { Config } from "../config/Config.js";
+import type { RuntimeAdapter } from "../runtime/RuntimeAdapter.js";
 
 function createMockTaskStore(
   activeSessions: {
@@ -26,8 +27,34 @@ function createMockTaskStore(
 function createMockConfig(projectPath = "/test/project"): Config {
   return {
     projectPath,
-    values: { brain: { model: "sonnet", maxScanBudget: 1 } },
+    values: {
+      brain: { model: "sonnet", maxScanBudget: 1 },
+      routing: { plan: { runtime: "claude-sdk", model: "claude-opus-4-6" } },
+    },
   } as unknown as Config;
+}
+
+function createMockRuntime(): RuntimeAdapter {
+  return {
+    name: "mock-runtime",
+    capabilities: {
+      nativeOutputSchema: true,
+      eventStreaming: true,
+      sessionPersistence: true,
+      sandboxControl: true,
+      toolSurface: true,
+      extendedThinking: false,
+    },
+    run: mock.fn(async () => ({
+      text: "",
+      costUsd: 0,
+      durationMs: 0,
+      isError: false,
+      errors: [],
+    })),
+    isAvailable: mock.fn(async () => true),
+    supportsModel: mock.fn(() => true),
+  };
 }
 
 describe("validatePlanOutput", () => {
@@ -136,7 +163,11 @@ describe("PlanChatManager.restoreSessions", () => {
       { id: 1, chat_session_id: "sess-a", chat_status: "chatting" },
       { id: 2, chat_session_id: "sess-b", chat_status: "chatting" },
     ]);
-    const mgr = new PlanChatManager(store, createMockConfig());
+    const mgr = new PlanChatManager(
+      store,
+      createMockConfig(),
+      createMockRuntime(),
+    );
 
     const count = await mgr.restoreSessions();
 
@@ -151,7 +182,11 @@ describe("PlanChatManager.restoreSessions", () => {
       { id: 3, chat_session_id: "sess-c", chat_status: "researching" },
       { id: 4, chat_session_id: "sess-d", chat_status: "generating" },
     ]);
-    const mgr = new PlanChatManager(store, createMockConfig());
+    const mgr = new PlanChatManager(
+      store,
+      createMockConfig(),
+      createMockRuntime(),
+    );
 
     const count = await mgr.restoreSessions();
 
@@ -169,7 +204,11 @@ describe("PlanChatManager.restoreSessions", () => {
       { id: 5, chat_session_id: "sess-e", chat_status: "chatting" },
       { id: 6, chat_session_id: "sess-f", chat_status: "chatting" },
     ]);
-    const mgr = new PlanChatManager(store, createMockConfig());
+    const mgr = new PlanChatManager(
+      store,
+      createMockConfig(),
+      createMockRuntime(),
+    );
 
     // First restore
     const first = await mgr.restoreSessions();
@@ -182,7 +221,11 @@ describe("PlanChatManager.restoreSessions", () => {
 
   test("returns 0 when no active sessions exist", async () => {
     const { store } = createMockTaskStore([]);
-    const mgr = new PlanChatManager(store, createMockConfig());
+    const mgr = new PlanChatManager(
+      store,
+      createMockConfig(),
+      createMockRuntime(),
+    );
 
     const count = await mgr.restoreSessions();
 
@@ -193,7 +236,11 @@ describe("PlanChatManager.restoreSessions", () => {
     const { store } = createMockTaskStore([
       { id: 7, chat_session_id: null, chat_status: "chatting" },
     ]);
-    const mgr = new PlanChatManager(store, createMockConfig());
+    const mgr = new PlanChatManager(
+      store,
+      createMockConfig(),
+      createMockRuntime(),
+    );
 
     await mgr.restoreSessions();
 
@@ -213,7 +260,11 @@ describe("PlanChatManager.restoreSessions", () => {
         if (callCount === 1) throw new Error("DB write failed");
       }),
     } as unknown as TaskStore;
-    const mgr = new PlanChatManager(store, createMockConfig());
+    const mgr = new PlanChatManager(
+      store,
+      createMockConfig(),
+      createMockRuntime(),
+    );
 
     const count = await mgr.restoreSessions();
 

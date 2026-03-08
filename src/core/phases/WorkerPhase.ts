@@ -8,7 +8,11 @@
  */
 
 import type { Config } from "../../config/Config.js";
-import { resolveModelId } from "../../config/Config.js";
+/** Inline model alias resolution for brain's dynamic resource_request.model. */
+const MODEL_ALIASES: Record<string, string> = {
+  opus: "claude-opus-4-6",
+  sonnet: "claude-sonnet-4-6",
+};
 import type { TaskStore } from "../../memory/TaskStore.js";
 import type { CostTracker } from "../../utils/cost.js";
 import type { WorkerResult } from "../WorkerAdapter.js";
@@ -48,14 +52,14 @@ interface ComplexityConfig {
   maxTurns: number;
   maxBudget: number;
   timeout: number;
-  model?: string; // Claude model override (e.g. "sonnet", "opus"); ignored by Codex
 }
 
+/** Default resource limits per complexity level (model is handled by routing config). */
 export const COMPLEXITY_CONFIG: Record<string, ComplexityConfig> = {
-  S: { maxTurns: 100, maxBudget: 5.0, timeout: 600_000, model: "sonnet" },
-  M: { maxTurns: 200, maxBudget: 10.0, timeout: 1_200_000, model: "sonnet" },
-  L: { maxTurns: 200, maxBudget: 15.0, timeout: 2_400_000, model: "opus" },
-  XL: { maxTurns: 200, maxBudget: 20.0, timeout: 3_600_000, model: "opus" },
+  S: { maxTurns: 100, maxBudget: 5.0, timeout: 600_000 },
+  M: { maxTurns: 200, maxBudget: 10.0, timeout: 1_200_000 },
+  L: { maxTurns: 200, maxBudget: 15.0, timeout: 2_400_000 },
+  XL: { maxTurns: 200, maxBudget: 20.0, timeout: 3_600_000 },
 };
 
 /**
@@ -70,7 +74,7 @@ export const COMPLEXITY_CONFIG: Record<string, ComplexityConfig> = {
  */
 /**
  * Resolve a model ID from brain's resource_request.
- * - Known aliases ("opus", "sonnet") → canonical ID via resolveModelId()
+ * - Known aliases ("opus", "sonnet") → canonical ID via MODEL_ALIASES
  * - Full model IDs (e.g. "claude-opus-4-6", "gpt-5.3-codex") → pass through
  * - Unknown short names → fall back to defaultModel with warning
  */
@@ -82,9 +86,9 @@ export function resolveModelForBrain(
   if (brainModel.includes("-")) {
     return brainModel;
   }
-  // Short name: try alias resolution (resolveModelId returns input unchanged if no alias)
-  const resolved = resolveModelId(brainModel);
-  if (resolved !== brainModel) {
+  // Short name: try alias resolution
+  const resolved = MODEL_ALIASES[brainModel];
+  if (resolved) {
     return resolved; // known alias was mapped
   }
   // Unknown short name — no alias found, fall back to default
@@ -152,14 +156,15 @@ export class WorkerPhase {
         timeout_s: number;
         model?: string;
       };
-      isBrainDriven?: boolean;
     },
   ): Promise<WorkerResult> {
     // Reset per-task runtime tracking (set again by execute paths below)
     this.lastEffectiveRuntime = undefined;
 
     // Brain-driven: directive passthrough with minimal wrapping
-    if (opts?.isBrainDriven && opts.directive) {
+    // (brain-driven is the only path since Phase 4; gate on directive presence
+    // for backward compat with legacy queue tasks that lack a directive)
+    if (opts?.directive) {
       return this.workerExecuteBrainDriven(task, opts);
     }
 
@@ -190,7 +195,7 @@ export class WorkerPhase {
         | undefined);
     const cConfig = COMPLEXITY_CONFIG[complexity ?? "M"];
 
-    const model = this.resolveWorkerModel(cConfig);
+    const model = this.resolveWorkerModel();
 
     const result = await this.worker.run(prompt, {
       cwd: this.config.projectPath,
@@ -235,6 +240,11 @@ export class WorkerPhase {
       prompt += `\n\n## Approved Implementation Plan\n${opts.approvedPlan}`;
     }
 
+    // Inject verification plan so the worker knows how success is measured
+    if (task.verification_plan) {
+      prompt += `\n\n## Verification Plan\n${task.verification_plan}`;
+    }
+
     // Resource request -> actual limits (brain request capped by config)
     const rr = opts.resourceRequest;
     const maxBudget = rr
@@ -245,9 +255,7 @@ export class WorkerPhase {
       : COMPLEXITY_CONFIG[opts.complexity ?? "M"].timeout;
 
     // Model: resolve brain's model request, then validate worker compatibility.
-    const complexity = opts.complexity ?? "M";
-    const cConfig = COMPLEXITY_CONFIG[complexity] ?? COMPLEXITY_CONFIG.M;
-    const defaultModel = this.resolveWorkerModel(cConfig);
+    const defaultModel = this.resolveWorkerModel();
     const resolvedModel = rr?.model
       ? resolveModelForBrain(rr.model, defaultModel)
       : defaultModel;
@@ -266,9 +274,14 @@ export class WorkerPhase {
       ? `Continue working on this task.\n\n${opts.approvedPlan ? `## Approved Plan\n${opts.approvedPlan}\n\n` : ""}Proceed.`
       : undefined;
 
+    const complexityTurns = COMPLEXITY_CONFIG[opts.complexity ?? "M"].maxTurns;
+    const maxTurns = rr
+      ? Math.min(this.config.values.claude.maxTurns, complexityTurns)
+      : complexityTurns;
+
     const result = await effectiveRuntime.run(prompt, {
       cwd: this.config.projectPath,
-      maxTurns: cConfig.maxTurns,
+      maxTurns,
       maxBudget,
       timeout,
       model,
@@ -280,30 +293,20 @@ export class WorkerPhase {
 
   /**
    * Resolve the default model for a given runtime.
-   * Priority: routing.execute.model > complexity config alias > legacy fallbacks.
+   * Priority: routing.execute.model > legacy fallbacks.
+   * Model aliases are normalized at Config construction time.
    *
-   * @param cConfig - complexity config for model alias lookup
    * @param runtime - the runtime to check compatibility against (defaults to this.worker)
    */
-  private resolveWorkerModel(
-    cConfig: ComplexityConfig,
-    runtime?: RuntimeAdapter,
-  ): string {
+  private resolveWorkerModel(runtime?: RuntimeAdapter): string {
     const rt = runtime ?? this.worker;
 
-    // 1. Use routing.execute.model as the canonical source
-    const routingModel = resolveModelId(
-      this.config.values.routing.execute.model,
-    );
+    // 1. Use routing.execute.model as the canonical source (already normalized)
+    const routingModel = this.config.values.routing.execute.model;
     if (rt.supportsModel(routingModel)) return routingModel;
 
-    // 2. Try complexity config alias (e.g. "opus" for L/XL tasks)
-    if (cConfig.model) {
-      const resolved = resolveModelId(cConfig.model);
-      if (rt.supportsModel(resolved)) return resolved;
-    }
-    // 3. Legacy fallbacks
-    const configModel = resolveModelId(this.config.values.claude.model);
+    // 2. Legacy fallbacks (already normalized at Config construction)
+    const configModel = this.config.values.claude.model;
     if (rt.supportsModel(configModel)) return configModel;
     return this.config.values.codex.model;
   }
@@ -367,7 +370,7 @@ export class WorkerPhase {
       maxTurns: 100,
       maxBudget: this.config.values.claude.maxTaskBudget,
       timeout: 600_000,
-      model: this.resolveWorkerModel(COMPLEXITY_CONFIG.M, runtime),
+      model: this.resolveWorkerModel(runtime),
       resumeSessionId: sessionId,
     });
     return toWorkerResult(result);
@@ -398,7 +401,7 @@ Fix these issues. Do not make unrelated changes.`;
       maxTurns: 100,
       maxBudget: this.config.values.claude.maxTaskBudget,
       timeout: 600_000,
-      model: this.resolveWorkerModel(COMPLEXITY_CONFIG.M, runtime),
+      model: this.resolveWorkerModel(runtime),
       resumeSessionId: sessionId,
     });
     const result = toWorkerResult(runResult);
@@ -484,7 +487,7 @@ Be specific: include function signatures, type definitions, and concrete code sn
       maxTurns: Math.min(cConfig.maxTurns, 100),
       maxBudget: Math.min(cConfig.maxBudget, 5.0),
       timeout: Math.min(cConfig.timeout, 600_000),
-      model: this.resolveWorkerModel(cConfig),
+      model: this.resolveWorkerModel(),
       readOnly: true,
       disallowedTools: ["Edit", "Write", "NotebookEdit"],
       systemPrompt:

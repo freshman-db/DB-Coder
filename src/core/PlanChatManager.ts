@@ -1,6 +1,6 @@
-import { ClaudeCodeSession } from "../bridges/ClaudeCodeSession.js";
+import type { RuntimeAdapter } from "../runtime/RuntimeAdapter.js";
+import { extractJsonFromText } from "../utils/parse.js";
 import type { TaskStore } from "../memory/TaskStore.js";
-import { resolveModelId } from "../config/Config.js";
 import type { Config } from "../config/Config.js";
 import { log } from "../utils/logger.js";
 
@@ -77,6 +77,7 @@ export class PlanChatManager {
   constructor(
     private taskStore: TaskStore,
     private config: Config,
+    private readonly runtime: RuntimeAdapter,
   ) {}
 
   /** Create a new plan chat session (plan_draft + in-memory state). */
@@ -104,25 +105,34 @@ export class PlanChatManager {
     session.accumulatedText = "";
     this.emit(session, "status", { status: "researching" });
 
-    const claude = new ClaudeCodeSession();
+    // Resume only works with unconditional session persistence (true).
+    // Conditional persistence (e.g. codex-cli "sandbox=full-auto") doesn't
+    // apply here because plan chat is read-only (workspace-read sandbox).
+    const canResume = this.runtime.capabilities.sessionPersistence === true;
+    const useResume = canResume && !!session.sessionId;
+
+    // For non-resumable runtimes, rebuild context from stored messages
+    const prompt = useResume
+      ? message
+      : await this.buildTranscriptPrompt(draftId);
+
     try {
-      const result = await claude.run(message, {
-        permissionMode: "bypassPermissions",
-        resumeSessionId: session.sessionId || undefined,
-        appendSystemPrompt: session.sessionId ? undefined : PLAN_SYSTEM_PROMPT,
+      const result = await this.runtime.run(prompt, {
+        resumeSessionId: useResume ? session.sessionId : undefined,
+        systemPrompt: useResume ? undefined : PLAN_SYSTEM_PROMPT,
         cwd: this.config.projectPath,
         maxTurns: 20,
         maxBudget: this.config.values.brain.maxScanBudget,
         timeout: 180_000,
         model: this.resolveModel(),
-        disallowedTools: ["Edit", "Write", "NotebookEdit"],
+        readOnly: true,
         onText: (text) => {
           session.accumulatedText = text;
           this.emit(session, "assistant_text", { text });
         },
       });
 
-      session.sessionId = result.sessionId;
+      session.sessionId = result.sessionId ?? session.sessionId;
       session.status = "chatting";
 
       // Persist sessionId for potential server restart recovery
@@ -151,27 +161,51 @@ export class PlanChatManager {
   /** Ask Claude to output a structured plan from the conversation. */
   async generatePlan(draftId: number): Promise<void> {
     const session = this.getActiveSession(draftId);
-    if (!session.sessionId)
+    const canResume = this.runtime.capabilities.sessionPersistence === true;
+    const useResume = canResume && !!session.sessionId;
+
+    // Verify we have conversation history (resumable or stored)
+    if (!useResume) {
+      const messages = await this.taskStore.getChatMessages(draftId);
+      if (messages.length === 0) {
+        throw new Error("No conversation yet — send a message first");
+      }
+    } else if (!session.sessionId) {
       throw new Error("No conversation yet — send a message first");
+    }
 
     session.status = "processing";
     this.emit(session, "status", { status: "generating" });
 
-    const claude = new ClaudeCodeSession();
+    const hasNativeSchema = this.runtime.capabilities.nativeOutputSchema;
+
+    // Build prompt: if no resume, prepend transcript; if no native schema, embed JSON instructions
+    const baseGenPrompt = hasNativeSchema
+      ? GENERATE_PROMPT
+      : `${GENERATE_PROMPT}\n\nRespond with ONLY a JSON object: {"summary": "...", "tasks": [{"description": "...", "priority": 0-3}]}`;
+    const generatePrompt = useResume
+      ? baseGenPrompt
+      : `${await this.buildTranscriptPrompt(draftId)}\n\n${baseGenPrompt}`;
+
     try {
-      const result = await claude.run(GENERATE_PROMPT, {
-        permissionMode: "bypassPermissions",
-        resumeSessionId: session.sessionId,
+      const result = await this.runtime.run(generatePrompt, {
+        resumeSessionId: useResume ? session.sessionId : undefined,
+        systemPrompt: useResume ? undefined : PLAN_SYSTEM_PROMPT,
         cwd: this.config.projectPath,
         maxTurns: 10,
         timeout: 120_000,
         model: this.resolveModel(),
-        jsonSchema: PLAN_SCHEMA as unknown as object,
+        outputSchema: hasNativeSchema
+          ? (PLAN_SCHEMA as unknown as object)
+          : undefined,
       });
 
-      session.sessionId = result.sessionId;
+      session.sessionId = result.sessionId ?? session.sessionId;
 
-      const plan = validatePlanOutput(result.json);
+      // Try structured output first (native schema), then parse from text
+      const plan =
+        validatePlanOutput(result.structured) ??
+        validatePlanOutput(extractJsonFromText(result.text));
       if (plan?.tasks?.length) {
         await this.taskStore.updatePlanDraftPlan(draftId, {
           plan: { tasks: plan.tasks },
@@ -299,7 +333,28 @@ export class PlanChatManager {
   }
 
   private resolveModel(): string {
-    return resolveModelId(this.config.values.brain.model);
+    return (
+      this.config.values.routing.plan.model || this.config.values.brain.model
+    );
+  }
+
+  /**
+   * Build a prompt that includes the full conversation transcript from DB.
+   * Used when the runtime doesn't support session resume — the stored
+   * messages are replayed as context so the LLM sees the full history.
+   *
+   * Note: the current user message must already be persisted via addChatMessage()
+   * before calling this — it will be included in the transcript automatically.
+   */
+  private async buildTranscriptPrompt(draftId: number): Promise<string> {
+    const messages = await this.taskStore.getChatMessages(draftId);
+    if (messages.length === 0) return "";
+
+    const transcript = messages
+      .map((m) => `[${m.role}]: ${m.content}`)
+      .join("\n\n");
+
+    return `## Conversation transcript\n${transcript}\n\nPlease respond to the latest user message above.`;
   }
 
   private emit(session: ActiveSession, event: string, data: unknown): void {

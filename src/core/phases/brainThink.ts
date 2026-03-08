@@ -7,7 +7,6 @@
  */
 
 import type { Config } from "../../config/Config.js";
-import { resolveModelId } from "../../config/Config.js";
 import type {
   RuntimeAdapter,
   RunResult,
@@ -32,11 +31,11 @@ export async function runBrainThink(
 ): Promise<RunResult> {
   // Caller can override model for phase-specific routing (plan, reflect, etc.).
   // Falls back to routing.brain.model → legacy brain.model.
-  const model = resolveModelId(
+  // Model aliases are normalized at Config construction time.
+  const model =
     opts?.model ||
-      config.values.routing.brain.model ||
-      config.values.brain.model,
-  );
+    config.values.routing.brain.model ||
+    config.values.brain.model;
 
   // Only attempt resume if the runtime unconditionally supports it.
   // If resume is conditional (e.g. codex-cli), the caller's abbreviated prompt

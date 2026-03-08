@@ -15,10 +15,12 @@ const CLAUDE_ENV_VARS = [
   "CLAUDE_DEV_PORT",
 ];
 
-function cleanEnv(): Record<string, string | undefined> {
+const DEFAULT_CLAUDE_MEM_MODEL = "claude-opus-4-6";
+
+function cleanEnv(claudeMemModel?: string): Record<string, string | undefined> {
   const env = { ...process.env };
   for (const key of CLAUDE_ENV_VARS) delete env[key];
-  env.CLAUDE_MEM_MODEL = "claude-opus-4-6";
+  env.CLAUDE_MEM_MODEL = claudeMemModel || DEFAULT_CLAUDE_MEM_MODEL;
   return env;
 }
 
@@ -67,7 +69,7 @@ export function buildSdkOptions(
   }
 
   // --- Always: clean env vars ---
-  options.env = cleanEnv();
+  options.env = cleanEnv(opts.model);
 
   // --- Direct mappings ---
   if (opts.maxBudget !== undefined) options.maxBudgetUsd = opts.maxBudget;

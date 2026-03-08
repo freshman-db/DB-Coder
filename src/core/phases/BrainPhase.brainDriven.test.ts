@@ -87,11 +87,13 @@ test("BrainReflection: orchestrator_feedback is optional", () => {
 
 // --- Feature flag design tests ---
 
-test("ExperimentalConfig defaults: brainDriven=false, strictModelRouting=false", () => {
-  // This tests the contract, not the Config class (that's tested in config tests)
+test("ExperimentalConfig defaults: brainDriven deprecated (always on), strictModelRouting=false", () => {
+  // brainDriven is deprecated — brain-driven mode is now the only code path.
+  // The config field is kept for backward compat but its value is ignored.
   const defaults = { brainDriven: false, strictModelRouting: false };
-  assert.equal(defaults.brainDriven, false);
   assert.equal(defaults.strictModelRouting, false);
+  // brainDriven value doesn't matter — behavior is always brain-driven
+  assert.equal(typeof defaults.brainDriven, "boolean");
 });
 
 // --- Resource request cap logic ---
@@ -248,79 +250,75 @@ test("validateModelForWorker: strictModelRouting does not throw when compatible"
   assert.equal(result, "claude-opus-4-6");
 });
 
-// --- defaultModel derivation: worker-aware ---
-// Tests the logic that defaultModel must come from the worker's model space,
-// not always from COMPLEXITY_CONFIG / config.claude.model.
+// --- defaultModel derivation: routing-based ---
+// After Phase 4, COMPLEXITY_CONFIG no longer has a model field.
+// resolveWorkerModel uses routing.execute.model as canonical source,
+// falling back to config.claude.model or config.codex.model.
 
 function deriveDefaultModel(
-  workerName: string,
-  complexityModel: string | undefined,
+  routingModel: string,
   claudeConfigModel: string,
   codexConfigModel: string,
+  workerSupportsModel: (m: string) => boolean,
 ): string {
-  if (workerName === "claude") {
-    const alias = complexityModel ?? claudeConfigModel;
-    // Simulate resolveModelId: "sonnet" → "claude-sonnet-4-6", "opus" → "claude-opus-4-6"
-    const MODEL_MAP: Record<string, string> = {
-      sonnet: "claude-sonnet-4-6",
-      opus: "claude-opus-4-6",
-    };
-    return MODEL_MAP[alias] ?? alias;
-  }
+  // Priority: routing.execute.model > claude.model > codex.model
+  if (workerSupportsModel(routingModel)) return routingModel;
+  if (workerSupportsModel(claudeConfigModel)) return claudeConfigModel;
   return codexConfigModel;
 }
 
-test("defaultModel: claude worker uses COMPLEXITY_CONFIG model", () => {
+test("defaultModel: routing model compatible with worker → use routing model", () => {
   const result = deriveDefaultModel(
-    "claude",
-    "opus",
-    "sonnet",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
     "gpt-5.3-codex",
+    (m) => m.startsWith("claude-"), // claude worker
   );
   assert.equal(result, "claude-opus-4-6");
 });
 
-test("defaultModel: codex worker uses config.codex.model regardless of complexity", () => {
-  const result = deriveDefaultModel("codex", "opus", "sonnet", "gpt-5.3-codex");
+test("defaultModel: routing model incompatible → fallback to codex config", () => {
+  const result = deriveDefaultModel(
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "gpt-5.3-codex",
+    (m) => !m.startsWith("claude-"), // codex worker
+  );
   assert.equal(result, "gpt-5.3-codex");
 });
 
 test("defaultModel + validateModelForWorker: codex worker, no brain model → compatible", () => {
-  // This is the exact edge case: codex worker + no resource_request.model
   const defaultModel = deriveDefaultModel(
-    "codex",
-    "sonnet",
-    "sonnet",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
     "gpt-5.3-codex",
+    (m) => !m.startsWith("claude-"), // codex worker
   );
-  // defaultModel should be codex model, not "claude-sonnet-4-6"
   assert.equal(defaultModel, "gpt-5.3-codex");
-  // resolvedModel = defaultModel (no brain model override)
   const model = validateModelForWorker(
     defaultModel,
     defaultModel,
     "codex",
     true,
   );
-  // Should NOT throw even with strictModelRouting
   assert.equal(model, "gpt-5.3-codex");
 });
 
 test("defaultModel + validateModelForWorker: claude worker, no brain model → compatible", () => {
   const defaultModel = deriveDefaultModel(
-    "claude",
-    "sonnet",
-    "sonnet",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
     "gpt-5.3-codex",
+    (m) => m.startsWith("claude-"), // claude worker
   );
-  assert.equal(defaultModel, "claude-sonnet-4-6");
+  assert.equal(defaultModel, "claude-opus-4-6");
   const model = validateModelForWorker(
     defaultModel,
     defaultModel,
     "claude",
     true,
   );
-  assert.equal(model, "claude-sonnet-4-6");
+  assert.equal(model, "claude-opus-4-6");
 });
 
 // --- Queue round-trip: brain-driven fields preserved ---
@@ -381,12 +379,12 @@ test("Brain-driven enqueue: updates object includes directive and resource_reque
   });
 });
 
-test("Non-brain-driven enqueue: does not write directive or resource_request", () => {
+test("Legacy queue task without directive: does not write directive or resource_request", () => {
+  // Backward compat: tasks queued before brain-driven-only may lack directive
   const planTask = {
     id: "T003",
     description: "Legacy task",
     priority: 2,
-    isBrainDriven: false,
     directive: undefined,
     resourceRequest: undefined,
   };
@@ -396,7 +394,7 @@ test("Non-brain-driven enqueue: does not write directive or resource_request", (
     subtasks: [],
   };
 
-  if (planTask.isBrainDriven && planTask.directive) {
+  if (planTask.directive) {
     updates.directive = planTask.directive;
   }
 
@@ -404,7 +402,7 @@ test("Non-brain-driven enqueue: does not write directive or resource_request", (
   assert.equal(updates.resource_request, undefined);
 });
 
-// --- gatherBrainContextMinimal: quality signal logic ---
+// --- gatherBrainContext: quality signal logic ---
 
 test("quality signal: LESSON with 'low-value' → ' · low-value' suffix", () => {
   const lesson = "LESSON: this pattern is low-value, skip in future";
