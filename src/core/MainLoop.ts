@@ -1,16 +1,13 @@
 import type { Config } from "../config/Config.js";
 import type { TaskQueue } from "./TaskQueue.js";
-import type { CodexBridge } from "../bridges/CodexBridge.js";
 import type { TaskStore } from "../memory/TaskStore.js";
 import type { CostTracker } from "../utils/cost.js";
-import { ClaudeCodeSession } from "../bridges/ClaudeCodeSession.js";
 import type { SdkExtras } from "../bridges/buildSdkOptions.js";
 import { RuntimeReviewAdapter, type ReviewAdapter } from "./WorkerAdapter.js";
 import type { RuntimeAdapter } from "../runtime/RuntimeAdapter.js";
-import { ClaudeSdkRuntime } from "../runtime/ClaudeSdkRuntime.js";
-import { CodexCliRuntime } from "../runtime/CodexCliRuntime.js";
 import {
-  registerRuntime,
+  createRuntimeSet,
+  type Killable,
   getRuntimeSync,
   normalizeRuntimeName,
 } from "../runtime/runtimeFactory.js";
@@ -37,18 +34,17 @@ import {
 } from "../utils/git.js";
 import { log } from "../utils/logger.js";
 import { truncate } from "../utils/parse.js";
-import { TASK_DESC_MAX_LENGTH } from "../types/constants.js";
+import {
+  SUMMARY_PREVIEW_LEN,
+  TASK_DESC_MAX_LENGTH,
+} from "../types/constants.js";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { safeBuild } from "../utils/safeBuild.js";
 import { CycleEventBus } from "./CycleEventBus.js";
 import type { CycleEvent, CyclePhase, CycleTiming } from "./CycleEvents.js";
-import {
-  PersonaLoader,
-  formatWorkInstructions,
-  type WorkInstructions,
-} from "./PersonaLoader.js";
+import { PersonaLoader, type WorkInstructions } from "./PersonaLoader.js";
 import { ChainScanner } from "./ChainScanner.js";
 import { ProjectVerifier, type VerifyBaseline } from "./ProjectVerifier.js";
 import type { RegisteredStrategies } from "./strategies/index.js";
@@ -93,15 +89,14 @@ import type { StatusListener } from "./StepTracker.js";
 
 /** Shared options from the brain decision, threaded through the pipeline. */
 type BrainOpts = {
-  persona?: string;
-  taskType?: string;
   complexity?: string;
   subtasks?: Array<{ description: string; order: number }>;
-  workInstructions?: WorkInstructions;
-  // Brain-driven mode (B-1)
   directive?: string;
   resourceRequest?: import("../memory/types.js").ResourceRequest;
-  isBrainDriven?: boolean;
+  // Legacy fields preserved for queue-stored task compatibility
+  persona?: string;
+  taskType?: string;
+  workInstructions?: WorkInstructions;
 };
 
 /** Context shared across pipeline sub-methods within a single cycle. */
@@ -126,8 +121,10 @@ export class MainLoop {
   private consecutiveRejections = 0;
   private brainRuntime!: RuntimeAdapter;
   private workerRuntime!: RuntimeAdapter;
+  /** Plan phase runtime (resolved with fallback). Used by PlanChatManager. */
+  readonly planRuntime!: RuntimeAdapter;
   /** Underlying sessions for lifecycle management (kill on stop). */
-  private sessions: ClaudeCodeSession[] = [];
+  private sessions: Killable[] = [];
   private chainScanner: ChainScanner;
   private personaLoader: PersonaLoader;
   private projectVerifier: ProjectVerifier;
@@ -143,7 +140,6 @@ export class MainLoop {
   constructor(
     private config: Config,
     private taskQueue: TaskQueue,
-    private codex: CodexBridge,
     private taskStore: TaskStore,
     private costTracker: CostTracker,
     private eventBus: CycleEventBus = CycleEventBus.noop(),
@@ -163,48 +159,31 @@ export class MainLoop {
       join(config.projectPath, "personas"),
     );
 
-    // Create all available runtimes and register in factory.
-    // Each ClaudeCodeSession gets its own SDK process.
-    const brainSession = new ClaudeCodeSession(sdkExtras);
-    const workerSession = new ClaudeCodeSession(sdkExtras);
-    this.sessions = [brainSession, workerSession];
-
-    const claudeSdkBrain = new ClaudeSdkRuntime(brainSession);
-    const claudeSdkWorker = new ClaudeSdkRuntime(workerSession);
-    const codexCliRuntime = new CodexCliRuntime(config.values.codex);
-
-    // Register under canonical names — runtimeFactory handles alias→canonical.
-    // "claude-sdk" is the brain (read-only) session; "claude-sdk-worker" is the
-    // worker session.  findRuntimeForModel checks worker first so cross-runtime
-    // fallback won't accidentally land on the brain session.
-    registerRuntime("claude-sdk", claudeSdkBrain);
-    registerRuntime("claude-sdk-worker", claudeSdkWorker);
-    registerRuntime("codex-cli", codexCliRuntime);
-
-    // Build a local runtime map for routing lookups. Two "claude-sdk" entries
-    // exist (brain vs worker) because they wrap separate sessions; the factory
-    // only holds one, but we resolve locally first.
+    // Create and register all runtimes via factory.
+    const runtimeSet = createRuntimeSet(config, sdkExtras);
+    this.sessions = runtimeSet.sessions;
+    const localRuntimes = runtimeSet.runtimes;
     const routing = config.values.routing;
-    const localRuntimes: Record<string, RuntimeAdapter> = {
-      "claude-sdk-brain": claudeSdkBrain,
-      "claude-sdk-worker": claudeSdkWorker,
-      "codex-cli": codexCliRuntime,
-    };
 
-    /** Pick the correct RuntimeAdapter for a given phase routing entry. */
+    /** Pick the correct RuntimeAdapter for a given phase routing entry.
+     *  Handles claude-sdk brain/worker split and codex-sdk→codex-cli fallback. */
     const resolvePhaseRuntime = (
       phaseName: string,
       runtimeName: string,
       preferWorkerSession: boolean,
     ): RuntimeAdapter => {
+      // Runtime names are already normalized at Config construction.
+      // But handle raw aliases for safety.
       const canonical = normalizeRuntimeName(runtimeName);
+
       if (canonical === "claude-sdk") {
         return preferWorkerSession
           ? localRuntimes["claude-sdk-worker"]
           : localRuntimes["claude-sdk-brain"];
       }
-      // Try local, then factory
+      // Try local first (has both codex-sdk and codex-cli when available)
       if (localRuntimes[canonical]) return localRuntimes[canonical];
+      // Try factory (includes codex-sdk→codex-cli fallback)
       try {
         return getRuntimeSync(canonical);
       } catch {
@@ -245,6 +224,7 @@ export class MainLoop {
       routing.plan.runtime,
       false,
     );
+    this.planRuntime = planRuntime;
     const reflectRuntime = resolvePhaseRuntime(
       "reflect",
       routing.reflect.runtime,
@@ -680,7 +660,6 @@ export class MainLoop {
             !Array.isArray(plan.resourceRequest)
               ? (plan.resourceRequest as BrainOpts["resourceRequest"])
               : undefined,
-          isBrainDriven: plan.isBrainDriven === true ? true : undefined,
         };
       }
 
@@ -688,7 +667,6 @@ export class MainLoop {
       if (!brainOpts?.directive && task.directive) {
         if (!brainOpts) brainOpts = {};
         brainOpts.directive = task.directive;
-        brainOpts.isBrainDriven = true;
         if (task.resource_request) {
           brainOpts.resourceRequest = task.resource_request;
         }
@@ -714,20 +692,9 @@ export class MainLoop {
     if (decision.costUsd > 0)
       await this.taskStore.addDailyCost(decision.costUsd);
 
-    // Layer 2: directive fallback if brain returned null
+    // If brain returned null, short sleep will retry (handled by start())
     if (!decision.taskDescription) {
-      log.warn("Brain returned no task — retrying with directive prompt");
-      const directive = await this.brain.brainDecideDirective(projectPath);
-      if (directive.costUsd > 0)
-        await this.taskStore.addDailyCost(directive.costUsd);
-      if (directive.taskDescription) {
-        decision = directive;
-      }
-    }
-
-    // Layer 3: if still null, short sleep will retry (handled by start())
-    if (!decision.taskDescription) {
-      log.warn("Brain: no task after directive retry. Short sleep then retry.");
+      log.warn("Brain: no task found. Short sleep then retry.");
       this.endStep("decide", "failed", "No task found");
       this.skipRemainingSteps("decide");
       this.setState("idle");
@@ -823,74 +790,40 @@ export class MainLoop {
       await this.taskStore.updateTask(task.id, updates);
     }
 
-    // Store brain-driven fields (B-1)
-    if (decision.isBrainDriven) {
-      await this.taskStore.updateTask(task.id, {
-        directive: decision.directive ?? null,
+    // Store brain-driven fields
+    await this.taskStore.updateTask(task.id, {
+      directive: decision.directive ?? null,
+      strategy_note: decision.strategyNote ?? null,
+      verification_plan: decision.verificationPlan ?? null,
+      resource_request: decision.resourceRequest ?? null,
+    });
+
+    // Audit log for brain decision (symmetric with reflect/review addLog)
+    await this.taskStore.addLog({
+      task_id: task.id,
+      phase: "decide",
+      agent: "brain",
+      input_summary: "Brain decision (brain-driven)",
+      output_summary: truncate(decision.taskDescription, SUMMARY_PREVIEW_LEN),
+      cost_usd: decision.costUsd,
+      duration_ms: null,
+      details: {
         strategy_note: decision.strategyNote ?? null,
         verification_plan: decision.verificationPlan ?? null,
         resource_request: decision.resourceRequest ?? null,
-      });
-    }
+        directive_length: decision.directive?.length ?? 0,
+        extra_tasks_count: decision.extraDirectiveTasks?.length ?? 0,
+      },
+    });
 
     const brainOpts: BrainOpts = {
-      persona: decision.persona,
-      taskType: decision.taskType,
       complexity: decision.complexity,
       subtasks: decision.subtasks,
-      workInstructions: decision.workInstructions,
-      // Brain-driven: directive passthrough
       directive: decision.directive,
       resourceRequest: decision.resourceRequest,
-      isBrainDriven: decision.isBrainDriven,
     };
 
-    // Enqueue extra tasks from brain's batch output (legacy path)
-    if (decision.extraTasks && decision.extraTasks.length > 0) {
-      try {
-        const planTasks: PlanTask[] = decision.extraTasks.map((et, i) => ({
-          id: `extra-${i + 1}`,
-          description: et.task,
-          priority: et.priority ?? 2,
-          executor: "claude" as const,
-          subtasks: (et.subtasks ?? []).map((st, si) => ({
-            id: `extra-${i + 1}-sub-${si + 1}`,
-            description: st.description,
-            executor: "claude" as const,
-          })),
-          dependsOn: [],
-          estimatedComplexity:
-            (
-              { S: "low", M: "medium", L: "high", XL: "high" } as Record<
-                string,
-                "low" | "medium" | "high"
-              >
-            )[et.complexity ?? "M"] ?? "medium",
-          type: et.taskType as TaskType | undefined,
-          // BMAD: pass through workInstructions + persona to queue
-          workInstructions: et.workInstructions
-            ? typeof et.workInstructions === "string"
-              ? et.workInstructions
-              : formatWorkInstructions(et.workInstructions) || undefined
-            : undefined,
-          persona: et.persona,
-        }));
-        const plan: TaskPlan = {
-          tasks: planTasks,
-          reasoning: "Extra tasks from brain batch output",
-        };
-        const enqueuedIds = await this.taskQueue.enqueue(projectPath, plan);
-        if (enqueuedIds.length > 0) {
-          log.info(
-            `Enqueued ${enqueuedIds.length} extra task(s) from brain batch`,
-          );
-        }
-      } catch (err) {
-        log.warn(`Failed to enqueue extra tasks: ${err}`);
-      }
-    }
-
-    // Enqueue extra tasks from brain-driven batch output (B-1 path)
+    // Enqueue extra tasks from brain-driven batch output
     if (
       decision.extraDirectiveTasks &&
       decision.extraDirectiveTasks.length > 0

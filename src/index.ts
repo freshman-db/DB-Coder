@@ -6,7 +6,6 @@ import { Config } from "./config/Config.js";
 import { Client } from "./client/Client.js";
 import { GlobalMemory } from "./memory/GlobalMemory.js";
 import { TaskStore } from "./memory/TaskStore.js";
-import { CodexBridge } from "./bridges/CodexBridge.js";
 import { TaskQueue } from "./core/TaskQueue.js";
 import { MainLoop } from "./core/MainLoop.js";
 import { CycleEventBus } from "./core/CycleEventBus.js";
@@ -62,7 +61,7 @@ program
       return;
     }
 
-    const { memory, codex: codexConfig, budget } = config.values;
+    const { memory, budget } = config.values;
 
     // Initialize components
     const globalMemory = new GlobalMemory(memory.pgConnectionString);
@@ -78,8 +77,6 @@ program
         `Created ${recoveredErrors} P0 recovery task(s) from previous errors`,
       );
     }
-
-    const codexBridge = new CodexBridge(codexConfig);
     const taskQueue = new TaskQueue(taskStore);
     const costTracker = new CostTracker(taskStore, budget);
 
@@ -138,7 +135,6 @@ program
     const mainLoop = new MainLoop(
       config,
       taskQueue,
-      codexBridge,
       taskStore,
       costTracker,
       eventBus,
@@ -148,7 +144,12 @@ program
       strategies,
     );
     const patrolManager = new PatrolManager(mainLoop, taskStore, projectPath);
-    const planChat = new PlanChatManager(taskStore, config);
+    // Plan chat uses the plan phase runtime resolved by MainLoop (with SDK→CLI fallback).
+    const planChat = new PlanChatManager(
+      taskStore,
+      config,
+      mainLoop.planRuntime,
+    );
     const restored = await planChat.restoreSessions();
     if (restored > 0) log.info(`Restored ${restored} active chat session(s)`);
 

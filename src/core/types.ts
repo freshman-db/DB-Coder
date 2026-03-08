@@ -23,9 +23,10 @@ export interface PlanTask {
   type?: TaskType;
   workInstructions?: string; // serialized for DB JSONB storage
   persona?: string; // persona name for queue pickup
-  // Brain-driven mode (B-1) — stored in plan JSONB, restored on queue pickup
+  // Brain-driven fields — stored in plan JSONB, restored on queue pickup
   directive?: string;
   resourceRequest?: { budget_usd: number; timeout_s: number; model?: string };
+  /** @deprecated Brain-driven is now always on. Kept for queue-stored task compat. */
   isBrainDriven?: boolean;
 }
 

@@ -84,8 +84,8 @@ export class TaskQueue {
         })),
       };
 
-      // Persist brain-driven fields to dedicated columns (B-1)
-      if (planTask.isBrainDriven && planTask.directive) {
+      // Persist brain-driven fields to dedicated columns
+      if (planTask.directive) {
         updates.directive = planTask.directive;
         if (planTask.resourceRequest) {
           updates.resource_request = planTask.resourceRequest;
