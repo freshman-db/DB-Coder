@@ -1,12 +1,12 @@
-import type {
-  ClaudeCodeSession,
-  SessionResult,
-  SessionOptions,
-} from "../bridges/ClaudeCodeSession.js";
-import type { ThinkingConfig } from "@anthropic-ai/claude-agent-sdk";
-import type { CodexBridge } from "../bridges/CodexBridge.js";
-import type { ReviewResult } from "../bridges/CodingAgent.js";
-import type { CodexConfig } from "../config/types.js";
+/**
+ * WorkerAdapter — Review adapter and shared types for phase orchestration.
+ *
+ * Dead code removed (Phase 4): WorkerAdapter interface, ClaudeWorkerAdapter,
+ * CodexWorkerAdapter, ClaudeReviewAdapter, CodexReviewAdapter.
+ * All phases now use RuntimeAdapter directly.
+ */
+
+import type { ReviewResult } from "../bridges/ReviewTypes.js";
 import type { RuntimeAdapter } from "../runtime/RuntimeAdapter.js";
 import { log } from "../utils/logger.js";
 import {
@@ -21,52 +21,9 @@ export interface WorkerResult {
   text: string;
   costUsd: number;
   durationMs: number;
-  sessionId?: string; // Only Claude Code supports resume
+  sessionId?: string;
   isError: boolean;
   errors: string[];
-}
-
-// --- Worker Options ---
-
-export interface WorkerExecOpts {
-  maxTurns?: number;
-  maxBudget?: number;
-  timeout?: number;
-  cwd: string;
-  model?: string;
-  appendSystemPrompt?: string;
-  resumeSessionId?: string;
-  /** Short prompt for resumed sessions; adapter falls back to main prompt
-   *  if resume is not possible (e.g. Codex with non-full-auto sandbox). */
-  resumePrompt?: string;
-  thinking?: ThinkingConfig;
-  effort?: "low" | "medium" | "high" | "max";
-}
-
-export interface WorkerAnalyzeOpts {
-  maxTurns?: number;
-  maxBudget?: number;
-  timeout?: number;
-  cwd: string;
-  model?: string;
-  resumeSessionId?: string;
-  thinking?: ThinkingConfig;
-  effort?: "low" | "medium" | "high" | "max";
-}
-
-// --- Worker Adapter Interface ---
-
-export interface WorkerAdapter {
-  readonly name: "claude" | "codex";
-
-  /** Execute a coding task (read-write) */
-  execute(prompt: string, opts: WorkerExecOpts): Promise<WorkerResult>;
-
-  /** Fix verification or review issues */
-  fix(prompt: string, opts: WorkerExecOpts): Promise<WorkerResult>;
-
-  /** Analyze code (read-only) for plan generation */
-  analyze(prompt: string, opts: WorkerAnalyzeOpts): Promise<WorkerResult>;
 }
 
 // --- Review Adapter Interface ---
@@ -84,183 +41,11 @@ export interface ReviewAdapter {
   ): Promise<ReviewResult>;
 }
 
-// --- Claude Code Worker ---
-
-export class ClaudeWorkerAdapter implements WorkerAdapter {
-  readonly name = "claude" as const;
-
-  constructor(private session: ClaudeCodeSession) {}
-
-  async execute(prompt: string, opts: WorkerExecOpts): Promise<WorkerResult> {
-    const isResume = !!opts.resumeSessionId;
-    const result = await this.session.run(
-      isResume ? (opts.resumePrompt ?? prompt) : prompt,
-      {
-        permissionMode: "bypassPermissions",
-        maxTurns: opts.maxTurns,
-        maxBudget: opts.maxBudget,
-        cwd: opts.cwd,
-        timeout: opts.timeout,
-        model: opts.model,
-        thinking: opts.thinking,
-        effort: opts.effort,
-        appendSystemPrompt: isResume ? undefined : opts.appendSystemPrompt,
-        resumeSessionId: opts.resumeSessionId,
-      },
-    );
-    return sessionToWorkerResult(result);
-  }
-
-  async fix(prompt: string, opts: WorkerExecOpts): Promise<WorkerResult> {
-    // Claude supports session resume for contextual fixes
-    return this.execute(prompt, opts);
-  }
-
-  async analyze(
-    prompt: string,
-    opts: WorkerAnalyzeOpts,
-  ): Promise<WorkerResult> {
-    const result = await this.session.run(prompt, {
-      permissionMode: "bypassPermissions",
-      maxTurns: opts.maxTurns ?? 100,
-      maxBudget: opts.maxBudget ?? 3.0,
-      cwd: opts.cwd,
-      timeout: opts.timeout ?? 300_000,
-      model: opts.model,
-      thinking: opts.thinking,
-      effort: opts.effort,
-      resumeSessionId: opts.resumeSessionId,
-      disallowedTools: ["Edit", "Write", "NotebookEdit"],
-      appendSystemPrompt:
-        "You are analyzing code for planning purposes. Do NOT modify any files — only read and analyze.",
-    });
-    return sessionToWorkerResult(result);
-  }
-}
-
-// --- Codex Worker ---
-
-export class CodexWorkerAdapter implements WorkerAdapter {
-  readonly name = "codex" as const;
-
-  constructor(private codex: CodexBridge) {}
-
-  async execute(prompt: string, opts: WorkerExecOpts): Promise<WorkerResult> {
-    const result = await this.codex.execute(prompt, opts.cwd, {
-      systemPrompt: opts.appendSystemPrompt,
-      maxTurns: opts.maxTurns,
-      maxBudget: opts.maxBudget,
-      timeout: opts.timeout ? opts.timeout : undefined,
-      resumeSessionId: opts.resumeSessionId,
-      resumePrompt: opts.resumePrompt,
-    });
-    return {
-      text: result.output,
-      costUsd: result.cost_usd,
-      durationMs: result.duration_ms,
-      sessionId: result.sessionId,
-      isError: !result.success,
-      errors: result.success ? [] : [result.output],
-    };
-  }
-
-  async fix(prompt: string, opts: WorkerExecOpts): Promise<WorkerResult> {
-    return this.execute(prompt, opts);
-  }
-
-  async analyze(
-    prompt: string,
-    opts: WorkerAnalyzeOpts,
-  ): Promise<WorkerResult> {
-    // Codex plan() does not support resume — codex exec resume lacks
-    // --sandbox read-only, so resuming would break the read-only guarantee.
-    // Revision context is carried by the prompt itself (revisionPrompt).
-    const result = await this.codex.plan(prompt, opts.cwd, {
-      maxTurns: opts.maxTurns,
-    });
-    return {
-      text: result.output,
-      costUsd: result.cost_usd,
-      durationMs: result.duration_ms,
-      sessionId: result.sessionId,
-      isError: !result.success,
-      errors: result.success ? [] : [result.output],
-    };
-  }
-}
-
-// --- Claude Code Review Adapter ---
-
-export class ClaudeReviewAdapter implements ReviewAdapter {
-  readonly name = "claude" as const;
-
-  constructor(private session: ClaudeCodeSession) {}
-
-  async review(
-    prompt: string,
-    cwd: string,
-    opts?: { model?: string },
-  ): Promise<ReviewResult> {
-    const start = Date.now();
-    try {
-      const result = await this.session.run(prompt, {
-        permissionMode: "bypassPermissions",
-        maxTurns: 200,
-        cwd,
-        timeout: 600_000,
-        model: opts?.model,
-        disallowedTools: ["Edit", "Write", "NotebookEdit"],
-        appendSystemPrompt:
-          "You are an adversarial code reviewer. Do NOT modify files — only read and analyze.",
-      });
-
-      // Parse structured review from Claude's output
-      const parsed = parseClaudeReviewOutput(result.text);
-      return {
-        ...parsed,
-        cost_usd: result.costUsd,
-        issues: parsed.issues.map((i) => ({ ...i, source: "claude" as const })),
-      };
-    } catch (err) {
-      log.error("ClaudeReviewAdapter review failed", err);
-      return {
-        passed: false,
-        issues: [
-          {
-            severity: "critical",
-            description: `Claude review failed: ${err}`,
-            source: "claude",
-          },
-        ],
-        summary: `Review error: ${err}`,
-        cost_usd: 0,
-      };
-    }
-  }
-}
-
-// --- Codex Review Adapter ---
-
-export class CodexReviewAdapter implements ReviewAdapter {
-  readonly name = "codex" as const;
-
-  constructor(private codex: CodexBridge) {}
-
-  async review(
-    prompt: string,
-    cwd: string,
-    opts?: { model?: string },
-  ): Promise<ReviewResult> {
-    return this.codex.review(prompt, cwd, { model: opts?.model });
-  }
-}
-
-// --- Unified Runtime Review Adapter (Phase 3) ---
+// --- Unified Runtime Review Adapter ---
 
 /**
  * ReviewAdapter backed by a RuntimeAdapter.
- * Replaces both ClaudeReviewAdapter and CodexReviewAdapter by routing
- * review calls through the unified RuntimeAdapter.run() interface.
+ * Routes review calls through the unified RuntimeAdapter.run() interface.
  */
 export class RuntimeReviewAdapter implements ReviewAdapter {
   readonly name: "claude" | "codex";
@@ -292,7 +77,7 @@ export class RuntimeReviewAdapter implements ReviewAdapter {
           "You are an adversarial code reviewer. Do NOT modify files — only read and analyze.",
       });
 
-      const parsed = parseClaudeReviewOutput(result.text);
+      const parsed = parseReviewOutput(result.text);
       return {
         ...parsed,
         cost_usd: result.costUsd,
@@ -321,19 +106,7 @@ export class RuntimeReviewAdapter implements ReviewAdapter {
 
 // --- Helpers ---
 
-function sessionToWorkerResult(result: SessionResult): WorkerResult {
-  return {
-    text: result.text,
-    costUsd: result.costUsd,
-    durationMs: result.durationMs,
-    sessionId: result.sessionId || undefined,
-    isError: result.isError,
-    errors: result.errors,
-  };
-}
-
-function parseClaudeReviewOutput(text: string): Omit<ReviewResult, "cost_usd"> {
-  // Try to extract JSON from Claude's output
+function parseReviewOutput(text: string): Omit<ReviewResult, "cost_usd"> {
   try {
     const jsonMatch = text.match(
       /\{[\s\S]*"passed"\s*:\s*(true|false)[\s\S]*\}/,
@@ -375,10 +148,7 @@ function parseClaudeReviewOutput(text: string): Omit<ReviewResult, "cost_usd"> {
     // Fall through to text-based analysis
   }
 
-  // Fallback: treat as failed if we can't parse
-  log.warn(
-    "ClaudeReviewAdapter: could not parse structured output, treating as FAIL",
-  );
+  log.warn("parseReviewOutput: could not parse structured output, treating as FAIL");
   return {
     passed: false,
     issues: [

@@ -2,7 +2,7 @@ import type {
   PreExistingIssue,
   ReviewIssue,
   ReviewResult,
-} from "../bridges/CodingAgent.js";
+} from "../bridges/ReviewTypes.js";
 
 export const VALID_SEVERITIES = new Set([
   "critical",

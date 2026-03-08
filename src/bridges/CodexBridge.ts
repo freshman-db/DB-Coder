@@ -1,4 +1,4 @@
-import type { CodingAgent, AgentResult, ReviewResult } from "./CodingAgent.js";
+import type { ReviewResult } from "./ReviewTypes.js";
 import type { CodexConfig, TokenPricing } from "../config/types.js";
 import {
   runProcess,
@@ -16,7 +16,19 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-export class CodexBridge implements CodingAgent {
+export interface CodexAgentResult {
+  success: boolean;
+  output: string;
+  cost_usd: number;
+  duration_ms: number;
+  structured?: unknown;
+  sessionId?: string;
+  toolSummaries?: string[];
+  numTurns?: number;
+  stopReason?: string;
+}
+
+export class CodexBridge {
   readonly name = "codex";
 
   constructor(private config: CodexConfig) {}
@@ -25,9 +37,9 @@ export class CodexBridge implements CodingAgent {
    * Map config sandbox value to the corresponding Codex CLI flags.
    *
    * `codex exec` expects `--sandbox <level>` (two args) or `--full-auto` (single flag).
-   * Note: `sandboxOverride` is intentionally a CodexBridge-specific option
-   * and not part of the CodingAgent interface — sandbox control is an
-   * implementation detail that callers via the interface shouldn't need.
+   * Note: `sandboxOverride` is intentionally a CodexBridge-specific option —
+   * sandbox control is an implementation detail that higher layers shouldn't
+   * need to understand.
    */
   private sandboxArgs(overrideSandbox?: CodexConfig["sandbox"]): string[] {
     const level = overrideSandbox ?? this.config.sandbox;
@@ -139,7 +151,7 @@ export class CodexBridge implements CodingAgent {
       /** Callback for streaming text events (agent messages). */
       onText?: (text: string) => void;
     },
-  ): Promise<AgentResult> {
+  ): Promise<CodexAgentResult> {
     const start = Date.now();
 
     try {
@@ -255,7 +267,7 @@ export class CodexBridge implements CodingAgent {
       systemPrompt?: string;
       maxTurns?: number;
     },
-  ): Promise<AgentResult> {
+  ): Promise<CodexAgentResult> {
     // Codex doesn't have a separate plan mode — enforce read-only sandbox
     // regardless of config so plan never mutates the workspace.
     // NOTE: resume is intentionally NOT supported here because

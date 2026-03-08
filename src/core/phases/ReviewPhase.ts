@@ -10,14 +10,13 @@ import type { TaskStore } from "../../memory/TaskStore.js";
 import type { CostTracker } from "../../utils/cost.js";
 import type { RuntimeAdapter } from "../../runtime/RuntimeAdapter.js";
 import type { ReviewAdapter } from "../WorkerAdapter.js";
-import type { ReviewResult } from "../../bridges/CodingAgent.js";
+import type { ReviewResult } from "../../bridges/ReviewTypes.js";
 import type { Task } from "../../memory/types.js";
 import type { WorkInstructions } from "../PersonaLoader.js";
 import { getChangedFilesSince, getDiffSince } from "../../utils/git.js";
 import { extractJsonFromText, isRecord } from "../../utils/parse.js";
 import { log } from "../../utils/logger.js";
 import { runBrainThink } from "./brainThink.js";
-import { resolveModelId } from "../../config/Config.js";
 
 export class ReviewPhase {
   /** Runtime for spec review (brain-style read-only analysis). */
@@ -35,9 +34,9 @@ export class ReviewPhase {
     this.specReviewRuntime = reviewRuntime ?? brainSession;
   }
 
-  /** Resolved review model from routing config. */
+  /** Resolved review model from routing config (normalized at Config construction). */
   private get reviewModel(): string {
-    return resolveModelId(this.config.values.routing.review.model);
+    return this.config.values.routing.review.model;
   }
 
   // --- Unified code review ---
