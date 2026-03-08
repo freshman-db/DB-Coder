@@ -2,27 +2,33 @@ import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import type { DbCoderConfig } from "../config/types.js";
-import { resolveModelId } from "../config/Config.js";
 import { isRecord } from "./parse.js";
 import { log } from "./logger.js";
+
+/** Inline model alias resolution for pre-Config validation. */
+const MODEL_ALIASES: Record<string, string> = {
+  opus: "claude-opus-4-6",
+  sonnet: "claude-sonnet-4-6",
+};
 
 /**
  * Static model compatibility check — mirrors runtime supportsModel() logic
  * without needing runtime instances. Uses the same prefix rules.
+ * Resolves aliases since validateConfig may run before Config normalization.
  */
 function isModelCompatibleWithRuntime(model: string, runtime: string): boolean {
-  const resolved = resolveModelId(model);
+  const resolved = MODEL_ALIASES[model] ?? model;
   // Normalize runtime alias for comparison
   const rt =
     runtime === "claude"
       ? "claude-sdk"
       : runtime === "codex"
-        ? "codex-cli"
+        ? "codex-sdk"
         : runtime;
   if (rt === "claude-sdk") {
     return resolved.startsWith("claude-");
   }
-  if (rt === "codex-cli") {
+  if (rt === "codex-cli" || rt === "codex-sdk") {
     return ["gpt-", "o1-", "o3-", "o4-"].some((p) => resolved.startsWith(p));
   }
   // Unknown runtime — can't validate statically
@@ -40,6 +46,7 @@ const AUTONOMY_LEVELS = new Set(["full", "supervised"]);
 const KNOWN_RUNTIMES = new Set([
   "claude-sdk",
   "codex-cli",
+  "codex-sdk",
   // Aliases (normalized at config load, but accepted in validation)
   "claude",
   "codex",

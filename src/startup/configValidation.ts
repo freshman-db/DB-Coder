@@ -32,32 +32,89 @@ export async function validateRuntimeAvailability(
 ): Promise<string[]> {
   const issues: string[] = [];
 
-  // Collect phases that reference codex / codex-cli
-  const CODEX_NAMES = new Set(["codex", "codex-cli"]);
-  const codexPhases: string[] = [];
+  // Collect phases that reference codex runtimes.
+  // "codex" alias normalizes to "codex-sdk" (SDK-first, CLI fallback at runtime).
+  const CODEX_SDK_NAMES = new Set(["codex", "codex-sdk"]);
+  const codexCliPhases: string[] = [];
+  const codexSdkPhases: string[] = [];
   for (const [phase, pr] of Object.entries(routing)) {
     if (pr && typeof pr === "object" && "runtime" in pr) {
       const rt = (pr as { runtime: string }).runtime;
-      if (CODEX_NAMES.has(rt)) codexPhases.push(phase);
+      if (rt === "codex-cli") codexCliPhases.push(phase);
+      if (CODEX_SDK_NAMES.has(rt)) codexSdkPhases.push(phase);
     }
   }
 
-  if (codexPhases.length === 0) return issues;
+  // Any codex runtime (CLI or SDK) needs the codex binary.
+  // SDK spawns CLI internally, so CLI is always a hard dependency.
+  const needsCodexCli = codexCliPhases.length > 0 || codexSdkPhases.length > 0;
+  // Always probe CLI: even without explicit codex phases, codex-cli is registered
+  // globally for dynamic cross-runtime routing (findRuntimeForModel).
+  const cliOk = await checkCodexCli();
 
-  // Check codex CLI availability (mirrors CodexBridge.isAvailable)
-  const codexOk = await checkCodexCli();
-  if (!codexOk) {
+  if (needsCodexCli && !cliOk) {
+    // CLI missing → hard error for phases that explicitly require codex
+    const allPhases = [...codexCliPhases, ...codexSdkPhases];
     issues.push(
-      `codex-cli is not available (codex --version failed) but is configured for phases: ${codexPhases.join(", ")}`,
+      `codex CLI is not available (codex --version failed) but is required for phases: ${allPhases.join(", ")}`,
     );
+    return issues; // No point checking SDK if CLI is missing
   }
+
+  // Always probe SDK package when CLI is available — dynamic cross-runtime
+  // routing (resource_request.model → findRuntimeForModel) may need codex-sdk
+  // at runtime even if no phase explicitly configures it.
+  if (cliOk) {
+    const sdkPkgOk = await checkCodexSdkPackage();
+    if (!sdkPkgOk && codexSdkPhases.length > 0) {
+      // Only warn if phases explicitly request codex-sdk
+      log.warn(
+        `@openai/codex-sdk not installed — phases [${codexSdkPhases.join(", ")}] will fall back to codex-cli`,
+      );
+    }
+  }
+
   return issues;
 }
 
 function checkCodexCli(): Promise<boolean> {
   return new Promise((resolve) => {
     execFile("codex", ["--version"], { timeout: 5000 }, (err, _stdout) => {
+      _codexCliAvailable = !err;
       resolve(!err);
     });
   });
+}
+
+/** Cached result of codex CLI binary availability check. */
+let _codexCliAvailable: boolean | null = null;
+
+/** Cached result of codex-sdk package availability check. */
+let _codexSdkAvailable: boolean | null = null;
+
+async function checkCodexSdkPackage(): Promise<boolean> {
+  try {
+    await import("@openai/codex-sdk");
+    _codexSdkAvailable = true;
+    return true;
+  } catch {
+    _codexSdkAvailable = false;
+    return false;
+  }
+}
+
+/**
+ * Returns the cached codex CLI binary availability from startup validation.
+ * Must be called after validateRuntimeAvailability() has run.
+ */
+export function isCodexCliAvailable(): boolean {
+  return _codexCliAvailable === true;
+}
+
+/**
+ * Returns the cached codex-sdk availability result from startup validation.
+ * Must be called after validateRuntimeAvailability() has run.
+ */
+export function isCodexSdkAvailable(): boolean {
+  return _codexSdkAvailable === true;
 }

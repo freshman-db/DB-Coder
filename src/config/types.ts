@@ -45,16 +45,17 @@ export interface AutonomyConfig {
   maxRetries: number;
   retryBaseDelayMs: number;
   subtaskTimeout: number; // seconds
-  worker: "claude" | "codex"; // which worker executes coding tasks; reviewer auto-selects the opposite (default "claude")
+  /** @deprecated Superseded by routing.execute.runtime / routing.review.runtime. Ignored at runtime. */
+  worker: "claude" | "codex";
   maxReviewFixes: number; // max rounds of fix-after-review (default 1)
 }
 
 export interface PhaseRouting {
-  /** Canonical runtime name: "claude-sdk" | "codex-cli".
+  /** Canonical runtime name: "claude-sdk" | "codex-sdk" | "codex-cli".
    *  Aliases "claude" and "codex" are normalized at config load time. */
   runtime: string;
   /** Full model ID, e.g. "claude-opus-4-6", "gpt-5.3-codex".
-   *  Short aliases ("opus", "sonnet") are resolved via resolveModelId(). */
+   *  Short aliases ("opus", "sonnet") are resolved at Config construction time. */
   model: string;
 }
 
@@ -132,7 +133,7 @@ export interface PluginConfig {
 }
 
 export interface ExperimentalConfig {
-  /** Enable brain-driven mode (B-1): directive passthrough, expanded reflection */
+  /** @deprecated Brain-driven mode is now the default (always on). Kept for config compat. */
   brainDriven: boolean;
   /** Strict model routing: model/runtime incompatibility throws instead of warn */
   strictModelRouting: boolean;

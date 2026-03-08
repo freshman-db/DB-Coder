@@ -42,16 +42,16 @@ const DEFAULTS: DbCoderConfig = {
     maxRetries: 3,
     retryBaseDelayMs: 1000,
     subtaskTimeout: 600,
-    worker: "claude",
+    worker: "claude", // deprecated: use routing.execute/review instead
     maxReviewFixes: 1,
   },
   routing: {
-    brain: { runtime: "claude-sdk", model: "opus" },
-    plan: { runtime: "claude-sdk", model: "opus" },
-    execute: { runtime: "claude-sdk", model: "opus" },
+    brain: { runtime: "claude-sdk", model: "claude-opus-4-6" },
+    plan: { runtime: "claude-sdk", model: "claude-opus-4-6" },
+    execute: { runtime: "claude-sdk", model: "claude-opus-4-6" },
     review: { runtime: "codex-cli", model: "gpt-5.3-codex" },
-    reflect: { runtime: "claude-sdk", model: "opus" },
-    scan: { runtime: "claude-sdk", model: "opus" },
+    reflect: { runtime: "claude-sdk", model: "claude-opus-4-6" },
+    scan: { runtime: "claude-sdk", model: "claude-opus-4-6" },
   },
   budget: { maxPerTask: 20.0, maxPerDay: 300.0, warningThreshold: 0.8 },
   memory: {
@@ -188,18 +188,15 @@ function persistApiToken(
   chmodSync(path, 0o600);
 }
 
-const MODEL_MAP: Record<string, string> = {
+/** Model alias map — only used during Config construction for normalization. */
+const MODEL_ALIASES: Record<string, string> = {
   opus: "claude-opus-4-6",
   sonnet: "claude-sonnet-4-6",
 };
 
-/**
- * Resolve a model alias to its canonical ID.
- * Known aliases ("opus", "sonnet") are mapped; everything else passes through unchanged.
- * This means full model IDs like "claude-opus-4-6" or "gpt-5.3-codex" are never mangled.
- */
-export function resolveModelId(alias: string): string {
-  return MODEL_MAP[alias] ?? alias;
+/** Resolve a model alias to its canonical ID. Internal to Config normalization. */
+function resolveModelAlias(alias: string): string {
+  return MODEL_ALIASES[alias] ?? alias;
 }
 
 export class Config {
@@ -225,6 +222,62 @@ export class Config {
       const generatedToken = generateApiToken();
       config.apiToken = generatedToken;
       persistApiToken(globalPath, globalOverrides ?? {}, generatedToken);
+    }
+
+    // Normalize routing config: both model aliases and runtime aliases.
+    // After this block, downstream code sees only canonical values.
+    if (config.routing) {
+      const phases = [
+        "brain",
+        "plan",
+        "execute",
+        "review",
+        "reflect",
+        "scan",
+      ] as const;
+      // Runtime alias map (must stay in sync with runtimeFactory.ts)
+      const RUNTIME_ALIASES: Record<string, string> = {
+        claude: "claude-sdk",
+        codex: "codex-sdk",
+      };
+      const normalized = { ...config.routing };
+      for (const phase of phases) {
+        const pr = normalized[phase];
+        if (!pr) continue;
+        let changed = false;
+        let newPr = pr;
+        // Normalize runtime alias (e.g. "codex" → "codex-sdk")
+        if (pr.runtime && RUNTIME_ALIASES[pr.runtime]) {
+          newPr = { ...newPr, runtime: RUNTIME_ALIASES[pr.runtime] };
+          changed = true;
+        }
+        // Normalize model alias (e.g. "opus" → "claude-opus-4-6")
+        if (pr.model) {
+          const resolved = resolveModelAlias(pr.model);
+          if (resolved !== pr.model) {
+            newPr = { ...newPr, model: resolved };
+            changed = true;
+          }
+        }
+        if (changed) {
+          normalized[phase] = newPr;
+        }
+      }
+      config = { ...config, routing: normalized };
+    }
+
+    // Normalize model aliases in brain.model and claude.model
+    if (config.brain?.model) {
+      const resolved = resolveModelAlias(config.brain.model);
+      if (resolved !== config.brain.model) {
+        config = { ...config, brain: { ...config.brain, model: resolved } };
+      }
+    }
+    if (config.claude?.model) {
+      const resolved = resolveModelAlias(config.claude.model);
+      if (resolved !== config.claude.model) {
+        config = { ...config, claude: { ...config.claude, model: resolved } };
+      }
     }
 
     this.values = config;

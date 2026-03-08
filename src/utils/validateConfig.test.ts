@@ -332,7 +332,7 @@ test("validateConfig accepts runtime aliases with compatible models", () => {
     const config = createValidConfig();
     // "claude" alias should be treated as claude-sdk
     config.routing.brain = { runtime: "claude", model: "claude-sonnet-4-6" };
-    // "codex" alias should be treated as codex-cli
+    // "codex" alias should be treated as codex-sdk (same model compatibility)
     config.routing.review = { runtime: "codex", model: "gpt-5.3-codex" };
 
     assert.doesNotThrow(() => validateConfig(config, projectPath));
