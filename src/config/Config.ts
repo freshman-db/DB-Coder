@@ -49,7 +49,7 @@ const DEFAULTS: DbCoderConfig = {
     brain: { runtime: "claude-sdk", model: "claude-opus-4-6" },
     plan: { runtime: "claude-sdk", model: "claude-opus-4-6" },
     execute: { runtime: "claude-sdk", model: "claude-opus-4-6" },
-    review: { runtime: "codex-cli", model: "gpt-5.3-codex" },
+    review: { runtime: "codex-sdk", model: "gpt-5.4" },
     reflect: { runtime: "claude-sdk", model: "claude-opus-4-6" },
     scan: { runtime: "claude-sdk", model: "claude-opus-4-6" },
   },
