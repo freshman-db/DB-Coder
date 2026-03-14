@@ -318,8 +318,9 @@ test("GET /api/tasks/pending-review returns pending_review tasks array", async (
 });
 
 test("GET /api/tasks/:id still works after pending-review route reorder", async () => {
+  const taskId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
   const expectedTask = {
-    id: "task-uuid-123",
+    id: taskId,
     task_description: "Implement feature X",
     status: "done",
   } as unknown as Awaited<ReturnType<TaskStore["getTask"]>>;
@@ -330,7 +331,7 @@ test("GET /api/tasks/:id still works after pending-review route reorder", async 
   const { server, token } = createServerFixture({
     taskStore: {
       getTask: async (id) => {
-        if (id === "task-uuid-123") return expectedTask;
+        if (id === taskId) return expectedTask;
         return null;
       },
       getTaskLogs: async () => expectedLogs,
@@ -339,13 +340,13 @@ test("GET /api/tasks/:id still works after pending-review route reorder", async 
 
   const state = await dispatch(server, {
     method: "GET",
-    url: "/api/tasks/task-uuid-123",
+    url: `/api/tasks/${taskId}`,
     token,
   });
 
   assert.equal(state.statusCode, 200);
   const body = parseJson<Record<string, unknown>>(state);
-  assert.equal(body.id, "task-uuid-123");
+  assert.equal(body.id, taskId);
   assert.equal(body.task_description, "Implement feature X");
   assert.deepEqual(body.logs, expectedLogs);
 });
@@ -1261,6 +1262,355 @@ test("GET /api/plans/:id/stream enforces max SSE connections and releases slots 
     req.emit("close");
   }
   replacementReq.emit("close");
+});
+
+// --- blocked-summary endpoint ---
+
+test("GET /api/tasks/blocked-summary returns summary from taskStore", async () => {
+  const expectedSummary = {
+    blockedCount: 3,
+    recentFailures: [
+      {
+        taskId: "f1",
+        description: "test",
+        phase: "execute",
+        agent: "worker",
+        outputSummary: "failed",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ],
+  };
+  let calledWith: { projectPath: string; windowHours: number } | undefined;
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getBlockedTaskSummary: async (
+        projectPath: string,
+        windowHours: number,
+      ) => {
+        calledWith = { projectPath, windowHours };
+        return expectedSummary as never;
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "GET",
+    url: "/api/tasks/blocked-summary",
+    token,
+  });
+
+  assert.equal(state.statusCode, 200);
+  assert.deepEqual(parseJson<typeof expectedSummary>(state), expectedSummary);
+  assert.equal(calledWith?.projectPath, "/workspace/project");
+  assert.equal(calledWith?.windowHours, 48); // default
+});
+
+test("GET /api/tasks/blocked-summary with windowHours=24 passes custom value", async () => {
+  let calledWindowHours: number | undefined;
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getBlockedTaskSummary: async (_pp: string, windowHours: number) => {
+        calledWindowHours = windowHours;
+        return { blockedCount: 0, recentFailures: [] };
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "GET",
+    url: "/api/tasks/blocked-summary?windowHours=24",
+    token,
+  });
+
+  assert.equal(state.statusCode, 200);
+  assert.equal(calledWindowHours, 24);
+});
+
+test("GET /api/tasks/blocked-summary returns 400 for non-positive windowHours", async () => {
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getBlockedTaskSummary: async () => ({
+        blockedCount: 0,
+        recentFailures: [],
+      }),
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "GET",
+    url: "/api/tasks/blocked-summary?windowHours=-5",
+    token,
+  });
+
+  assert.equal(state.statusCode, 400);
+});
+
+test("GET /api/tasks/blocked-summary returns 400 for non-integer windowHours", async () => {
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getBlockedTaskSummary: async () => ({
+        blockedCount: 0,
+        recentFailures: [],
+      }),
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "GET",
+    url: "/api/tasks/blocked-summary?windowHours=abc",
+    token,
+  });
+
+  assert.equal(state.statusCode, 400);
+});
+
+test("GET /api/tasks/blocked-summary rejects fractional, trailing-garbage, and scientific notation", async () => {
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getBlockedTaskSummary: async () => ({
+        blockedCount: 0,
+        recentFailures: [],
+      }),
+    },
+  });
+
+  for (const bad of ["1.5", "12abc", "1e2", "0", "00", " 3"]) {
+    const state = await dispatch(server, {
+      method: "GET",
+      url: `/api/tasks/blocked-summary?windowHours=${encodeURIComponent(bad)}`,
+      token,
+    });
+    assert.equal(state.statusCode, 400, `windowHours="${bad}" should be 400`);
+  }
+});
+
+test("GET /api/tasks/blocked-summary is not shadowed by :id route", async () => {
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getBlockedTaskSummary: async () => ({
+        blockedCount: 0,
+        recentFailures: [],
+      }),
+      getTask: async () => null,
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "GET",
+    url: "/api/tasks/blocked-summary",
+    token,
+  });
+
+  // Should hit blocked-summary, not :id with id="blocked-summary"
+  assert.equal(state.statusCode, 200);
+  const body = parseJson<Record<string, unknown>>(state);
+  assert.ok("blockedCount" in body);
+});
+
+test("GET /api/tasks/blocked-summary returns 401 without auth", async () => {
+  const { server } = createServerFixture({
+    taskStore: {
+      getBlockedTaskSummary: async () => ({
+        blockedCount: 0,
+        recentFailures: [],
+      }),
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "GET",
+    url: "/api/tasks/blocked-summary",
+  });
+
+  assert.equal(state.statusCode, 401);
+});
+
+// --- task-logs endpoint ---
+
+test("GET /api/tasks/:id/logs returns logs with truncated output_summary", async () => {
+  const longSummary = "x".repeat(600);
+  const shortSummary = "short";
+  const taskId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getTask: async (id: string) =>
+        id === taskId ? ({ id: taskId, status: "done" } as never) : null,
+      getTaskLogs: async () =>
+        [
+          { id: 1, output_summary: longSummary },
+          { id: 2, output_summary: shortSummary },
+          { id: 3, output_summary: null },
+        ] as never,
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "GET",
+    url: `/api/tasks/${taskId}/logs`,
+    token,
+  });
+
+  assert.equal(state.statusCode, 200);
+  const logs = parseJson<Array<{ output_summary: string | null }>>(state);
+  assert.equal(logs.length, 3);
+  assert.ok(logs[0].output_summary!.endsWith("… [truncated]"));
+  assert.equal(logs[0].output_summary!.length, 500 + "… [truncated]".length);
+  assert.equal(logs[1].output_summary, shortSummary);
+  assert.equal(logs[2].output_summary, null);
+});
+
+test("GET /api/tasks/:id/logs returns 400 for invalid UUID", async () => {
+  const { server, token } = createServerFixture();
+
+  const state = await dispatch(server, {
+    method: "GET",
+    url: "/api/tasks/not-a-uuid/logs",
+    token,
+  });
+
+  assert.equal(state.statusCode, 400);
+});
+
+test("GET /api/tasks/:id/logs returns 404 for nonexistent task", async () => {
+  const taskId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getTask: async () => null,
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "GET",
+    url: `/api/tasks/${taskId}/logs`,
+    token,
+  });
+
+  assert.equal(state.statusCode, 404);
+});
+
+// --- requeue endpoint ---
+
+test("POST /api/tasks/requeue returns requeued count", async () => {
+  const ids = [
+    "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "11111111-2222-3333-4444-555555555555",
+  ];
+  let calledWith: { projectPath: string; taskIds: string[] } | undefined;
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      requeueBlockedTasks: async (projectPath: string, taskIds: string[]) => {
+        calledWith = { projectPath, taskIds };
+        return 2;
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "POST",
+    url: "/api/tasks/requeue",
+    token,
+    body: { taskIds: ids },
+  });
+
+  assert.equal(state.statusCode, 200);
+  const body = parseJson<{ requeued: number; requested: number }>(state);
+  assert.equal(body.requeued, 2);
+  assert.equal(body.requested, 2);
+  assert.deepEqual(calledWith?.taskIds, ids);
+});
+
+test("POST /api/tasks/requeue returns 400 for empty taskIds", async () => {
+  const { server, token } = createServerFixture();
+
+  const state = await dispatch(server, {
+    method: "POST",
+    url: "/api/tasks/requeue",
+    token,
+    body: { taskIds: [] },
+  });
+
+  assert.equal(state.statusCode, 400);
+});
+
+test("POST /api/tasks/requeue returns 400 for non-array taskIds", async () => {
+  const { server, token } = createServerFixture();
+
+  const state = await dispatch(server, {
+    method: "POST",
+    url: "/api/tasks/requeue",
+    token,
+    body: { taskIds: "not-an-array" },
+  });
+
+  assert.equal(state.statusCode, 400);
+});
+
+test("POST /api/tasks/requeue returns 400 for invalid UUID in taskIds", async () => {
+  const { server, token } = createServerFixture();
+
+  const state = await dispatch(server, {
+    method: "POST",
+    url: "/api/tasks/requeue",
+    token,
+    body: { taskIds: ["not-a-valid-uuid"] },
+  });
+
+  assert.equal(state.statusCode, 400);
+});
+
+test("POST /api/tasks/requeue returns 401 without auth", async () => {
+  const { server } = createServerFixture();
+
+  const state = await dispatch(server, {
+    method: "POST",
+    url: "/api/tasks/requeue",
+    body: { taskIds: ["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"] },
+  });
+
+  assert.equal(state.statusCode, 401);
+});
+
+// --- UUID validation on existing routes ---
+
+test("GET /api/tasks/:id returns 400 for invalid UUID", async () => {
+  const { server, token } = createServerFixture();
+
+  const state = await dispatch(server, {
+    method: "GET",
+    url: "/api/tasks/not-a-uuid",
+    token,
+  });
+
+  assert.equal(state.statusCode, 400);
+});
+
+test("POST /api/tasks/:id/approve returns 400 for invalid UUID", async () => {
+  const { server, token } = createServerFixture();
+
+  const state = await dispatch(server, {
+    method: "POST",
+    url: "/api/tasks/not-a-uuid/approve",
+    token,
+  });
+
+  assert.equal(state.statusCode, 400);
+});
+
+test("POST /api/tasks/:id/skip returns 400 for invalid UUID", async () => {
+  const { server, token } = createServerFixture();
+
+  const state = await dispatch(server, {
+    method: "POST",
+    url: "/api/tasks/not-a-uuid/skip",
+    token,
+  });
+
+  assert.equal(state.statusCode, 400);
 });
 
 test("GET /api/plans/:id/stream handles sync first event during addListener without listener leak", async () => {

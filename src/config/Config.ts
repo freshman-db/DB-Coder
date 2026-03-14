@@ -282,4 +282,28 @@ export class Config {
 
     this.values = config;
   }
+
+  /**
+   * Lightweight config loader for CLI client commands.
+   * Merges global + project configs but only returns connection parameters.
+   * Does NOT generate or persist API tokens (unlike the full constructor).
+   */
+  static loadClientConfig(cwd = process.cwd()): {
+    port: number;
+    host: string;
+    apiToken: string;
+  } {
+    const globalPath = join(homedir(), ".db-coder", "config.json");
+    const projectPath = join(cwd, ".db-coder.json");
+    let config = { ...DEFAULTS };
+    const g = loadJsonFile(globalPath);
+    if (g) config = deepMerge(config, g);
+    const p = loadJsonFile(projectPath);
+    if (p) config = deepMerge(config, p);
+    return {
+      port: config.server.port,
+      host: config.server.host,
+      apiToken: config.apiToken,
+    };
+  }
 }

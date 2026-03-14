@@ -1,6 +1,9 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { buildSdkOptions, type SdkExtras } from "../../src/bridges/buildSdkOptions.js";
+import {
+  buildSdkOptions,
+  type SdkExtras,
+} from "../../src/bridges/buildSdkOptions.js";
 import type { SessionOptions } from "../../src/bridges/ClaudeCodeSession.js";
 
 describe("buildSdkOptions", () => {
@@ -294,23 +297,11 @@ describe("buildSdkOptions", () => {
       assert.deepEqual(result.options.agents, agents);
     });
 
-    it("should pass mcpServers from extras", () => {
-      const mcpServers: SdkExtras["mcpServers"] = {
-        "my-server": {
-          command: "node",
-          args: ["./server.js"],
-        },
-      };
-      const result = buildSdkOptions("test", minimalOpts(), { mcpServers });
-      assert.deepEqual(result.options.mcpServers, mcpServers);
-    });
-
     it("should handle undefined extras gracefully", () => {
       const result = buildSdkOptions("test", minimalOpts());
       assert.equal(result.options.hooks, undefined);
       assert.equal(result.options.plugins, undefined);
       assert.equal(result.options.agents, undefined);
-      assert.equal(result.options.mcpServers, undefined);
     });
   });
 

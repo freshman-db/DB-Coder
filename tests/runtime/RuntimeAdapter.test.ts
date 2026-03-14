@@ -4,7 +4,10 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { RunOptions, RunResult } from "../../src/runtime/RuntimeAdapter.js";
+import type {
+  RunOptions,
+  RunResult,
+} from "../../src/runtime/RuntimeAdapter.js";
 import { ClaudeSdkRuntime } from "../../src/runtime/ClaudeSdkRuntime.js";
 import {
   normalizeRuntimeName,
@@ -476,12 +479,7 @@ test("codex-sdk as brain: disallowedTools passed but silently ignored (toolSurfa
   await runtime.run("Test", {
     cwd: "/tmp",
     readOnly: true,
-    disallowedTools: [
-      "Edit",
-      "Write",
-      "NotebookEdit",
-      "mcp__db-coder-system-data__create_task",
-    ],
+    disallowedTools: ["Edit", "Write", "NotebookEdit"],
   });
 
   // disallowedTools ARE passed in RunOptions (the interface allows them)
@@ -489,7 +487,6 @@ test("codex-sdk as brain: disallowedTools passed but silently ignored (toolSurfa
     "Edit",
     "Write",
     "NotebookEdit",
-    "mcp__db-coder-system-data__create_task",
   ]);
 
   // But the runtime's toolSurface=false means it won't act on them.

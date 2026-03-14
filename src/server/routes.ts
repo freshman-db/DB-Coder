@@ -402,6 +402,40 @@ route("POST", "/api/tasks", async (req, res, ctx) => {
   json(res, task, 201);
 });
 
+route("POST", "/api/tasks/requeue", async (req, res, ctx) => {
+  const body = await readBody(req);
+  if (!isRecord(body)) {
+    json(res, { error: "Request body must be a JSON object." }, 400);
+    return;
+  }
+  const { taskIds } = body;
+  if (!Array.isArray(taskIds) || taskIds.length === 0) {
+    json(
+      res,
+      { error: "taskIds must be a non-empty array of UUID strings." },
+      400,
+    );
+    return;
+  }
+  for (const id of taskIds) {
+    if (typeof id !== "string" || !validateUuid(id)) {
+      json(
+        res,
+        {
+          error: `Invalid UUID format: ${typeof id === "string" ? id : "(non-string)"}`,
+        },
+        400,
+      );
+      return;
+    }
+  }
+  const requeued = await ctx.taskStore.requeueBlockedTasks(
+    ctx.config.projectPath,
+    taskIds as string[],
+  );
+  json(res, { requeued, requested: taskIds.length });
+});
+
 route("GET", "/api/tasks", async (req, res, ctx) => {
   const url = new URL(req.url ?? "", `http://${req.headers.host}`);
   const page = Math.max(
@@ -427,9 +461,17 @@ route("GET", "/api/tasks", async (req, res, ctx) => {
   json(res, result);
 });
 
+// --- UUID validation helper ---
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function validateUuid(id: string): boolean {
+  return UUID_RE.test(id);
+}
+
 // --- Task Evaluation (pending review) ---
-// NOTE: This literal route MUST be registered before /api/tasks/:id
-// to avoid the :id wildcard pattern shadowing it.
+// NOTE: Literal routes MUST be registered before /api/tasks/:id
+// to avoid the :id wildcard pattern shadowing them.
 route("GET", "/api/tasks/pending-review", async (_req, res, ctx) => {
   const tasks = await ctx.taskStore.getPendingReviewTasks(
     ctx.config.projectPath,
@@ -437,7 +479,51 @@ route("GET", "/api/tasks/pending-review", async (_req, res, ctx) => {
   json(res, tasks);
 });
 
+route("GET", "/api/tasks/blocked-summary", async (req, res, ctx) => {
+  const url = new URL(req.url ?? "", `http://${req.headers.host}`);
+  const rawHours = url.searchParams.get("windowHours");
+  let windowHours = 48;
+  if (rawHours !== null) {
+    if (!/^\d+$/.test(rawHours) || Number(rawHours) <= 0) {
+      json(res, { error: "windowHours must be a positive integer." }, 400);
+      return;
+    }
+    windowHours = Number(rawHours);
+  }
+  const summary = await ctx.taskStore.getBlockedTaskSummary(
+    ctx.config.projectPath,
+    windowHours,
+  );
+  json(res, summary);
+});
+
+route("GET", "/api/tasks/:id/logs", async (_req, res, ctx, params) => {
+  if (!validateUuid(params.id)) {
+    json(res, { error: "Invalid task ID format." }, 400);
+    return;
+  }
+  const task = await ctx.taskStore.getTask(params.id);
+  if (!task) {
+    json(res, { error: "not found" }, 404);
+    return;
+  }
+  const logs = await ctx.taskStore.getTaskLogs(params.id);
+  const summarized = logs.map((l) => ({
+    ...l,
+    output_summary: l.output_summary
+      ? l.output_summary.length > 500
+        ? l.output_summary.slice(0, 500) + "… [truncated]"
+        : l.output_summary
+      : l.output_summary,
+  }));
+  json(res, summarized);
+});
+
 route("GET", "/api/tasks/:id", async (_req, res, ctx, params) => {
+  if (!validateUuid(params.id)) {
+    json(res, { error: "Invalid task ID format." }, 400);
+    return;
+  }
   const task = await ctx.taskStore.getTask(params.id);
   if (!task) {
     json(res, { error: "not found" }, 404);
@@ -448,11 +534,19 @@ route("GET", "/api/tasks/:id", async (_req, res, ctx, params) => {
 });
 
 route("DELETE", "/api/tasks/:id", async (_req, res, ctx, params) => {
+  if (!validateUuid(params.id)) {
+    json(res, { error: "Invalid task ID format." }, 400);
+    return;
+  }
   await ctx.taskStore.deleteTask(params.id);
   json(res, { ok: true });
 });
 
 route("POST", "/api/tasks/:id/approve", async (_req, res, ctx, params) => {
+  if (!validateUuid(params.id)) {
+    json(res, { error: "Invalid task ID format." }, 400);
+    return;
+  }
   const task = await ctx.taskStore.getTask(params.id);
   if (!task) {
     json(res, { error: "not found" }, 404);
@@ -467,6 +561,10 @@ route("POST", "/api/tasks/:id/approve", async (_req, res, ctx, params) => {
 });
 
 route("POST", "/api/tasks/:id/skip", async (_req, res, ctx, params) => {
+  if (!validateUuid(params.id)) {
+    json(res, { error: "Invalid task ID format." }, 400);
+    return;
+  }
   const task = await ctx.taskStore.getTask(params.id);
   if (!task) {
     json(res, { error: "not found" }, 404);

@@ -62,14 +62,7 @@ export async function runBrainThink(
     systemPrompt: isResume
       ? undefined
       : "You are the brain of an autonomous coding agent. Read CLAUDE.md for context. Do not modify files — only analyze and decide.",
-    disallowedTools: [
-      "Edit",
-      "Write",
-      "NotebookEdit",
-      // Block MCP tools that mutate state — brain session must be read-only
-      "mcp__db-coder-system-data__create_task",
-      "mcp__db-coder-system-data__requeue_blocked_tasks",
-    ],
+    disallowedTools: ["Edit", "Write", "NotebookEdit"],
   });
 
   if (isResume && result.numTurns !== undefined) {

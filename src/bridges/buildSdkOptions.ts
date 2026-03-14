@@ -34,7 +34,6 @@ export interface SdkExtras {
   hooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>;
   plugins?: SdkPluginConfig[];
   agents?: Options["agents"];
-  mcpServers?: Options["mcpServers"];
 }
 
 export function buildSdkOptions(
@@ -102,7 +101,6 @@ export function buildSdkOptions(
   if (extras?.hooks) options.hooks = extras.hooks;
   if (extras?.plugins) options.plugins = extras.plugins;
   if (extras?.agents) options.agents = extras.agents;
-  if (extras?.mcpServers) options.mcpServers = extras.mcpServers;
 
   return { prompt, options, timeoutMs };
 }

@@ -55,8 +55,27 @@ export class Client {
     return this.post("/api/tasks", { description, priority });
   }
 
-  async listTasks(): Promise<ListTasksResponse> {
-    return this.get("/api/tasks");
+  async listTasks(status?: string): Promise<ListTasksResponse> {
+    const query = status ? `?status=${encodeURIComponent(status)}` : "";
+    return this.get(`/api/tasks${query}`);
+  }
+
+  async getBlockedSummary(
+    windowHours?: number,
+  ): Promise<{ blockedCount: number; recentFailures: unknown[] }> {
+    const query =
+      windowHours !== undefined ? `?windowHours=${windowHours}` : "";
+    return this.get(`/api/tasks/blocked-summary${query}`);
+  }
+
+  async getTaskLogs(id: string): Promise<TaskLog[]> {
+    return this.get(`/api/tasks/${id}/logs`);
+  }
+
+  async requeueTasks(
+    taskIds: string[],
+  ): Promise<{ requeued: number; requested: number }> {
+    return this.post("/api/tasks/requeue", { taskIds });
   }
 
   async getTask(id: string): Promise<GetTaskResponse> {

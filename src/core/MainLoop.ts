@@ -225,6 +225,7 @@ export class MainLoop {
     workerRuntimeOverride?: RuntimeAdapter,
     reviewAdapter?: ReviewAdapter,
     strategies?: RegisteredStrategies,
+    private cliCmd?: string,
   ) {
     const hash = createHash("md5")
       .update(config.projectPath)
@@ -342,6 +343,7 @@ export class MainLoop {
       this.brainRuntime,
       this.projectVerifier,
       this.lockFile,
+      this.cliCmd,
     );
     this.review = new ReviewPhase(
       config,

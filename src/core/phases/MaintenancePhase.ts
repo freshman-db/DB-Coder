@@ -126,6 +126,7 @@ export class MaintenancePhase {
     private readonly brainSession: RuntimeAdapter,
     private readonly projectVerifier: ProjectVerifier,
     private readonly lockFile: string,
+    private readonly cliCmd?: string,
   ) {}
 
   // --- Hard verification (zero LLM cost) ---
@@ -262,21 +263,25 @@ export class MaintenancePhase {
   async pipelineHealthCheck(projectPath: string): Promise<void> {
     log.info("Pipeline health check triggered after consecutive rejections");
 
+    const cli = this.cliCmd ?? "db-coder";
+
     const result = await this.brainSession.run(
       `## Pipeline Health Check
 
 Multiple tasks have been rejected consecutively, suggesting a systemic pipeline issue.
 
 ## Instructions
-1. Use the \`get_blocked_summary\` MCP tool to see how many tasks are blocked and their failure patterns
+1. Run: ${cli} blocked-summary --json
 2. If blocked count < 3, respond "No systemic issue" and stop
-3. Otherwise, use \`get_task_logs\` on a few failed tasks to understand the failure pattern
+3. Otherwise, pick a few failed tasks and run: ${cli} task-logs <id> --json
 4. Use Read, Grep, Bash to investigate the pipeline code if failures point to a code bug
-5. If you find a systemic bug, use \`create_task\` to create fix task(s) with:
-   - Description prefixed with "[PIPELINE-FIX]"
-   - Priority 0 (urgent)
-6. Use \`requeue_blocked_tasks\` if blocked tasks should be retried after the fix
-7. If failures are legitimate (bad task quality, not a bug), do nothing`,
+5. If you find a systemic bug, create fix task(s):
+   ${cli} add "[PIPELINE-FIX] <description>" -p 0 --json
+6. If blocked tasks should be retried after the fix:
+   ${cli} requeue <id1> <id2> ... --json
+7. If failures are legitimate (bad task quality, not a bug), do nothing
+
+Only operate on the task queue via the CLI commands above. Do not modify source files.`,
       {
         cwd: projectPath,
         maxTurns: 30,
@@ -284,21 +289,9 @@ Multiple tasks have been rejected consecutively, suggesting a systemic pipeline 
         model:
           this.config.values.routing.brain.model ||
           this.config.values.brain.model,
-        allowedTools: [
-          "Read",
-          "Glob",
-          "Grep",
-          "Bash",
-          "mcp__db-coder-system-data__get_blocked_summary",
-          "mcp__db-coder-system-data__get_recent_tasks",
-          "mcp__db-coder-system-data__get_task_detail",
-          "mcp__db-coder-system-data__get_task_logs",
-          "mcp__db-coder-system-data__get_operational_metrics",
-          "mcp__db-coder-system-data__create_task",
-          "mcp__db-coder-system-data__requeue_blocked_tasks",
-        ],
+        allowedTools: ["Read", "Glob", "Grep", "Bash"],
         systemPrompt:
-          "You are diagnosing pipeline failures. Investigate thoroughly before taking action. Do not modify source files.",
+          "You are diagnosing pipeline failures. Investigate thoroughly before taking action. Do not modify source files. Only operate on the task queue via CLI commands.",
       },
     );
 

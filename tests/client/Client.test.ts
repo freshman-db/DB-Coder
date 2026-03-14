@@ -152,6 +152,66 @@ test("stale memory methods do not exist on Client", () => {
   assert.equal("addMemory" in client, false, "addMemory should be removed");
 });
 
+// --- listTasks with status filter ---
+
+test("listTasks with status adds query parameter", async () => {
+  const calls = await withMockFetch(async (client) => {
+    await client.listTasks("blocked");
+  });
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].url.endsWith("/api/tasks?status=blocked"));
+});
+
+test("listTasks without status sends no query parameter", async () => {
+  const calls = await withMockFetch(async (client) => {
+    await client.listTasks();
+  });
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].url.endsWith("/api/tasks"));
+  assert.ok(!calls[0].url.includes("status="));
+});
+
+// --- getBlockedSummary ---
+
+test("getBlockedSummary sends GET to /api/tasks/blocked-summary", async () => {
+  const calls = await withMockFetch(async (client) => {
+    await client.getBlockedSummary();
+  });
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].url.endsWith("/api/tasks/blocked-summary"));
+});
+
+test("getBlockedSummary with windowHours adds query parameter", async () => {
+  const calls = await withMockFetch(async (client) => {
+    await client.getBlockedSummary(24);
+  });
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].url.endsWith("/api/tasks/blocked-summary?windowHours=24"));
+});
+
+// --- getTaskLogs ---
+
+test("getTaskLogs sends GET to /api/tasks/:id/logs", async () => {
+  const calls = await withMockFetch(async (client) => {
+    await client.getTaskLogs("abc-123");
+  });
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].url.endsWith("/api/tasks/abc-123/logs"));
+});
+
+// --- requeueTasks ---
+
+test("requeueTasks sends POST to /api/tasks/requeue with taskIds body", async () => {
+  const calls = await withMockFetch(async (client) => {
+    await client.requeueTasks(["id-1", "id-2"]);
+  });
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].url.endsWith("/api/tasks/requeue"));
+  assert.equal(calls[0].init.method, "POST");
+  const body = JSON.parse(calls[0].init.body as string);
+  assert.deepEqual(body, { taskIds: ["id-1", "id-2"] });
+});
+
 // --- followLogs abort signal cancellation ---
 
 test("followLogs passes AbortSignal to fetch and aborts cleanly", async () => {

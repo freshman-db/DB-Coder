@@ -99,6 +99,70 @@ function configWithOverride(override: Record<string, unknown>): {
   };
 }
 
+// --- Config.loadClientConfig ---
+
+describe("Config.loadClientConfig", () => {
+  test("returns default port/host when no config files exist", () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "db-coder-client-"));
+    const homeDir = join(tempRoot, "home");
+    const projectDir = join(tempRoot, "project");
+    mkdirSync(projectDir, { recursive: true });
+    mkdirSync(join(homeDir, ".db-coder"), { recursive: true });
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = homeDir;
+
+    try {
+      const result = Config.loadClientConfig(projectDir);
+      assert.equal(result.port, 18801);
+      assert.equal(result.host, "127.0.0.1");
+      assert.equal(result.apiToken, ""); // no token configured
+    } finally {
+      if (previousHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = previousHome;
+      }
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("merges global + project config for client connection", () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "db-coder-client-merge-"));
+    const homeDir = join(tempRoot, "home");
+    const projectDir = join(tempRoot, "project");
+    const configDir = join(homeDir, ".db-coder");
+    mkdirSync(projectDir, { recursive: true });
+    mkdirSync(configDir, { recursive: true });
+
+    writeFileSync(
+      join(configDir, "config.json"),
+      JSON.stringify({ apiToken: "global-token", server: { port: 19999 } }),
+    );
+    writeFileSync(
+      join(projectDir, ".db-coder.json"),
+      JSON.stringify({ server: { host: "192.168.1.1" } }),
+    );
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = homeDir;
+
+    try {
+      const result = Config.loadClientConfig(projectDir);
+      assert.equal(result.port, 19999); // from global
+      assert.equal(result.host, "192.168.1.1"); // from project
+      assert.equal(result.apiToken, "global-token");
+    } finally {
+      if (previousHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = previousHome;
+      }
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("deepMerge nested object handling", () => {
   test("partial override of nested object preserves sibling defaults", () => {
     const { config, cleanup } = configWithOverride({

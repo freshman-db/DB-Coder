@@ -7,7 +7,10 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { BrainDecision, BrainReflection } from "../../../src/core/phases/BrainPhase.js";
+import type {
+  BrainDecision,
+  BrainReflection,
+} from "../../../src/core/phases/BrainPhase.js";
 
 // --- BrainDecision type contract tests ---
 
@@ -444,42 +447,19 @@ test("quality signal: non-LESSON prefix → empty string", () => {
   assert.equal(quality, "");
 });
 
-// --- brainThink disallowedTools: MCP write tools blocked ---
+// --- brainThink disallowedTools: only file-editing tools blocked ---
 
-test("brainThink disallowedTools includes MCP mutating tools", async () => {
-  // This tests the contract: brain session must block MCP tools that mutate state
-  const BRAIN_DISALLOWED = [
-    "Edit",
-    "Write",
-    "NotebookEdit",
-    "mcp__db-coder-system-data__create_task",
-    "mcp__db-coder-system-data__requeue_blocked_tasks",
-  ];
+test("brainThink disallowedTools contains only file-editing tools (no MCP)", async () => {
+  // Brain session is read-only: only file-editing tools are blocked.
+  // No MCP entries in disallowedTools.
+  const BRAIN_DISALLOWED = ["Edit", "Write", "NotebookEdit"];
 
-  // Verify all file-mutation tools are present
-  assert.ok(BRAIN_DISALLOWED.includes("Edit"));
-  assert.ok(BRAIN_DISALLOWED.includes("Write"));
-  assert.ok(BRAIN_DISALLOWED.includes("NotebookEdit"));
+  assert.deepEqual(BRAIN_DISALLOWED, ["Edit", "Write", "NotebookEdit"]);
 
-  // Verify MCP mutating tools are present
-  assert.ok(
-    BRAIN_DISALLOWED.includes("mcp__db-coder-system-data__create_task"),
-  );
-  assert.ok(
-    BRAIN_DISALLOWED.includes(
-      "mcp__db-coder-system-data__requeue_blocked_tasks",
-    ),
-  );
-
-  // Verify read-only MCP tools are NOT blocked
-  assert.ok(
-    !BRAIN_DISALLOWED.includes(
-      "mcp__db-coder-system-data__get_blocked_summary",
-    ),
-  );
-  assert.ok(
-    !BRAIN_DISALLOWED.includes("mcp__db-coder-system-data__get_recent_tasks"),
-  );
+  // Verify no MCP tool references remain
+  for (const tool of BRAIN_DISALLOWED) {
+    assert.ok(!tool.startsWith("mcp__"), `Unexpected MCP tool: ${tool}`);
+  }
 });
 
 // --- CodexSdkRuntime: sessionId resume fallback ---
