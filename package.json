@@ -8,12 +8,15 @@
   },
   "scripts": {
     "build": "rm -rf dist && tsc && cp -r src/web dist/web",
+    "build:test": "rm -rf dist-test && tsc -p tsconfig.test.json && cp -r src/web dist-test/src/web",
     "dev": "tsc --watch",
-    "pretest": "npm run build",
+    "pretest": "npm run build:test",
     "start": "node dist/index.js",
     "serve:supervised": "bash supervisor.sh",
-    "test": "sh -c 'if ! find dist -type f -name \"*.test.js\" -print -quit | grep -q .; then echo \"No compiled tests found in dist/.\"; exit 1; fi; node --test \"dist/**/*.test.js\"'",
-    "test:ci": "sh -c 'if ! find dist -type f -name \"*.test.js\" -print -quit | grep -q .; then echo \"No compiled tests found in dist/.\"; exit 1; fi; node --test \"dist/**/*.test.js\"'"
+    "test": "sh -c 'files=$(find dist-test/tests -name \"*.test.js\" ! -name \"*codex-brain-integration*\"); if [ -z \"$files\" ]; then echo \"No compiled tests found in dist-test/.\"; exit 1; fi; node --test $files'",
+    "test:ci": "sh -c 'files=$(find dist-test/tests -name \"*.test.js\" ! -name \"*codex-brain-integration*\"); if [ -z \"$files\" ]; then echo \"No compiled tests found in dist-test/.\"; exit 1; fi; node --test $files'",
+    "pretest:integration": "npm run build:test",
+    "test:integration": "sh -c 'files=$(find dist-test/tests -name \"*codex-brain-integration*.test.js\"); if [ -z \"$files\" ]; then echo \"No compiled integration tests found in dist-test/.\"; exit 1; fi; RUN_CODEX_INTEGRATION=1 node --test $files'"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.69",
