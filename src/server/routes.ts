@@ -8,6 +8,8 @@ import type { PatrolManager } from "../core/ModeManager.js";
 import type { PlanChatManager } from "../core/PlanChatManager.js";
 import type { StructuredCycleLogger } from "../core/observers/StructuredCycleLogger.js";
 import type { CycleMetricsCollector } from "../core/observers/CycleMetricsCollector.js";
+import type { SpawnReason } from "../memory/types.js";
+import { SPAWN_REASONS } from "../memory/types.js";
 import { log, type LogEntry } from "../utils/logger.js";
 import { isPositiveFinite, isRecord } from "../utils/parse.js";
 
@@ -56,6 +58,8 @@ export class HttpError extends Error {
 interface CreateTaskRequest {
   description: string;
   priority?: number;
+  parentTaskId?: string;
+  spawnReason?: SpawnReason;
 }
 
 type ValidationResult<T> =
@@ -392,11 +396,22 @@ route("POST", "/api/tasks", async (req, res, ctx) => {
     return;
   }
 
-  const { description, priority } = validation.value;
+  const { description, priority, parentTaskId, spawnReason } = validation.value;
+
+  if (parentTaskId) {
+    const parent = await ctx.taskStore.getTask(parentTaskId);
+    if (!parent || parent.project_path !== ctx.config.projectPath) {
+      json(res, { error: `Parent task ${parentTaskId} not found.` }, 404);
+      return;
+    }
+  }
+
   const task = await ctx.taskStore.createTask(
     ctx.config.projectPath,
     description,
     priority ?? 2,
+    [],
+    parentTaskId || spawnReason ? { parentTaskId, spawnReason } : undefined,
   );
   log.info(`Task added: ${description}`);
   json(res, task, 201);
@@ -529,8 +544,11 @@ route("GET", "/api/tasks/:id", async (_req, res, ctx, params) => {
     json(res, { error: "not found" }, 404);
     return;
   }
-  const logs = await ctx.taskStore.getTaskLogs(params.id);
-  json(res, { ...task, logs });
+  const [logs, childTasks] = await Promise.all([
+    ctx.taskStore.getTaskLogs(params.id),
+    ctx.taskStore.getChildTasks(params.id, ctx.config.projectPath),
+  ]);
+  json(res, { ...task, logs, childTasks });
 });
 
 route("DELETE", "/api/tasks/:id", async (_req, res, ctx, params) => {
@@ -1007,6 +1025,33 @@ function validateCreateTaskBody(
     normalizedPriority = priority;
   }
 
+  const rawParentTaskId = body.parentTaskId;
+  let parentTaskId: string | undefined;
+  if (rawParentTaskId !== undefined) {
+    if (typeof rawParentTaskId !== "string" || !validateUuid(rawParentTaskId)) {
+      return {
+        ok: false,
+        error: "parentTaskId must be a valid UUID.",
+      };
+    }
+    parentTaskId = rawParentTaskId;
+  }
+
+  const rawSpawnReason = body.spawnReason;
+  let spawnReason: SpawnReason | undefined;
+  if (rawSpawnReason !== undefined) {
+    if (
+      typeof rawSpawnReason !== "string" ||
+      !(SPAWN_REASONS as readonly string[]).includes(rawSpawnReason)
+    ) {
+      return {
+        ok: false,
+        error: `spawnReason must be one of: ${SPAWN_REASONS.join(", ")}.`,
+      };
+    }
+    spawnReason = rawSpawnReason as SpawnReason;
+  }
+
   return {
     ok: true,
     value: {
@@ -1014,6 +1059,8 @@ function validateCreateTaskBody(
       ...(normalizedPriority !== undefined
         ? { priority: normalizedPriority }
         : {}),
+      ...(parentTaskId !== undefined ? { parentTaskId } : {}),
+      ...(spawnReason !== undefined ? { spawnReason } : {}),
     },
   };
 }

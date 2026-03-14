@@ -439,3 +439,68 @@ describe("TaskStore plan draft JSONB columns", () => {
     assert.equal(taggedCalls[1].values[2], "approved");
   });
 });
+
+describe("TaskStore.createTask with parent-child options", () => {
+  test("includes parent_task_id and spawn_reason in INSERT when options provided", async () => {
+    const { sql, taggedCalls } = createSqlMock(() => [
+      {
+        id: "task-new",
+        project_path: "/repo",
+        task_description: "child",
+        status: "queued",
+      },
+    ]);
+    const store = createTaskStore(sql);
+
+    await store.createTask("/repo", "child task", 2, [], {
+      parentTaskId: "parent-uuid",
+      spawnReason: "split",
+    });
+
+    assert.equal(taggedCalls.length, 1);
+    assert.ok(taggedCalls[0].text.includes("parent_task_id"));
+    assert.ok(taggedCalls[0].text.includes("spawn_reason"));
+    assert.equal(taggedCalls[0].values[4], "parent-uuid");
+    assert.equal(taggedCalls[0].values[5], "split");
+  });
+
+  test("defaults parent_task_id and spawn_reason to null when options omitted", async () => {
+    const { sql, taggedCalls } = createSqlMock(() => [
+      {
+        id: "task-new",
+        project_path: "/repo",
+        task_description: "solo",
+        status: "queued",
+      },
+    ]);
+    const store = createTaskStore(sql);
+
+    await store.createTask("/repo", "solo task", 2);
+
+    assert.equal(taggedCalls.length, 1);
+    assert.ok(taggedCalls[0].text.includes("parent_task_id"));
+    assert.equal(taggedCalls[0].values[4], null);
+    assert.equal(taggedCalls[0].values[5], null);
+  });
+});
+
+describe("TaskStore.getChildTasks", () => {
+  test("queries by parent_task_id and project_path", async () => {
+    const childTask = {
+      id: "child-1",
+      parent_task_id: "parent-1",
+      project_path: "/repo",
+    };
+    const { sql, taggedCalls } = createSqlMock(() => [childTask]);
+    const store = createTaskStore(sql);
+
+    const result = await store.getChildTasks("parent-1", "/repo");
+
+    assert.equal(taggedCalls.length, 1);
+    assert.ok(taggedCalls[0].text.includes("parent_task_id = $1"));
+    assert.ok(taggedCalls[0].text.includes("project_path = $2"));
+    assert.deepEqual(taggedCalls[0].values, ["parent-1", "/repo"]);
+    assert.equal(result.length, 1);
+    assert.equal(result[0].id, "child-1");
+  });
+});

@@ -79,6 +79,7 @@ function createServerFixture(
       pageSize: 20,
     }),
     getTask: async () => null,
+    getChildTasks: async () => [],
     ...options.taskStore,
   } as unknown as TaskStore;
 
@@ -1645,4 +1646,189 @@ test("GET /api/plans/:id/stream handles sync first event during addListener with
 
   req.emit("close");
   assert.equal(removeCalls, 1);
+});
+
+// --- Parent-child task relationship tests ---
+
+test("GET /api/tasks/:id response includes childTasks array", async () => {
+  const taskId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const expectedTask = {
+    id: taskId,
+    task_description: "Parent task",
+    status: "done",
+    project_path: "/workspace/project",
+  } as unknown as Awaited<ReturnType<TaskStore["getTask"]>>;
+  const expectedLogs = [
+    { id: 1, phase: "execute", output_summary: "done" },
+  ] as unknown as Awaited<ReturnType<TaskStore["getTaskLogs"]>>;
+  const expectedChildren = [
+    {
+      id: "child-1",
+      task_description: "Child task",
+      status: "queued",
+      spawn_reason: "split",
+    },
+  ] as unknown as Awaited<ReturnType<TaskStore["getChildTasks"]>>;
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getTask: async (id) => (id === taskId ? expectedTask : null),
+      getTaskLogs: async () => expectedLogs,
+      getChildTasks: async (parentId, projectPath) => {
+        assert.equal(parentId, taskId);
+        assert.equal(projectPath, "/workspace/project");
+        return expectedChildren;
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "GET",
+    url: `/api/tasks/${taskId}`,
+    token,
+  });
+
+  assert.equal(state.statusCode, 200);
+  const body = parseJson<Record<string, unknown>>(state);
+  assert.equal(body.id, taskId);
+  assert.deepEqual(body.logs, expectedLogs);
+  assert.deepEqual(body.childTasks, expectedChildren);
+});
+
+test("POST /api/tasks with parentTaskId and spawnReason creates child task", async () => {
+  const parentId = "11111111-2222-3333-4444-555555555555";
+  let createOptions: unknown;
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getTask: async (id) => {
+        if (id === parentId) {
+          return {
+            id: parentId,
+            project_path: "/workspace/project",
+            task_description: "Parent",
+            status: "done",
+          } as unknown as Awaited<ReturnType<TaskStore["getTask"]>>;
+        }
+        return null;
+      },
+      createTask: async (_pp, _desc, _pri, _deps, opts) => {
+        createOptions = opts;
+        return { id: "child-1" } as unknown as Awaited<
+          ReturnType<TaskStore["createTask"]>
+        >;
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "POST",
+    url: "/api/tasks",
+    token,
+    body: {
+      description: "Fix child issue",
+      parentTaskId: parentId,
+      spawnReason: "split",
+    },
+  });
+
+  assert.equal(state.statusCode, 201);
+  assert.deepEqual(createOptions, {
+    parentTaskId: parentId,
+    spawnReason: "split",
+  });
+});
+
+test("POST /api/tasks returns 400 for invalid parentTaskId format", async () => {
+  const { server, token } = createServerFixture();
+
+  const state = await dispatch(server, {
+    method: "POST",
+    url: "/api/tasks",
+    token,
+    body: {
+      description: "Fix something",
+      parentTaskId: "not-a-uuid",
+    },
+  });
+
+  assert.equal(state.statusCode, 400);
+  const body = parseJson<{ error: string }>(state);
+  assert.ok(body.error.includes("parentTaskId"));
+});
+
+test("POST /api/tasks returns 400 for invalid spawnReason value", async () => {
+  const { server, token } = createServerFixture();
+
+  const state = await dispatch(server, {
+    method: "POST",
+    url: "/api/tasks",
+    token,
+    body: {
+      description: "Fix something",
+      spawnReason: "invalid-reason",
+    },
+  });
+
+  assert.equal(state.statusCode, 400);
+  const body = parseJson<{ error: string }>(state);
+  assert.ok(body.error.includes("spawnReason"));
+});
+
+test("POST /api/tasks returns 404 for nonexistent parentTaskId", async () => {
+  const nonExistentId = "99999999-aaaa-bbbb-cccc-dddddddddddd";
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getTask: async () => null,
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "POST",
+    url: "/api/tasks",
+    token,
+    body: {
+      description: "Fix something",
+      parentTaskId: nonExistentId,
+    },
+  });
+
+  assert.equal(state.statusCode, 404);
+  const body = parseJson<{ error: string }>(state);
+  assert.ok(body.error.includes(nonExistentId));
+});
+
+test("POST /api/tasks returns 404 when parent task belongs to different project", async () => {
+  const parentId = "11111111-2222-3333-4444-555555555555";
+
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getTask: async (id) => {
+        if (id === parentId) {
+          return {
+            id: parentId,
+            project_path: "/other/project",
+            task_description: "Different project task",
+            status: "done",
+          } as unknown as Awaited<ReturnType<TaskStore["getTask"]>>;
+        }
+        return null;
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "POST",
+    url: "/api/tasks",
+    token,
+    body: {
+      description: "Fix something",
+      parentTaskId: parentId,
+    },
+  });
+
+  assert.equal(state.statusCode, 404);
+  const body = parseJson<{ error: string }>(state);
+  assert.ok(body.error.includes(parentId));
 });

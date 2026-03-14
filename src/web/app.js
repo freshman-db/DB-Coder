@@ -719,10 +719,18 @@ async function stopPatrol() {
   }
 }
 
+const SPAWN_REASON_LABELS = {
+  split: "拆分",
+  "pre-existing": "预存问题",
+  "chain-scan": "链扫描",
+  "error-recovery": "错误恢复",
+};
+
 function renderTaskRow(t) {
   const st = getStatus(t.status);
   const pri = getPriorityStr(t.priority);
   const title = getTaskTitle(t);
+  const childPrefix = t.parent_task_id ? "↳ " : "";
   const evalScore = t.evaluation_score
     ? ` (评分: ${t.evaluation_score.total})`
     : "";
@@ -736,7 +744,7 @@ function renderTaskRow(t) {
   return `
     <div class="list-item" data-action="navigate" data-id="#/tasks/${escapeHtml(String(t.id ?? ""))}">
       <span class="status-icon" title="${st.label}">${st.icon}</span>
-      <span class="list-item-title">${escapeHtml(title)}${evalScore}</span>
+      <span class="list-item-title">${childPrefix}${escapeHtml(title)}${evalScore}</span>
       <span class="badge badge-${pri}">${priorityLabels[pri] || pri}</span>
       <span class="badge badge-${st.badge}">${st.label}</span>
       ${evalActions}
@@ -877,8 +885,10 @@ async function renderTaskDetail(id) {
     ${task.directive ? `<div class="card" style="margin-bottom:20px;"><div style="font-size:12px;color:var(--text-muted);">摘要: ${escapeHtml(fullDesc || "无描述")}</div></div>` : ""}
     ${renderStrategyNote(task)}
 
+    ${renderParentLink(task)}
     ${renderEvaluationInfo(task)}
     ${renderSubtasks(task.subtasks)}
+    ${renderChildTasks(task.childTasks)}
     ${renderTaskLogs(task.logs)}
   `;
 }
@@ -952,6 +962,50 @@ function renderSubtasks(subtasks) {
         .join("")}
     </div>
   `;
+}
+
+function renderParentLink(task) {
+  if (!task.parent_task_id) return "";
+  const reasonLabel =
+    SPAWN_REASON_LABELS[task.spawn_reason] || task.spawn_reason || "";
+  const reasonBadge = reasonLabel
+    ? ` <span class="badge badge-info">${escapeHtml(reasonLabel)}</span>`
+    : "";
+  return `
+    <div class="detail-meta" style="margin-bottom:12px;">
+      <div class="meta-item">
+        <div class="meta-label">来源任务</div>
+        <div class="meta-value">
+          <a href="#/tasks/${escapeHtml(String(task.parent_task_id))}" style="color:var(--accent);text-decoration:underline;cursor:pointer;">${escapeHtml(String(task.parent_task_id).slice(0, 8))}…</a>${reasonBadge}
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderChildTasks(childTasks) {
+  if (!childTasks || !Array.isArray(childTasks) || childTasks.length === 0)
+    return "";
+  return `
+    <h3 class="section-title">衍生任务 (${childTasks.length})</h3>
+    <div class="list-container">
+      ${childTasks
+        .map((t) => {
+          const st = getStatus(t.status);
+          const title = getTaskTitle(t);
+          const reasonLabel = SPAWN_REASON_LABELS[t.spawn_reason] || "";
+          const reasonBadge = reasonLabel
+            ? `<span class="badge badge-info">${escapeHtml(reasonLabel)}</span>`
+            : "";
+          return `<div class="list-item" data-action="navigate" data-id="#/tasks/${escapeHtml(String(t.id ?? ""))}">
+            <span class="status-icon" title="${st.label}">${st.icon}</span>
+            <span class="list-item-title">${escapeHtml(title)}</span>
+            ${reasonBadge}
+            <span class="badge badge-${st.badge}">${st.label}</span>
+            <span style="color:var(--text-muted);font-size:12px;min-width:70px;text-align:right;">${timeAgo(t.created_at)}</span>
+          </div>`;
+        })
+        .join("")}
+    </div>`;
 }
 
 function renderLogDetails(details, logId) {

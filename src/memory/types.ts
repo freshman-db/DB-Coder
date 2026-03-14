@@ -14,6 +14,14 @@ export interface Memory {
   updated_at: Date;
 }
 
+export const SPAWN_REASONS = [
+  "split",
+  "pre-existing",
+  "chain-scan",
+  "error-recovery",
+] as const;
+export type SpawnReason = (typeof SPAWN_REASONS)[number];
+
 export type TaskPhase =
   | "init"
   | "scanning"
@@ -49,6 +57,8 @@ export interface Task {
   git_branch: string | null;
   start_commit: string | null;
   depends_on: string[];
+  parent_task_id?: string | null;
+  spawn_reason?: SpawnReason | null;
   status: TaskStatus;
   created_at: Date;
   updated_at: Date;

@@ -1,15 +1,15 @@
-import { readFileSync, unlinkSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
-import type { TaskStore } from '../memory/TaskStore.js';
-import { log } from '../utils/logger.js';
+import { readFileSync, unlinkSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import type { TaskStore } from "../memory/TaskStore.js";
+import { log } from "../utils/logger.js";
 
-const BUILD_ERROR_FILE = 'build-error.json';
-const STARTUP_ERROR_FILE = 'startup-error.json';
+const BUILD_ERROR_FILE = "build-error.json";
+const STARTUP_ERROR_FILE = "startup-error.json";
 
 interface ErrorFile {
   timestamp: string;
-  type: 'build' | 'startup';
+  type: "build" | "startup";
   error: string;
   projectPath?: string;
 }
@@ -40,7 +40,7 @@ export async function checkAndRecoverErrors(
   projectPath: string,
   deps: ErrorRecoveryDeps = defaultDeps,
 ): Promise<number> {
-  const errorDir = join(deps.homedir(), '.db-coder');
+  const errorDir = join(deps.homedir(), ".db-coder");
   let recovered = 0;
 
   for (const filename of [BUILD_ERROR_FILE, STARTUP_ERROR_FILE]) {
@@ -48,13 +48,16 @@ export async function checkAndRecoverErrors(
     if (!deps.existsSync(filePath)) continue;
 
     try {
-      const raw = deps.readFileSync(filePath, 'utf-8');
+      const raw = deps.readFileSync(filePath, "utf-8");
       const errorData = JSON.parse(raw) as ErrorFile;
 
-      const errorType = errorData.type === 'build' ? 'Build failure' : 'Startup crash';
+      const errorType =
+        errorData.type === "build" ? "Build failure" : "Startup crash";
       const description = `[AUTO-RECOVERY] ${errorType}: ${errorData.error.slice(0, 500)}`;
 
-      await taskStore.createTask(projectPath, description, 0); // P0 = urgent
+      await taskStore.createTask(projectPath, description, 0, [], {
+        spawnReason: "error-recovery",
+      }); // P0 = urgent
       deps.log.warn(`Created P0 recovery task for ${errorType}`);
       recovered++;
 
@@ -62,7 +65,11 @@ export async function checkAndRecoverErrors(
     } catch (err) {
       deps.log.warn(`Failed to process error file ${filename}: ${err}`);
       // Remove corrupt file to avoid infinite loop
-      try { deps.unlinkSync(filePath); } catch { /* ignore */ }
+      try {
+        deps.unlinkSync(filePath);
+      } catch {
+        /* ignore */
+      }
     }
   }
 

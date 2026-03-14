@@ -156,7 +156,10 @@ ${reviewDiff}
       if (duplicate) {
         log.info(`Dedup preExisting: ${reason} — "${desc.slice(0, 80)}"`);
       } else {
-        await this.taskStore.createTask(projectPath, desc, 3);
+        await this.taskStore.createTask(projectPath, desc, 3, [], {
+          parentTaskId: task.id,
+          spawnReason: "pre-existing",
+        });
         log.info(`Queued pre-existing issue: ${desc.slice(0, 100)}`);
       }
     }

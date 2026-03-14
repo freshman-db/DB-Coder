@@ -1,5 +1,10 @@
 import { log } from "../utils/logger.js";
-import type { OperationalMetrics, Task, TaskLog } from "../memory/types.js";
+import type {
+  OperationalMetrics,
+  Task,
+  TaskLog,
+  SpawnReason,
+} from "../memory/types.js";
 
 // --- Typed response interfaces matching routes.ts ---
 
@@ -29,6 +34,7 @@ export interface ListTasksResponse {
 
 export interface GetTaskResponse extends Task {
   logs: TaskLog[];
+  childTasks: Task[];
 }
 
 export interface CostResponse {
@@ -51,8 +57,12 @@ export class Client {
     return this.get("/api/status");
   }
 
-  async addTask(description: string, priority = 2): Promise<Task> {
-    return this.post("/api/tasks", { description, priority });
+  async addTask(
+    description: string,
+    priority = 2,
+    options?: { parentTaskId?: string; spawnReason?: SpawnReason },
+  ): Promise<Task> {
+    return this.post("/api/tasks", { description, priority, ...options });
   }
 
   async listTasks(status?: string): Promise<ListTasksResponse> {

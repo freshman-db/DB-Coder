@@ -11,6 +11,7 @@ import type {
   ChatStatus,
   OperationalMetrics,
   Persona,
+  SpawnReason,
 } from "./types.js";
 import type { EvaluationScore } from "../core/types.js";
 import { getTodayBeijing } from "../utils/date.js";
@@ -120,6 +121,10 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS resource_request JSONB;
 -- Extended reflection details in task_logs
 ALTER TABLE task_logs ADD COLUMN IF NOT EXISTS details JSONB;
 
+-- Parent-child task relationships
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS parent_task_id UUID REFERENCES tasks(id) ON DELETE SET NULL;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS spawn_reason TEXT;
+
 
 CREATE TABLE IF NOT EXISTS service_state (
   project_path TEXT NOT NULL,
@@ -227,14 +232,26 @@ export class TaskStore {
     description: string,
     priority = 2,
     dependsOn: string[] = [],
+    options?: { parentTaskId?: string; spawnReason?: SpawnReason },
   ): Promise<Task> {
     const sql = this.getSql();
+    const parentTaskId = options?.parentTaskId ?? null;
+    const spawnReason = options?.spawnReason ?? null;
     const [row] = await sql<Task[]>`
-      INSERT INTO tasks (project_path, task_description, priority, depends_on)
-      VALUES (${projectPath}, ${description}, ${priority}, ${dependsOn})
+      INSERT INTO tasks (project_path, task_description, priority, depends_on, parent_task_id, spawn_reason)
+      VALUES (${projectPath}, ${description}, ${priority}, ${dependsOn}, ${parentTaskId}, ${spawnReason})
       RETURNING *
     `;
     return row;
+  }
+
+  async getChildTasks(parentId: string, projectPath: string): Promise<Task[]> {
+    const sql = this.getSql();
+    return sql<Task[]>`
+      SELECT * FROM tasks
+      WHERE parent_task_id = ${parentId} AND project_path = ${projectPath}
+      ORDER BY created_at ASC
+    `;
   }
 
   async getTask(id: string): Promise<Task | null> {

@@ -426,7 +426,9 @@ export class ChainScanner {
       );
       if (recentlyFailed) continue;
 
-      await this.taskStore.createTask(projectPath, desc, priority);
+      await this.taskStore.createTask(projectPath, desc, priority, [], {
+        spawnReason: "chain-scan",
+      });
       fingerprintSet.add(finding.fingerprint);
       tasksCreated++;
     }

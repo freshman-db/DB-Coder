@@ -1515,6 +1515,8 @@ Revise the previous proposal to address ALL issues above. Produce a complete upd
                   ctx.projectPath,
                   newTaskDesc,
                   2,
+                  [],
+                  { parentTaskId: task.id, spawnReason: "split" },
                 );
                 log.info(
                   `Split: created follow-up task: ${truncate(newTaskDesc, 100)}`,
@@ -1695,6 +1697,8 @@ Revise the previous proposal to address ALL issues above. Produce a complete upd
                         ctx.projectPath,
                         newTaskDesc,
                         2,
+                        [],
+                        { parentTaskId: task.id, spawnReason: "split" },
                       );
                       log.info(
                         `Split: created follow-up task: ${truncate(newTaskDesc, 100)}`,
