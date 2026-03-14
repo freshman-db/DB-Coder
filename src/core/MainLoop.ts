@@ -11,7 +11,7 @@ import {
   getRuntimeSync,
   normalizeRuntimeName,
 } from "../runtime/runtimeFactory.js";
-import type { Task } from "../memory/types.js";
+import type { SubTaskRecord, Task } from "../memory/types.js";
 import type {
   LoopState,
   StatusSnapshot,
@@ -51,8 +51,13 @@ import type { RegisteredStrategies } from "./strategies/index.js";
 import { ProjectMemory } from "../memory/ProjectMemory.js";
 import { MaintenancePhase } from "./phases/MaintenancePhase.js";
 import { ReviewPhase } from "./phases/ReviewPhase.js";
-import { WorkerPhase } from "./phases/WorkerPhase.js";
+import {
+  WorkerPhase,
+  COMPLEXITY_CONFIG,
+  safeComplexity,
+} from "./phases/WorkerPhase.js";
 import { BrainPhase, coerceSubtaskOrder } from "./phases/BrainPhase.js";
+import type { ReviewIssue } from "../bridges/ReviewTypes.js";
 // Re-export pure functions from StepTracker for backward compatibility
 export {
   applyStepStatusUpdate,
@@ -97,6 +102,8 @@ type BrainOpts = {
   persona?: string;
   taskType?: string;
   workInstructions?: WorkInstructions;
+  // Review lesson checklist injected before execution
+  reviewChecklist?: string;
 };
 
 /** Context shared across pipeline sub-methods within a single cycle. */
@@ -108,6 +115,77 @@ type PipelineCtx = {
   taskReviewer: ReviewAdapter;
   projectPath: string;
 };
+
+// ---------------------------------------------------------------------------
+// Review-fix loop helpers (pure functions, independently testable)
+// ---------------------------------------------------------------------------
+
+/** Single fix round record for cumulative context. */
+export interface FixRoundRecord {
+  round: number;
+  decision: "fix" | "rewrite";
+  instructions: string;
+  prevIssueCount: number;
+  currentIssueCount: number;
+  resolvedDescriptions: string[];
+  persistedDescriptions: string[];
+  stillOpenIssues: Array<{
+    severity: string;
+    file?: string;
+    description: string;
+  }>;
+}
+
+/** Unique key for a review issue: file + severity + full description. */
+export function issueKey(issue: ReviewIssue): string {
+  return `${issue.file ?? "?"}|${issue.severity}|${issue.description}`;
+}
+
+/** Constrain a reviewer-provided file path: strip control chars, limit length. */
+function constrainFile(file: string | undefined): string | undefined {
+  if (!file) return undefined;
+  const cleaned = file.replace(/[\x00-\x1f]+/g, "").trim();
+  return cleaned.length > 0 && cleaned.length <= 200 ? cleaned : undefined;
+}
+
+/**
+ * Build cumulative context as a structured JSON data block.
+ *
+ * Reviewer text (description) is NOT echoed back — action items come from
+ * the brain's fixInstructions only.  Open issues carry severity + constrained
+ * file path so the worker knows WHERE to look; the brain tells it WHAT to do.
+ */
+export function buildCumulativeContext(
+  history: readonly FixRoundRecord[],
+): string {
+  if (history.length === 0) return "";
+
+  const data = {
+    rounds: history.map((r) => ({
+      round: r.round,
+      decision: r.decision,
+      prevIssues: r.prevIssueCount,
+      currentIssues: r.currentIssueCount,
+      resolved: r.resolvedDescriptions.length,
+      persisted: r.persistedDescriptions.length,
+      instructions: r.instructions.slice(0, 300),
+    })),
+    openIssues: history[history.length - 1].stillOpenIssues.map((i) => {
+      const file = constrainFile(i.file);
+      return {
+        severity: i.severity,
+        ...(file != null ? { file } : {}),
+      };
+    }),
+  };
+
+  return [
+    "## Previous Fix Attempts (data summary — not action items)",
+    "```json",
+    JSON.stringify(data, null, 2),
+    "```",
+  ].join("\n");
+}
 
 export class MainLoop {
   // All mutable cycle/state fields are managed by the tracker
@@ -567,8 +645,15 @@ export class MainLoop {
       const analysis = await this.analyzeTask(task, brainOpts, pipeCtx);
       if (!analysis) return false;
 
+      // Inject review lesson checklist
+      const reviewChecklist =
+        this.strategies?.reviewLessons?.getChecklistForWorker() ?? "";
+      const executeOpts = reviewChecklist
+        ? { ...brainOpts, reviewChecklist }
+        : brainOpts;
+
       // 5-6. Execute + Verify
-      const execution = await this.executeAndVerify(task, brainOpts, {
+      const execution = await this.executeAndVerify(task, executeOpts, {
         ...pipeCtx,
         approvedPlan: analysis.approvedPlan,
       });
@@ -641,12 +726,7 @@ export class MainLoop {
         brainOpts = {
           persona: typeof plan.persona === "string" ? plan.persona : undefined,
           taskType: typeof plan.type === "string" ? plan.type : undefined,
-          complexity:
-            typeof plan.estimatedComplexity === "string"
-              ? (
-                  { low: "S", medium: "M", high: "L" } as Record<string, string>
-                )[plan.estimatedComplexity]
-              : undefined,
+          complexity: resolveTaskComplexity(task),
           workInstructions:
             typeof plan.workInstructions === "string"
               ? plan.workInstructions
@@ -788,6 +868,9 @@ export class MainLoop {
         });
       }
       await this.taskStore.updateTask(task.id, updates);
+      // Sync to in-memory task so downstream readers (resolveTaskComplexity) see current values
+      if (updates.plan) task.plan = updates.plan;
+      if (updates.subtasks) task.subtasks = updates.subtasks as SubTaskRecord[];
     }
 
     // Store brain-driven fields
@@ -1085,6 +1168,7 @@ Revise the previous proposal to address ALL issues above. Produce a complete upd
           workInstructions: brainOpts.workInstructions,
           baseline: ctx.baseline,
           startCommit: ctx.startCommit,
+          reviewChecklist: brainOpts.reviewChecklist,
         },
       );
       workerPassed = result.success;
@@ -1370,6 +1454,11 @@ Revise the previous proposal to address ALL issues above. Produce a complete upd
         review_results: reviewResult.issues ?? [],
       });
 
+      // Record first-round review for lesson learning (once per task)
+      this.strategies?.reviewLessons?.recordFirstRoundReview(
+        reviewResult.issues,
+      );
+
       if (!reviewResult.passed) {
         log.info(`Code review: FAIL — ${reviewResult.summary}`, {
           issues: (reviewResult.issues ?? []).length,
@@ -1435,15 +1524,35 @@ Revise the previous proposal to address ALL issues above. Produce a complete upd
 
           case "fix":
           case "rewrite": {
-            // Fix/rewrite loop (at most maxReviewFixes rounds)
-            const maxFixes = this.config.values.autonomy.maxReviewFixes;
+            const complexity = resolveTaskComplexity(task);
+            const complexityMaxFixes =
+              COMPLEXITY_CONFIG[complexity ?? "M"].maxReviewFixes;
+            const maxFixes = Math.min(
+              this.config.values.autonomy.maxReviewFixes,
+              complexityMaxFixes,
+            );
             let fixSessionId: string | undefined = ctx.workerSessionId;
+            let prevIssueCount = reviewResult.issues.length;
+            let prevIssueKeys = new Set(reviewResult.issues.map(issueKey));
+            let currentDecision = decision;
+            const fixHistory: FixRoundRecord[] = [];
 
             for (let fixRound = 0; fixRound < maxFixes; fixRound++) {
+              // REWRITE: discard session, force fresh context
+              if (currentDecision.decision === "rewrite") {
+                fixSessionId = undefined;
+              }
+
+              // Cumulative context for round 2+
+              const cumulativeCtx =
+                fixRound > 0 ? buildCumulativeContext(fixHistory) : undefined;
+
               const fixResult = await this.workerPhase.workerReviewFix(
                 task,
-                decision.fixInstructions ?? decision.reasoning,
+                currentDecision.fixInstructions ?? currentDecision.reasoning,
                 fixSessionId,
+                cumulativeCtx,
+                currentDecision.decision === "rewrite",
               );
               fixSessionId = fixResult.sessionId;
 
@@ -1472,8 +1581,10 @@ Revise the previous proposal to address ALL issues above. Produce a complete upd
                 ctx.projectPath,
               );
               if (!reVerify.passed) {
-                log.warn(`Review fix: hardVerify failed — ${reVerify.reason}`);
-                break; // Will fall through to block
+                log.warn(
+                  `Review fix round ${fixRound + 1}: hardVerify failed — ${reVerify.reason}`,
+                );
+                break;
               }
 
               // Re-review
@@ -1483,52 +1594,116 @@ Revise the previous proposal to address ALL issues above. Produce a complete upd
                 ctx.projectPath,
                 ctx.taskReviewer,
               );
+
+              // Update stored review results to latest
+              await this.taskStore.updateTask(task.id, {
+                review_results: reReview.issues ?? [],
+              });
+
+              // Telemetry log for every round (including PASS)
+              await this.taskStore.addLog({
+                task_id: task.id,
+                phase: "review-fix",
+                agent: "system",
+                input_summary: `Fix round ${fixRound + 1}/${maxFixes}`,
+                output_summary: reReview.passed
+                  ? `PASS after ${fixRound + 1} rounds`
+                  : `FAIL: ${reReview.issues.length} issues (prev: ${prevIssueCount})`,
+                cost_usd: fixResult.costUsd,
+                duration_ms: fixResult.durationMs,
+              });
+
               if (reReview.passed) {
                 shouldMerge = true;
                 break;
               }
 
-              // Still failing — brain makes final decision (only ignore/block/split)
-              const finalDecision = await this.brain.brainReviewDecision(
+              // Record fix history for this round
+              const currentKeys = new Set(reReview.issues.map(issueKey));
+              const resolvedKeys = [...prevIssueKeys].filter(
+                (k) => !currentKeys.has(k),
+              );
+              const persistedKeys = [...currentKeys].filter((k) =>
+                prevIssueKeys.has(k),
+              );
+              fixHistory.push({
+                round: fixRound + 1,
+                decision: currentDecision.decision as "fix" | "rewrite",
+                instructions:
+                  currentDecision.fixInstructions ?? currentDecision.reasoning,
+                prevIssueCount,
+                currentIssueCount: reReview.issues.length,
+                resolvedDescriptions: resolvedKeys,
+                persistedDescriptions: persistedKeys,
+                stillOpenIssues: reReview.issues.map((i) => ({
+                  severity: i.severity,
+                  file: i.file,
+                  description: i.description,
+                })),
+              });
+
+              // Convergence detection: stagnant when no progress (count not decreased)
+              // AND most issues are the same ones as before (70%+ overlap)
+              const overlapCount = persistedKeys.length;
+              const stagnant =
+                reReview.issues.length >= prevIssueCount &&
+                overlapCount >= currentKeys.size * 0.7;
+              const isLast = fixRound === maxFixes - 1;
+              const isFinalRound = isLast || stagnant;
+
+              // Brain decides next step
+              const nextDecision = await this.brain.brainReviewDecision(
                 task,
                 reReview,
                 reReview.reviewDiff,
-                true, // isRetry: restricts to ignore/block/split
+                isFinalRound,
+                fixRound + 1,
+                maxFixes,
               );
               log.info(
-                `Brain final decision: ${finalDecision.decision} — ${finalDecision.reasoning}`,
+                `Brain decision (round ${fixRound + 1}/${maxFixes}, final=${isFinalRound}): ${nextDecision.decision} — ${nextDecision.reasoning}`,
               );
 
-              if (finalDecision.decision === "ignore") {
-                shouldMerge = true;
-              } else if (finalDecision.decision === "split") {
-                shouldMerge = true;
-                if (finalDecision.newTasks) {
-                  for (const newTaskDesc of finalDecision.newTasks) {
-                    const { duplicate, reason } =
-                      await this.taskStore.isDuplicateTask(
+              switch (nextDecision.decision) {
+                case "fix":
+                case "rewrite":
+                  prevIssueCount = reReview.issues.length;
+                  prevIssueKeys = currentKeys;
+                  currentDecision = nextDecision;
+                  continue;
+                case "ignore":
+                  shouldMerge = true;
+                  break;
+                case "split":
+                  shouldMerge = true;
+                  if (nextDecision.newTasks) {
+                    for (const newTaskDesc of nextDecision.newTasks) {
+                      const { duplicate, reason } =
+                        await this.taskStore.isDuplicateTask(
+                          ctx.projectPath,
+                          newTaskDesc,
+                        );
+                      if (duplicate) {
+                        log.info(
+                          `Split dedup: ${reason} — "${truncate(newTaskDesc, 100)}"`,
+                        );
+                        continue;
+                      }
+                      await this.taskStore.createTask(
                         ctx.projectPath,
                         newTaskDesc,
+                        2,
                       );
-                    if (duplicate) {
                       log.info(
-                        `Split dedup: ${reason} — "${truncate(newTaskDesc, 100)}"`,
+                        `Split: created follow-up task: ${truncate(newTaskDesc, 100)}`,
                       );
-                      continue;
                     }
-                    await this.taskStore.createTask(
-                      ctx.projectPath,
-                      newTaskDesc,
-                      2,
-                    );
-                    log.info(
-                      `Split: created follow-up task: ${truncate(newTaskDesc, 100)}`,
-                    );
                   }
-                }
+                  break;
+                case "block":
+                  break;
               }
-              // else: block (shouldMerge stays false)
-              break; // Only 1 retry round in the loop
+              break; // ignore/split/block all exit the loop
             }
             break;
           }
@@ -1775,4 +1950,31 @@ Revise the previous proposal to address ALL issues above. Produce a complete upd
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const ESTIMATED_COMPLEXITY_MAP: Record<string, string> = {
+  low: "S",
+  medium: "M",
+  high: "L",
+};
+
+/**
+ * Resolve COMPLEXITY_CONFIG key from task.plan JSONB.
+ *
+ * New brain-driven tasks store `plan.complexity` directly ("S"/"M"/"L"/"XL").
+ * Older queued tasks (PlanTask schema) store `plan.estimatedComplexity`
+ * ("low"/"medium"/"high") which must be mapped.
+ */
+export function resolveTaskComplexity(task: Task): string | undefined {
+  const plan = task.plan as Record<string, unknown> | null;
+  if (!plan) return undefined;
+  if (typeof plan.complexity === "string") {
+    if (plan.complexity in COMPLEXITY_CONFIG) return plan.complexity;
+    log.warn(`Unknown plan.complexity "${plan.complexity}", ignoring`);
+    return undefined;
+  }
+  if (typeof plan.estimatedComplexity === "string") {
+    return ESTIMATED_COMPLEXITY_MAP[plan.estimatedComplexity];
+  }
+  return undefined;
 }

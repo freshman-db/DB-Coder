@@ -169,6 +169,14 @@ export function validateConfig(
       integer: true,
       min: 1,
     });
+    if (autonomy.maxReviewFixes !== undefined) {
+      validateNumber(
+        autonomy.maxReviewFixes,
+        "autonomy.maxReviewFixes",
+        issues,
+        { integer: true, min: 1 },
+      );
+    }
   }
 
   const routing = requireRecord(config.routing, "routing", issues);

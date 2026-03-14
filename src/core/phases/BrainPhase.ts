@@ -568,7 +568,9 @@ Be decisive. Minor reviewer concerns should not block a good plan — use APPROV
     task: Task,
     reviewResult: ReviewResult,
     diff: string,
-    isRetry: boolean,
+    isFinalRound: boolean,
+    fixRound?: number,
+    maxFixes?: number,
   ): Promise<{
     decision: "fix" | "ignore" | "block" | "rewrite" | "split";
     reasoning: string;
@@ -598,7 +600,7 @@ Be decisive. Minor reviewer concerns should not block a good plan — use APPROV
         desc: "Merge what works, create new tasks for unresolved issues",
       },
     ];
-    const allowed = isRetry
+    const allowed = isFinalRound
       ? allDecisions.filter((d) => ["IGNORE", "BLOCK", "SPLIT"].includes(d.key))
       : allDecisions;
     const allowedKeys = allowed.map((d) => d.key).join(", ");
@@ -631,7 +633,7 @@ ${diff.slice(0, 100_000)}
 
 ## Available Decisions
 ${decisionList}
-${isRetry ? "\nThis is a RETRY — the worker already attempted one fix." : ""}
+${isFinalRound ? "\nThis is the FINAL round — no more fix attempts allowed." : fixRound != null && maxFixes != null ? `\nThis is fix round ${fixRound} of ${maxFixes}. You may choose FIX to continue.` : ""}
 
 ## Output
 Your FIRST LINE must be one of: ${allowedKeys}
@@ -651,13 +653,13 @@ For SPLIT, the NEW_TASKS: delimiter and task list are REQUIRED.`;
       task_id: task.id,
       phase: "reviewing",
       agent: "brain-decision",
-      input_summary: `Review decision (retry=${isRetry})`,
+      input_summary: `Review decision (final=${isFinalRound}${fixRound != null ? `, round=${fixRound}/${maxFixes}` : ""})`,
       output_summary: result.text,
       cost_usd: result.costUsd,
       duration_ms: result.durationMs,
     });
 
-    return parseReviewDecision(result.text, isRetry);
+    return parseReviewDecision(result.text, isFinalRound);
   }
 
   // --- Brain reflection ---
@@ -802,7 +804,7 @@ export interface ParsedReviewDecision {
 
 export function parseReviewDecision(
   rawText: string,
-  isRetry: boolean,
+  isFinalRound: boolean,
 ): ParsedReviewDecision {
   const text = rawText.trim();
   const firstLine = text.split("\n")[0].trim().toUpperCase();
@@ -826,7 +828,7 @@ export function parseReviewDecision(
   const body = [firstLineRemainder, restLines].filter(Boolean).join("\n");
 
   if (decision) {
-    const allowed: ReviewDecision[] = isRetry
+    const allowed: ReviewDecision[] = isFinalRound
       ? ["ignore", "block", "split"]
       : ["fix", "ignore", "block", "rewrite", "split"];
 

@@ -52,15 +52,21 @@ interface ComplexityConfig {
   maxTurns: number;
   maxBudget: number;
   timeout: number;
+  maxReviewFixes: number;
 }
 
 /** Default resource limits per complexity level (model is handled by routing config). */
 export const COMPLEXITY_CONFIG: Record<string, ComplexityConfig> = {
-  S: { maxTurns: 100, maxBudget: 5.0, timeout: 600_000 },
-  M: { maxTurns: 200, maxBudget: 10.0, timeout: 1_200_000 },
-  L: { maxTurns: 200, maxBudget: 15.0, timeout: 2_400_000 },
-  XL: { maxTurns: 200, maxBudget: 20.0, timeout: 3_600_000 },
+  S: { maxTurns: 100, maxBudget: 5.0, timeout: 600_000, maxReviewFixes: 1 },
+  M: { maxTurns: 200, maxBudget: 10.0, timeout: 1_200_000, maxReviewFixes: 2 },
+  L: { maxTurns: 200, maxBudget: 15.0, timeout: 2_400_000, maxReviewFixes: 3 },
+  XL: { maxTurns: 200, maxBudget: 20.0, timeout: 3_600_000, maxReviewFixes: 3 },
 };
+
+/** Return validated complexity key, falling back to "M" for unknown values. */
+export function safeComplexity(raw: string | undefined | null): string {
+  return raw && raw in COMPLEXITY_CONFIG ? raw : "M";
+}
 
 /**
  * Resolve a model ID from brain's resource_request.
@@ -156,6 +162,7 @@ export class WorkerPhase {
         timeout_s: number;
         model?: string;
       };
+      reviewChecklist?: string;
     },
   ): Promise<WorkerResult> {
     // Reset per-task runtime tracking (set again by execute paths below)
@@ -180,20 +187,24 @@ export class WorkerPhase {
     // Full prompt for new sessions or when resume fails silently (e.g. Codex
     // with non-full-auto sandbox).  Adapter uses resumePrompt when it can
     // actually resume, falling back to the full prompt otherwise.
+    const checklistSuffix = opts?.reviewChecklist
+      ? `\n\n${opts.reviewChecklist}`
+      : "";
     const prompt = opts?.approvedPlan
-      ? `${basePrompt}\n\n## Approved Implementation Plan\nFollow this plan that was reviewed and approved:\n\n${opts.approvedPlan}`
-      : basePrompt;
+      ? `${basePrompt}\n\n## Approved Implementation Plan\nFollow this plan that was reviewed and approved:\n\n${opts.approvedPlan}${checklistSuffix}`
+      : `${basePrompt}${checklistSuffix}`;
 
     const resumePrompt = opts?.resumeSessionId
-      ? `--- NEXT SUBTASK ---\n${description}\n\n${opts?.approvedPlan ? `## Approved Plan\n${opts.approvedPlan}\n\n` : ""}Continue working in this session.`
+      ? `--- NEXT SUBTASK ---\n${description}\n\n${opts?.approvedPlan ? `## Approved Plan\n${opts.approvedPlan}\n\n` : ""}${opts?.reviewChecklist ? `${opts.reviewChecklist}\n\n` : ""}Continue working in this session.`
       : undefined;
 
-    const complexity =
+    const rawComplexity =
       opts?.complexity ??
       ((task.plan as Record<string, unknown> | null)?.complexity as
         | string
         | undefined);
-    const cConfig = COMPLEXITY_CONFIG[complexity ?? "M"];
+    const complexity = safeComplexity(rawComplexity);
+    const cConfig = COMPLEXITY_CONFIG[complexity];
 
     const model = this.resolveWorkerModel();
 
@@ -229,12 +240,17 @@ export class WorkerPhase {
       approvedPlan?: string;
       resumeSessionId?: string;
       complexity?: string;
+      reviewChecklist?: string;
     },
   ): Promise<WorkerResult> {
     const { GLOBAL_WORKER_RULES } = await import("../PersonaLoader.js");
 
     // directive is the primary prompt; worker rules are supplementary
     let prompt = `${opts.directive}\n\nRead CLAUDE.md for project context and environment rules.\n\n${GLOBAL_WORKER_RULES}`;
+
+    if (opts.reviewChecklist) {
+      prompt += `\n\n${opts.reviewChecklist}`;
+    }
 
     if (opts.approvedPlan) {
       prompt += `\n\n## Approved Implementation Plan\n${opts.approvedPlan}`;
@@ -252,7 +268,7 @@ export class WorkerPhase {
       : this.config.values.claude.maxTaskBudget;
     const timeout = rr
       ? Math.min(rr.timeout_s * 1000, 3_600_000) // hard cap 1h
-      : COMPLEXITY_CONFIG[opts.complexity ?? "M"].timeout;
+      : COMPLEXITY_CONFIG[safeComplexity(opts.complexity)].timeout;
 
     // Model: resolve brain's model request, then validate worker compatibility.
     const defaultModel = this.resolveWorkerModel();
@@ -271,10 +287,11 @@ export class WorkerPhase {
     this.lastEffectiveRuntime = effectiveRuntime;
 
     const resumePrompt = opts.resumeSessionId
-      ? `Continue working on this task.\n\n${opts.approvedPlan ? `## Approved Plan\n${opts.approvedPlan}\n\n` : ""}Proceed.`
+      ? `Continue working on this task.\n\n${opts.approvedPlan ? `## Approved Plan\n${opts.approvedPlan}\n\n` : ""}${opts.reviewChecklist ? `${opts.reviewChecklist}\n\n` : ""}Proceed.`
       : undefined;
 
-    const complexityTurns = COMPLEXITY_CONFIG[opts.complexity ?? "M"].maxTurns;
+    const complexityTurns =
+      COMPLEXITY_CONFIG[safeComplexity(opts.complexity)].maxTurns;
     const maxTurns = rr
       ? Math.min(this.config.values.claude.maxTurns, complexityTurns)
       : complexityTurns;
@@ -382,15 +399,34 @@ export class WorkerPhase {
     task: Task,
     fixInstructions: string,
     sessionId?: string,
-  ): Promise<{ costUsd: number; sessionId?: string; isError: boolean }> {
-    const prompt = `The code review found issues that need fixing.
+    cumulativeContext?: string,
+    isRewrite?: boolean,
+  ): Promise<{
+    costUsd: number;
+    durationMs: number;
+    sessionId?: string;
+    isError: boolean;
+  }> {
+    const cumulativeCtx = cumulativeContext ? `\n${cumulativeContext}\n` : "";
+
+    const prompt = isRewrite
+      ? `The previous approach was fundamentally wrong. A rewrite is needed.
+
+## Original Task
+${task.task_description}
+
+## Rewrite Instructions
+${fixInstructions}
+${cumulativeCtx}
+Implement a fresh solution following the new instructions. You may discard the previous approach entirely.`
+      : `The code review found issues that need fixing.
 
 ## Original Task
 ${task.task_description}
 
 ## Fix Instructions
 ${fixInstructions}
-
+${cumulativeCtx}
 Fix these issues. Do not make unrelated changes.`;
 
     // Use the same runtime that executed the task (see workerFix comment)
@@ -414,7 +450,7 @@ Fix these issues. Do not make unrelated changes.`;
       task_id: task.id,
       phase: "executing",
       agent: `${this.effectiveRuntimeName}-review-fix`,
-      input_summary: "Review fix",
+      input_summary: isRewrite ? "Review rewrite" : "Review fix",
       output_summary: result.text,
       cost_usd: result.costUsd,
       duration_ms: result.durationMs,
@@ -422,6 +458,7 @@ Fix these issues. Do not make unrelated changes.`;
 
     return {
       costUsd: result.costUsd,
+      durationMs: result.durationMs,
       sessionId: result.sessionId,
       isError: result.isError,
     };
@@ -479,7 +516,7 @@ Produce a structured proposal with:
 Be specific: include function signatures, type definitions, and concrete code snippets where helpful.`;
     }
 
-    const complexity = brainOpts?.complexity ?? "M";
+    const complexity = safeComplexity(brainOpts?.complexity);
     const cConfig = COMPLEXITY_CONFIG[complexity];
 
     const runResult = await this.worker.run(analyzePrompt, {
@@ -531,6 +568,7 @@ Be specific: include function signatures, type definitions, and concrete code sn
       workInstructions?: WorkInstructions;
       baseline: VerifyBaseline;
       startCommit: string;
+      reviewChecklist?: string;
     },
   ): Promise<{
     success: boolean;
@@ -639,6 +677,7 @@ Be specific: include function signatures, type definitions, and concrete code sn
         workInstructions: opts.workInstructions,
         subtaskDescription: st.description,
         resumeSessionId: lastSuccessfulSessionId,
+        reviewChecklist: opts.reviewChecklist,
       });
 
       if (result.costUsd > 0)

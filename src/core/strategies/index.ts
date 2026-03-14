@@ -1,7 +1,11 @@
-import type { CycleEventBus } from '../CycleEventBus.js';
-import { FailureLearningStrategy } from './FailureLearningStrategy.js';
-import { TaskQualityEvaluator } from './TaskQualityEvaluator.js';
-import { DynamicPriorityStrategy, type GetProjectHealthFn } from './DynamicPriorityStrategy.js';
+import type { CycleEventBus } from "../CycleEventBus.js";
+import { FailureLearningStrategy } from "./FailureLearningStrategy.js";
+import { TaskQualityEvaluator } from "./TaskQualityEvaluator.js";
+import {
+  DynamicPriorityStrategy,
+  type GetProjectHealthFn,
+} from "./DynamicPriorityStrategy.js";
+import { ReviewLessonStrategy } from "./ReviewLessonStrategy.js";
 
 export interface StrategyDeps {
   getProjectHealth: GetProjectHealthFn;
@@ -11,19 +15,24 @@ export interface RegisteredStrategies {
   failureLearning: FailureLearningStrategy;
   qualityEvaluator: TaskQualityEvaluator;
   dynamicPriority: DynamicPriorityStrategy;
+  reviewLessons: ReviewLessonStrategy;
 }
 
-export function registerStrategies(bus: CycleEventBus, deps: StrategyDeps): RegisteredStrategies {
+export function registerStrategies(
+  bus: CycleEventBus,
+  deps: StrategyDeps,
+): RegisteredStrategies {
   const failureLearning = new FailureLearningStrategy();
   const qualityEvaluator = new TaskQualityEvaluator();
   const dynamicPriority = new DynamicPriorityStrategy(deps.getProjectHealth);
+  const reviewLessons = new ReviewLessonStrategy();
 
-  bus.on('after:verify', (e) => {
+  bus.on("after:verify", (e) => {
     const v = e.data.verification as { passed: boolean } | undefined;
     if (v && !v.passed) failureLearning.recordFailure(e);
   });
-  bus.on('error:execute', (e) => failureLearning.recordFailure(e));
-  bus.on('after:merge', (e) => {
+  bus.on("error:execute", (e) => failureLearning.recordFailure(e));
+  bus.on("after:merge", (e) => {
     if (e.data.merged) {
       qualityEvaluator.evaluate(e);
       const desc = e.data.taskDescription as string | undefined;
@@ -31,7 +40,12 @@ export function registerStrategies(bus: CycleEventBus, deps: StrategyDeps): Regi
     }
   });
 
-  return { failureLearning, qualityEvaluator, dynamicPriority };
+  return { failureLearning, qualityEvaluator, dynamicPriority, reviewLessons };
 }
 
-export { FailureLearningStrategy, TaskQualityEvaluator, DynamicPriorityStrategy };
+export {
+  FailureLearningStrategy,
+  TaskQualityEvaluator,
+  DynamicPriorityStrategy,
+  ReviewLessonStrategy,
+};
