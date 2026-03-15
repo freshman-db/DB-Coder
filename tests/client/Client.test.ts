@@ -105,13 +105,26 @@ test("patrolStop sends POST to /api/patrol/stop with auth", async () => {
   );
 });
 
-test("approveTask sends POST to /api/tasks/:id/approve", async () => {
+test("approveTask sends POST to /api/tasks/:id/approve without notes", async () => {
   const calls = await withMockFetch(async (client) => {
     await client.approveTask("abc-123");
   });
   assert.equal(calls.length, 1);
   assert.ok(calls[0].url.endsWith("/api/tasks/abc-123/approve"));
   assert.equal(calls[0].init.method, "POST");
+  // No body when notes not provided
+  assert.equal(calls[0].init.body, undefined);
+});
+
+test("approveTask sends POST with notes body when notes provided", async () => {
+  const calls = await withMockFetch(async (client) => {
+    await client.approveTask("abc-123", "请使用策略模式重构");
+  });
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].url.endsWith("/api/tasks/abc-123/approve"));
+  assert.equal(calls[0].init.method, "POST");
+  const body = JSON.parse(calls[0].init.body as string);
+  assert.equal(body.notes, "请使用策略模式重构");
 });
 
 test("skipTask sends POST to /api/tasks/:id/skip", async () => {

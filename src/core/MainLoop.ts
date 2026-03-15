@@ -192,6 +192,7 @@ export class MainLoop {
   private tracker = new CycleStepTracker();
   private lockFile: string;
   private restartPending = false;
+  private extraTasksEnqueued = false;
   private restartListeners = new Set<() => void>();
   private stoppedPromise: Promise<void> | null = null;
   private stoppedResolve: (() => void) | null = null;
@@ -546,10 +547,17 @@ export class MainLoop {
           break;
         }
 
-        // Productive cycle → short pause then continue; idle → scanInterval
-        await sleep(
-          wasProductive ? 10_000 : this.config.values.brain.scanInterval * 1000,
-        );
+        // Extra tasks just enqueued (e.g. human review gate) → pick up immediately
+        if (this.extraTasksEnqueued) {
+          this.extraTasksEnqueued = false;
+        } else {
+          // Productive cycle → short pause; idle → scanInterval
+          await sleep(
+            wasProductive
+              ? 10_000
+              : this.config.values.brain.scanInterval * 1000,
+          );
+        }
       }
     } finally {
       this.releaseLock();
@@ -792,7 +800,8 @@ export class MainLoop {
       similar &&
       (similar.status === "queued" ||
         similar.status === "active" ||
-        similar.status === "done")
+        similar.status === "done" ||
+        similar.status === "pending_review")
     ) {
       log.info(
         `Dedup: skipping task similar to [${similar.status}] "${truncate(similar.task_description, 80)}"`,
@@ -898,8 +907,43 @@ export class MainLoop {
         resource_request: decision.resourceRequest ?? null,
         directive_length: decision.directive?.length ?? 0,
         extra_tasks_count: decision.extraDirectiveTasks?.length ?? 0,
+        requires_human_review: decision.requiresHumanReview ?? false,
+        review_reason: decision.reviewReason ?? null,
       },
     });
+
+    // Human review gate: if brain flagged this task, set pending_review and abort execution
+    if (decision.requiresHumanReview) {
+      await this.taskStore.updateTask(task.id, {
+        status: "pending_review",
+        review_reason: decision.reviewReason ?? null,
+      });
+      await this.taskStore.addLog({
+        task_id: task.id,
+        phase: "decide",
+        agent: "brain",
+        input_summary: "Human review gate triggered",
+        output_summary: `Awaiting human review: ${decision.reviewReason ?? "no reason given"}`,
+        cost_usd: null,
+        duration_ms: null,
+      });
+      log.info(
+        `Task ${task.id} sent to human review: ${decision.reviewReason ?? "no reason"}`,
+      );
+      // Await enqueue so tasks are in DB before next cycle picks up the queue
+      const extraEnqueued = await this.enqueueExtraTasks(projectPath, decision);
+      // Signal that extra tasks were actually enqueued so main loop skips sleep
+      if (extraEnqueued > 0) {
+        this.extraTasksEnqueued = true;
+      }
+      this.endStep("create-task", "done", "Pending human review");
+      this.skipRemainingSteps("create-task");
+      // Clear description before broadcasts so no SSE snapshot carries stale values
+      this.tracker.setCurrentTaskDescription(null);
+      this.setCurrentTaskId(null);
+      this.setState("idle");
+      return null;
+    }
 
     const brainOpts: BrainOpts = {
       complexity: decision.complexity,
@@ -908,42 +952,61 @@ export class MainLoop {
       resourceRequest: decision.resourceRequest,
     };
 
-    // Enqueue extra tasks from brain-driven batch output
-    if (
-      decision.extraDirectiveTasks &&
-      decision.extraDirectiveTasks.length > 0
-    ) {
-      try {
-        const planTasks: PlanTask[] = decision.extraDirectiveTasks.map(
-          (et, i) => ({
-            id: `extra-bd-${i + 1}`,
-            description: et.directive.slice(0, 120), // summary for queue display
-            priority: 2,
-            executor: "claude" as const,
-            subtasks: [],
-            dependsOn: [],
-            estimatedComplexity: "medium" as const,
-            // Brain-driven fields preserved in plan JSONB for queue pickup
-            directive: et.directive,
-            resourceRequest: et.resourceRequest,
-            isBrainDriven: true,
-          }),
-        );
-        const plan: TaskPlan = {
-          tasks: planTasks,
-          reasoning: "Extra tasks from brain-driven batch output",
-        };
-        const enqueuedIds = await this.taskQueue.enqueue(projectPath, plan);
-        if (enqueuedIds.length > 0) {
-          log.info(`Enqueued ${enqueuedIds.length} extra brain-driven task(s)`);
-        }
-      } catch (err) {
-        log.warn(`Failed to enqueue brain-driven extra tasks: ${err}`);
-      }
-    }
+    // Enqueue extra tasks from brain-driven batch output (fire-and-forget;
+    // errors are handled internally, no need to block primary task execution)
+    void this.enqueueExtraTasks(projectPath, decision);
 
     this.endStep("create-task", "done");
     return { task, brainOpts };
+  }
+
+  /** Enqueue extra tasks from brain-driven batch output (if any).
+   *  Returns the number of tasks actually enqueued. */
+  private async enqueueExtraTasks(
+    projectPath: string,
+    decision: Awaited<ReturnType<BrainPhase["brainDecide"]>>,
+  ): Promise<number> {
+    if (
+      !decision.extraDirectiveTasks ||
+      decision.extraDirectiveTasks.length === 0
+    ) {
+      return 0;
+    }
+    const extra = decision.extraDirectiveTasks;
+    const planTasks: PlanTask[] = extra.map((et, i) => ({
+      id: `extra-bd-${i + 1}`,
+      description: et.directive.slice(0, 120),
+      priority: 2,
+      executor: "claude" as const,
+      subtasks: [],
+      dependsOn: [],
+      estimatedComplexity: "medium" as const,
+      directive: et.directive,
+      resourceRequest: et.resourceRequest,
+      isBrainDriven: true,
+      requiresHumanReview: et.requiresHumanReview,
+      reviewReason: et.reviewReason,
+    }));
+    const plan: TaskPlan = {
+      tasks: planTasks,
+      reasoning: "Extra tasks from brain-driven batch output",
+    };
+    try {
+      const result = await this.taskQueue.enqueue(projectPath, plan);
+      const total = result.queuedIds.length + result.pendingReviewIds.length;
+      if (total > 0) {
+        log.info(
+          `Enqueued ${total} extra brain-driven task(s)` +
+            (result.pendingReviewIds.length > 0
+              ? ` (${result.pendingReviewIds.length} pending review)`
+              : ""),
+        );
+      }
+      return result.queuedIds.length;
+    } catch (err) {
+      log.warn(`Failed to enqueue brain-driven extra tasks: ${err}`);
+      return 0;
+    }
   }
 
   /** Analyze → Review → Synthesize loop for M/L/XL tasks. Returns null to abort. */

@@ -1614,6 +1614,138 @@ test("POST /api/tasks/:id/skip returns 400 for invalid UUID", async () => {
   assert.equal(state.statusCode, 400);
 });
 
+test("POST /api/tasks/:id/approve with notes updates directive and plan.directive", async () => {
+  const validId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const updates: Record<string, unknown>[] = [];
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getTask: async (id: string) => {
+        if (id === validId) {
+          return {
+            id: validId,
+            status: "pending_review" as const,
+            directive: "original directive",
+            plan: { directive: "original directive", complexity: "M" },
+            project_path: "/test",
+            task_description: "test task",
+            phase: "init" as const,
+            priority: 2,
+            subtasks: [],
+            review_results: [],
+            iteration: 0,
+            total_cost_usd: 0,
+            git_branch: null,
+            start_commit: null,
+            depends_on: [],
+            created_at: new Date(),
+            updated_at: new Date(),
+          };
+        }
+        return null;
+      },
+      getChildTasks: async () => [],
+      updateTask: async (_id: string, u: Record<string, unknown>) => {
+        updates.push(u);
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "POST",
+    url: `/api/tasks/${validId}/approve`,
+    token,
+    body: { notes: "use strategy pattern" },
+  });
+
+  assert.equal(state.statusCode, 200);
+  const result = parseJson<{
+    ok: boolean;
+    status: string;
+    notes: string | null;
+  }>(state);
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "queued");
+  assert.equal(result.notes, "use strategy pattern");
+
+  // Verify updates include directive, plan, and human_notes
+  assert.equal(updates.length, 1);
+  const u = updates[0];
+  assert.equal(u.status, "queued");
+  assert.equal(u.human_notes, "use strategy pattern");
+  assert.ok(typeof u.directive === "string");
+  assert.ok(
+    (u.directive as string).includes("[人工方向]: use strategy pattern"),
+  );
+  assert.ok((u.directive as string).includes("original directive"));
+  // plan.directive should also be updated
+  assert.ok(u.plan != null);
+  const plan = u.plan as Record<string, unknown>;
+  assert.ok(typeof plan.directive === "string");
+  assert.ok(
+    (plan.directive as string).includes("[人工方向]: use strategy pattern"),
+  );
+});
+
+test("POST /api/tasks/:id/approve without notes does not modify directive", async () => {
+  const validId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const updates: Record<string, unknown>[] = [];
+  const { server, token } = createServerFixture({
+    taskStore: {
+      getTask: async (id: string) => {
+        if (id === validId) {
+          return {
+            id: validId,
+            status: "pending_review" as const,
+            directive: "original directive",
+            plan: null,
+            project_path: "/test",
+            task_description: "test task",
+            phase: "init" as const,
+            priority: 2,
+            subtasks: [],
+            review_results: [],
+            iteration: 0,
+            total_cost_usd: 0,
+            git_branch: null,
+            start_commit: null,
+            depends_on: [],
+            created_at: new Date(),
+            updated_at: new Date(),
+          };
+        }
+        return null;
+      },
+      getChildTasks: async () => [],
+      updateTask: async (_id: string, u: Record<string, unknown>) => {
+        updates.push(u);
+      },
+    },
+  });
+
+  const state = await dispatch(server, {
+    method: "POST",
+    url: `/api/tasks/${validId}/approve`,
+    token,
+    body: {},
+  });
+
+  assert.equal(state.statusCode, 200);
+  const result = parseJson<{
+    ok: boolean;
+    status: string;
+    notes: string | null;
+  }>(state);
+  assert.equal(result.ok, true);
+  assert.equal(result.notes, null);
+
+  // Only status should be updated, no directive changes
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].status, "queued");
+  assert.equal(updates[0].directive, undefined);
+  assert.equal(updates[0].human_notes, undefined);
+  assert.equal(updates[0].plan, undefined);
+});
+
 test("GET /api/plans/:id/stream handles sync first event during addListener without listener leak", async () => {
   let removeCalls = 0;
 

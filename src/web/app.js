@@ -734,12 +734,16 @@ function renderTaskRow(t) {
   const evalScore = t.evaluation_score
     ? ` (评分: ${t.evaluation_score.total})`
     : "";
-  const evalActions =
+  const reviewActions =
     t.status === "pending_review"
       ? `
     <button class="btn btn-sm btn-primary" data-action="approveTask" data-id="${escapeHtml(String(t.id ?? ""))}" onclick="event.stopPropagation()">通过</button>
     <button class="btn btn-sm btn-secondary" data-action="skipTask" data-id="${escapeHtml(String(t.id ?? ""))}" onclick="event.stopPropagation()">跳过</button>
   `
+      : "";
+  const reviewSnippet =
+    t.status === "pending_review" && t.review_reason
+      ? `<span style="color:var(--warning, #f59e0b);font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(t.review_reason)}">${escapeHtml(t.review_reason.slice(0, 40))}</span>`
       : "";
   return `
     <div class="list-item" data-action="navigate" data-id="#/tasks/${escapeHtml(String(t.id ?? ""))}">
@@ -747,7 +751,8 @@ function renderTaskRow(t) {
       <span class="list-item-title">${childPrefix}${escapeHtml(title)}${evalScore}</span>
       <span class="badge badge-${pri}">${priorityLabels[pri] || pri}</span>
       <span class="badge badge-${st.badge}">${st.label}</span>
-      ${evalActions}
+      ${reviewSnippet}
+      ${reviewActions}
       <span style="color:var(--text-muted);font-size:12px;min-width:70px;text-align:right;">${timeAgo(t.created_at)}</span>
     </div>
   `;
@@ -883,6 +888,7 @@ async function renderTaskDetail(id) {
       <div style="font-size:13px;line-height:1.7;color:var(--text-secondary);">${task.directive ? renderMarkdown(task.directive) : `<div style="white-space:pre-wrap;">${escapeHtml(body || fullDesc || "无描述")}</div>`}</div>
     </div>
     ${task.directive ? `<div class="card" style="margin-bottom:20px;"><div style="font-size:12px;color:var(--text-muted);">摘要: ${escapeHtml(fullDesc || "无描述")}</div></div>` : ""}
+    ${renderReviewReason(task)}
     ${renderStrategyNote(task)}
 
     ${renderParentLink(task)}
@@ -891,6 +897,32 @@ async function renderTaskDetail(id) {
     ${renderChildTasks(task.childTasks)}
     ${renderTaskLogs(task.logs)}
   `;
+}
+
+function renderReviewReason(task) {
+  const isPending = task.status === "pending_review";
+  if (!isPending && !task.review_reason && !task.human_notes) return "";
+  return `
+    <div class="card" style="margin-bottom:20px;border-left:4px solid ${isPending ? "var(--warning, #f59e0b)" : "var(--text-muted, #888)"};">
+      <div style="font-size:13px;font-weight:600;color:${isPending ? "var(--warning, #f59e0b)" : "var(--text-muted)"};">
+        ${isPending ? "⚠ 等待人工审核" : task.review_reason ? "审核原因 (已通过)" : "人工审核 (已通过)"}
+      </div>
+      ${task.review_reason ? `<div style="margin-top:6px;font-size:13px;line-height:1.7;color:var(--text-secondary);">${escapeHtml(task.review_reason)}</div>` : ""}
+      ${task.human_notes ? `<div style="margin-top:8px;font-size:12px;color:var(--text-muted);">人工方向: ${escapeHtml(task.human_notes)}</div>` : ""}
+      ${
+        isPending
+          ? `
+        <div style="margin-top:12px;">
+          <textarea id="reviewNotes" placeholder="可选：输入方向说明或修改建议..." style="width:100%;min-height:60px;padding:8px;border:1px solid var(--border, #333);border-radius:6px;background:var(--bg-secondary, #1a1a2e);color:var(--text-primary, #e0e0e0);font-size:13px;resize:vertical;"></textarea>
+          <div style="margin-top:8px;display:flex;gap:8px;">
+            <button class="btn btn-primary" data-action="approveTaskWithNotes" data-id="${escapeHtml(String(task.id ?? ""))}">通过 (回到队列)</button>
+            <button class="btn btn-secondary" data-action="skipTask" data-id="${escapeHtml(String(task.id ?? ""))}">跳过</button>
+          </div>
+        </div>
+      `
+          : ""
+      }
+    </div>`;
 }
 
 function renderStrategyNote(task) {
@@ -911,15 +943,8 @@ function renderEvaluationInfo(task) {
     ["预期复杂度", s.expectedComplexity],
     ["历史成功率", s.historicalSuccess],
   ];
-  const actions =
-    task.status === "pending_review"
-      ? `
-    <div style="margin-top:12px;display:flex;gap:8px;">
-      <button class="btn btn-primary" data-action="approveTask" data-id="${escapeHtml(String(task.id ?? ""))}">通过 (回到队列)</button>
-      <button class="btn btn-secondary" data-action="skipTask" data-id="${escapeHtml(String(task.id ?? ""))}">跳过</button>
-    </div>
-  `
-      : "";
+  // Review actions are now handled by renderReviewReason()
+  const actions = "";
   return `
     <h3 class="section-title">改前评估</h3>
     <div class="card" style="margin-bottom:20px;">
@@ -1348,6 +1373,25 @@ async function approveTask(id) {
   const res = await api(`/tasks/${id}/approve`, { method: "POST" });
   if (res !== null) {
     toast("任务已通过，已回到执行队列");
+    navigate();
+  }
+}
+
+async function approveTaskWithNotes(id) {
+  const textarea = document.getElementById("reviewNotes");
+  const notes = textarea ? textarea.value.trim() : "";
+  const body = notes ? { notes } : {};
+  const res = await api(`/tasks/${id}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (res !== null) {
+    toast(
+      notes
+        ? "任务已通过（含方向说明），已回到执行队列"
+        : "任务已通过，已回到执行队列",
+    );
     navigate();
   }
 }
@@ -1963,6 +2007,9 @@ function setupActionDelegation() {
         break;
       case "approveTask":
         approveTask(id);
+        break;
+      case "approveTaskWithNotes":
+        approveTaskWithNotes(id);
         break;
       case "skipTask":
         skipTask(id);

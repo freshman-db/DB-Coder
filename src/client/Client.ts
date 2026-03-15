@@ -100,8 +100,12 @@ export class Client {
     return this.get("/api/tasks/pending-review");
   }
 
-  async approveTask(id: string): Promise<{ ok: boolean; status: string }> {
-    return this.post(`/api/tasks/${id}/approve`);
+  async approveTask(
+    id: string,
+    notes?: string,
+  ): Promise<{ ok: boolean; status: string; notes: string | null }> {
+    const body = notes ? { notes } : undefined;
+    return this.post(`/api/tasks/${id}/approve`, body);
   }
 
   async skipTask(id: string): Promise<{ ok: boolean; status: string }> {

@@ -5,11 +5,19 @@ import { TASK_DESC_MAX_LENGTH } from "../types/constants.js";
 import { truncate } from "../utils/parse.js";
 import { log } from "../utils/logger.js";
 
+export interface EnqueueResult {
+  /** Task IDs that are immediately executable (status=queued) */
+  readonly queuedIds: readonly string[];
+  /** Task IDs that were created but sent to human review (status=pending_review) */
+  readonly pendingReviewIds: readonly string[];
+}
+
 export class TaskQueue {
   constructor(private store: TaskStore) {}
 
-  async enqueue(projectPath: string, plan: TaskPlan): Promise<string[]> {
-    const taskIds: string[] = [];
+  async enqueue(projectPath: string, plan: TaskPlan): Promise<EnqueueResult> {
+    const queuedIds: string[] = [];
+    const pendingReviewIds: string[] = [];
 
     // Sort by priority (P0 first) then by dependency order
     const sorted = topologicalSort(plan.tasks);
@@ -71,7 +79,6 @@ export class TaskQueue {
         dependsOn,
       );
       planIdToDbId.set(planTask.id, task.id);
-      taskIds.push(task.id);
 
       // Store subtasks + plan in the task record
       const updates: Record<string, unknown> = {
@@ -94,12 +101,26 @@ export class TaskQueue {
 
       await this.store.updateTask(task.id, updates);
 
+      // Human review gate: if brain flagged this task, set pending_review
+      if (planTask.requiresHumanReview) {
+        await this.store.updateTask(task.id, {
+          status: "pending_review",
+          review_reason: planTask.reviewReason ?? null,
+        });
+        pendingReviewIds.push(task.id);
+        log.info(
+          `Task set to pending_review: "${truncate(planTask.description, TASK_DESC_MAX_LENGTH)}" — ${planTask.reviewReason ?? "no reason"}`,
+        );
+      } else {
+        queuedIds.push(task.id);
+      }
+
       log.info(
         `Queued task [P${planTask.priority}]: ${truncate(planTask.description, TASK_DESC_MAX_LENGTH)}`,
       );
     }
 
-    return taskIds;
+    return { queuedIds, pendingReviewIds };
   }
 
   async getNext(projectPath: string): Promise<Task | null> {

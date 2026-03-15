@@ -125,6 +125,10 @@ ALTER TABLE task_logs ADD COLUMN IF NOT EXISTS details JSONB;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS parent_task_id UUID REFERENCES tasks(id) ON DELETE SET NULL;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS spawn_reason TEXT;
 
+-- Human review gate
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS review_reason TEXT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS human_notes TEXT;
+
 
 CREATE TABLE IF NOT EXISTS service_state (
   project_path TEXT NOT NULL,
@@ -176,6 +180,8 @@ type TaskUpdateInput = Partial<
     | "strategy_note"
     | "verification_plan"
     | "resource_request"
+    | "review_reason"
+    | "human_notes"
   >
 > & { evaluation_score?: EvaluationScore; evaluation_reasoning?: string };
 const TASK_UPDATE_FIELDS: Array<keyof TaskUpdateInput> = [
@@ -194,6 +200,8 @@ const TASK_UPDATE_FIELDS: Array<keyof TaskUpdateInput> = [
   "strategy_note",
   "verification_plan",
   "resource_request",
+  "review_reason",
+  "human_notes",
 ];
 const TASK_JSONB_FIELDS = new Set<keyof TaskUpdateInput>([
   "plan",
@@ -410,7 +418,7 @@ export class TaskStore {
       SELECT *, similarity(task_description, ${description}) AS sim
       FROM tasks
       WHERE project_path = ${projectPath}
-        AND status IN ('queued', 'active')
+        AND status IN ('queued', 'active', 'pending_review')
         AND similarity(task_description, ${description}) > 0.4
       ORDER BY sim DESC
       LIMIT 1

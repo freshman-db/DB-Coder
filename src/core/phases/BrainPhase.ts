@@ -49,6 +49,8 @@ export interface BrainDecision {
   extra_tasks?: Array<{
     directive: string;
     resource_request: ResourceRequest;
+    requires_human_review?: boolean;
+    review_reason?: string;
   }>;
 }
 
@@ -196,8 +198,12 @@ export class BrainPhase {
     extraDirectiveTasks?: Array<{
       directive: string;
       resourceRequest: ResourceRequest;
+      requiresHumanReview?: boolean;
+      reviewReason?: string;
     }>;
     isBrainDriven?: boolean;
+    requiresHumanReview?: boolean;
+    reviewReason?: string;
   }> {
     // Budget gate: if daily budget exhausted, don't spend on brain call
     const dailyCost = await this.taskStore.getDailyCost();
@@ -224,6 +230,7 @@ ${context}
 - 为工人写完整的执行指令（directive）
 - 申请合理的资源（预算、超时）
 - 说明怎么验证任务做对了
+- 如果任务有风险、方向不确定、或涉及架构性变更，标记 requires_human_review=true 并在 review_reason 中说明原因
 
 自由探索代码库，用你自己的判断力。不要自我设限。
 你可以使用所有已安装的工具和插件，但以下操作被禁用：修改文件（Edit/Write/NotebookEdit）、创建任务、重排队列。
@@ -267,6 +274,16 @@ ${context}
               },
               priority: { type: "number" },
               complexity: { type: "string" },
+              requires_human_review: {
+                type: "boolean",
+                description:
+                  "Set true if task is risky, direction is unclear, or involves architectural changes that need human confirmation",
+              },
+              review_reason: {
+                type: "string",
+                description:
+                  "Why this task needs human review (required when requires_human_review=true)",
+              },
             },
             required: ["directive", "summary", "resource_request"],
           },
@@ -363,6 +380,10 @@ ${context}
       .map((t) => ({
         directive: String(t.directive).slice(0, DIRECTIVE_MAX_CHARS),
         resourceRequest: parseResourceRequest(t.resource_request),
+        requiresHumanReview:
+          t.requires_human_review === true ? true : undefined,
+        reviewReason:
+          typeof t.review_reason === "string" ? t.review_reason : undefined,
       }));
 
     return {
@@ -390,6 +411,12 @@ ${context}
       resourceRequest,
       extraDirectiveTasks:
         extraDirectiveTasks.length > 0 ? extraDirectiveTasks : undefined,
+      requiresHumanReview:
+        first.requires_human_review === true ? true : undefined,
+      reviewReason:
+        typeof first.review_reason === "string"
+          ? first.review_reason
+          : undefined,
     };
   }
 
@@ -411,6 +438,20 @@ ${context}
         `Queued tasks (${queuedTasks.length}):\n${queuedTasks
           .slice(0, 5)
           .map((t) => `- [P${t.priority}] ${t.task_description}`)
+          .join("\n")}`,
+      );
+    }
+
+    // Pending review tasks (do not recreate these — waiting for human approval)
+    const pendingReviewTasks =
+      await this.taskStore.getPendingReviewTasks(projectPath);
+    if (pendingReviewTasks.length > 0) {
+      parts.push(
+        `Pending human review (DO NOT recreate these):\n${pendingReviewTasks
+          .map(
+            (t) =>
+              `- [P${t.priority}] ${t.task_description}${t.review_reason ? ` — reason: ${t.review_reason}` : ""}`,
+          )
           .join("\n")}`,
       );
     }

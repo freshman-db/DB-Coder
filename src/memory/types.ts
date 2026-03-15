@@ -67,6 +67,9 @@ export interface Task {
   strategy_note?: string | null;
   verification_plan?: string | null;
   resource_request?: ResourceRequest | null;
+  // Human review gate fields
+  review_reason?: string | null;
+  human_notes?: string | null;
 }
 
 export interface ResourceRequest {

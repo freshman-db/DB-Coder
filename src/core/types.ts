@@ -28,6 +28,9 @@ export interface PlanTask {
   resourceRequest?: { budget_usd: number; timeout_s: number; model?: string };
   /** @deprecated Brain-driven is now always on. Kept for queue-stored task compat. */
   isBrainDriven?: boolean;
+  // Human review gate — brain flags risky tasks for human approval
+  requiresHumanReview?: boolean;
+  reviewReason?: string;
 }
 
 export interface PlanSubTask {

@@ -560,7 +560,7 @@ route("DELETE", "/api/tasks/:id", async (_req, res, ctx, params) => {
   json(res, { ok: true });
 });
 
-route("POST", "/api/tasks/:id/approve", async (_req, res, ctx, params) => {
+route("POST", "/api/tasks/:id/approve", async (req, res, ctx, params) => {
   if (!validateUuid(params.id)) {
     json(res, { error: "Invalid task ID format." }, 400);
     return;
@@ -574,8 +574,35 @@ route("POST", "/api/tasks/:id/approve", async (_req, res, ctx, params) => {
     json(res, { error: "Task is not pending review" }, 400);
     return;
   }
-  await ctx.taskStore.updateTask(params.id, { status: "queued" });
-  json(res, { ok: true, status: "queued" });
+
+  // Read optional notes from request body
+  const body = await readBody(req);
+  const notes =
+    isRecord(body) && typeof body.notes === "string" && body.notes.trim()
+      ? body.notes.trim()
+      : null;
+
+  const updates: Record<string, unknown> = { status: "queued" };
+  if (notes) {
+    updates.human_notes = notes;
+    // Prepend human direction to directive column so the worker sees it
+    const currentDirective = task.directive ?? "";
+    const newDirective = `[人工方向]: ${notes}\n\n${currentDirective}`;
+    updates.directive = newDirective;
+    // Also update plan JSONB directive — queue pickup reads plan.directive first
+    if (
+      isRecord(task.plan) &&
+      typeof (task.plan as Record<string, unknown>).directive === "string"
+    ) {
+      const updatedPlan = {
+        ...(task.plan as Record<string, unknown>),
+        directive: newDirective,
+      };
+      updates.plan = updatedPlan;
+    }
+  }
+  await ctx.taskStore.updateTask(params.id, updates);
+  json(res, { ok: true, status: "queued", notes });
 });
 
 route("POST", "/api/tasks/:id/skip", async (_req, res, ctx, params) => {
